@@ -111,7 +111,7 @@ conversas: dict[int, dict] = {}
 ausencia: dict[int, dict] = {}
 historico_claude: dict[int, list] = {}  # histórico de conversa por usuário para API Claude
 
-GATILHOS_NOME = re.compile(r"\bshell\b|\bengenheiro\b", re.IGNORECASE)
+GATILHOS_NOME = re.compile(r"\bshell\b|\bengenheir\w*", re.IGNORECASE)
 
 CANAL_REGRAS_ID = 1487599083869704326
 CANAL_REGRAS = f"<#{CANAL_REGRAS_ID}>"
