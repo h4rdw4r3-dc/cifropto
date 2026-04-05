@@ -6,10 +6,16 @@ import os
 import io
 import xml.etree.ElementTree as ET
 import random
-import anthropic
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
+
+try:
+    import anthropic
+    ANTHROPIC_DISPONIVEL = True
+except ImportError:
+    ANTHROPIC_DISPONIVEL = False
+    print("[AVISO] Pacote anthropic não encontrado. Respostas via Claude desativadas.")
 
 def agora_utc():
     return datetime.now(timezone.utc)
@@ -747,7 +753,7 @@ SYSTEM_ACAO = (
 
 async def confirmar_acao(descricao: str, fallback: str) -> str:
     """Gera confirmação de ação de moderação via Claude. Usa fallback se API indisponível."""
-    if not ANTHROPIC_API_KEY:
+    if not ANTHROPIC_DISPONIVEL or not ANTHROPIC_API_KEY:
         return fallback
     try:
         ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
@@ -764,7 +770,7 @@ async def confirmar_acao(descricao: str, fallback: str) -> str:
 
 
 async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=None, canal_id: int = None) -> str:
-    if not ANTHROPIC_API_KEY:
+    if not ANTHROPIC_DISPONIVEL or not ANTHROPIC_API_KEY:
         return random.choice(["Não sei disso.", "Sem resposta pra isso.", "Pergunta pra um mod."])
 
     hist = historico_claude.setdefault(user_id, [])
@@ -1164,10 +1170,6 @@ INTENCOES = {
         "voltei", "to de volta", "tô de volta", "retornei", "estou de volta",
         "pode me chamar", "presente", "voltar",
     ],
-    "limpar": [
-        "limpar", "limpa", "apagar mensagens", "apaga mensagens", "deletar mensagens",
-        "limpa o canal", "limpa aqui", "apaga aqui", "clear",
-    ],
     "regras": ["mostra as regras", "exibe as regras", "quais as regras", "regras"],
     "ajuda":  ["ajuda", "help", "comandos", "o que você faz", "o que voce faz"],
     "adicionar": ["adiciona ", "adicionar ", "bloqueia ", "bloquear ", "filtra ", "filtrar "],
@@ -1500,43 +1502,6 @@ async def processar_ordem(message: discord.Message) -> bool:
         else:
             await message.channel.send("Você não estava marcado como ausente.")
 
-    # ── limpar [quantidade] mensagens ─────────────────────────────────────────
-    elif cmd in ("limpar", "clear"):
-        quantidade = extrair_quantidade(resto)
-        if quantidade is None:
-            await message.channel.send(
-                "Ei engenheiro, me diz quantas mensagens apagar. "
-                "Pode ser número ou por extenso, tipo: limpar cinquenta."
-            )
-            return True
-        if quantidade < 1:
-            await message.channel.send("Ei engenheiro, a quantidade precisa ser pelo menos 1.")
-            return True
-        if quantidade > 100:
-            await message.channel.send(
-                "Ei engenheiro, o Discord permite apagar no máximo cem mensagens por vez."
-            )
-            return True
-        try:
-            # +1 para incluir a própria mensagem de comando
-            apagadas = await message.channel.purge(limit=quantidade + 1)
-            total = len(apagadas) - 1  # desconta a mensagem de comando
-            confirmacao = await message.channel.send(
-                f"Feito, engenheiro! {numero_por_extenso(total).capitalize()} "
-                f"{'mensagem apagada' if total == 1 else 'mensagens apagadas'} deste canal."
-            )
-            # Auto-apagar a confirmação após 5 segundos para não poluir
-            await discord.utils.sleep_until(agora_utc() + timedelta(seconds=5))
-            try:
-                await confirmacao.delete()
-            except Exception:
-                pass
-        except discord.Forbidden:
-            await message.channel.send(
-                "Ei engenheiro, não tenho permissão para apagar mensagens neste canal."
-            )
-        except Exception as e:
-            await message.channel.send(f"Não foi possível limpar o canal: {e}")
 
     # ── ajuda ──────────────────────────────────────────────────────────────────
     elif cmd in ("ajuda", "help", "comandos"):
@@ -1545,7 +1510,7 @@ async def processar_ordem(message: discord.Message) -> bool:
             "Para desfazer diga dessilenciar. Para banir diga banir seguido do usuário, duração e motivo. "
             "Para revogar um banimento diga desbanir. Para expulsar temporariamente diga expulsar. "
             "Para enviar um aviso público diga avisar e mencione quem. Para chamar a moderação diga chamar mod. "
-            "Para apagar mensagens diga limpar e a quantidade. Para ativar ausência diga ausente com duração e motivo, "
+            "Para ativar ausência diga ausente com duração e motivo, "
             "e para voltar diga voltei. Para adicionar uma palavra ao filtro diga adicionar seguido da palavra e a categoria. "
             "Para remover diga remover seguido da palavra. Para ver as regras diga regras."
         )
