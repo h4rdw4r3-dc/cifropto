@@ -3,6 +3,7 @@ import re
 import aiohttp
 import json
 import os
+import io
 import xml.etree.ElementTree as ET
 import random
 import anthropic
@@ -667,21 +668,41 @@ async def processar_links(message: discord.Message):
 # ── Auditoria de ofensas ──────────────────────────────────────────────────────
 
 async def enviar_auditoria(guild: discord.Guild, membro: discord.Member, violacoes: list[str], msg_id: int):
-    """Envia log da ofensa apagada para o canal de auditoria."""
+    """Envia log da ofensa apagada para o canal de auditoria como arquivo .txt."""
     canal_audit = guild.get_channel(CANAL_AUDITORIA_ID)
     if not canal_audit:
         print(f"[AUDITORIA] Canal {CANAL_AUDITORIA_ID} não encontrado.")
         return
 
-    # Horário de Brasília (UTC-3) com AM/PM
     brasilia = timezone(timedelta(hours=-3))
-    horario = datetime.now(brasilia).strftime("%I:%M:%S %p")
-    ofensa_desc = ", ".join(violacoes)
+    agora = datetime.now(brasilia)
+    data_emissao = agora.strftime("%d/%m/%Y %H:%M:%S")
+    count = infracoes.get(membro.id, 0)
 
+    linhas_violacoes = []
+    for v in violacoes:
+        partes = v.split(", ", 1)
+        linhas_violacoes.append(f"  - {partes[0]}" + (f" ({partes[1]})" if len(partes) > 1 else ""))
+    violacoes_txt = "\n".join(linhas_violacoes)
+
+    conteudo = (
+        f"REGISTRO DE AUDITORIA DE TEXTO\n"
+        f"Emissão: {data_emissao}\n"
+        f"{'─' * 40}\n\n"
+        f"MEMBRO:       {membro.display_name}\n"
+        f"ID:           {membro.id}\n"
+        f"INFRAÇÃO Nº:  {count}\n\n"
+        f"OFENSA(S) DETECTADA(S):\n{violacoes_txt}\n\n"
+        f"AÇÃO TOMADA:  Mensagem removida (ID {msg_id})\n"
+        f"{'─' * 40}\n"
+        f"Registrado automaticamente pelo sistema de moderação.\n"
+    )
+
+    arquivo = io.BytesIO(conteudo.encode("utf-8"))
+    nome_arquivo = f"auditoria_{membro.id}_{agora.strftime('%Y%m%d_%H%M%S')}.txt"
     await canal_audit.send(
-        f"Mensagem de {membro.display_name} apagada por conter a seguinte ofensa: {ofensa_desc}. "
-        f"Sua identificação é {membro.id}. "
-        f"O horário atual dessa auditoria de texto é {horario}."
+        f"Ofensa detectada — {membro.display_name} — infração nº {count}",
+        file=discord.File(arquivo, filename=nome_arquivo)
     )
 
 
@@ -711,6 +732,31 @@ SYSTEM_CLAUDE = (
     "Quando não souber algo, admite na lata sem inventar. "
     "Você não é um bot amigável, é um sistema de moderação que tolera conversas."
 )
+
+SYSTEM_ACAO = (
+    "Você é o sistema de moderação de um servidor Discord brasileiro. "
+    "Acabei de executar uma ação de moderação. Gere UMA frase curta confirmando o que foi feito, "
+    "de forma direta e seca, como um brasileiro jovem falaria. "
+    "Sem emojis, sem asteriscos, sem markdown. Inclua os dados exatos que receber no contexto."
+)
+
+async def confirmar_acao(descricao: str, fallback: str) -> str:
+    """Gera confirmação de ação de moderação via Claude. Usa fallback se API indisponível."""
+    if not ANTHROPIC_API_KEY:
+        return fallback
+    try:
+        ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+        resp = await ac.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=80,
+            system=SYSTEM_ACAO,
+            messages=[{"role": "user", "content": descricao}],
+        )
+        return resp.content[0].text.strip()
+    except Exception as e:
+        print(f"[Claude Ação] Erro: {e}")
+        return fallback
+
 
 async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=None) -> str:
     if not ANTHROPIC_API_KEY:
@@ -1239,10 +1285,12 @@ async def processar_ordem(message: discord.Message) -> bool:
             try:
                 ate = agora_utc() + timedelta(minutes=minutos)
                 await alvo.timeout(ate, reason="Ordem do proprietário.")
-                await message.channel.send(
-                    f"Feito, engenheiro! {alvo.mention} foi silenciado por {numero_por_extenso(minutos)} "
-                    f"{'minuto' if minutos == 1 else 'minutos'}."
+                dur = f"{numero_por_extenso(minutos)} {'minuto' if minutos == 1 else 'minutos'}"
+                txt = await confirmar_acao(
+                    f"Silenciei {alvo.display_name} ({alvo.mention}) por {dur}.",
+                    f"{alvo.mention} silenciado por {dur}."
                 )
+                await message.channel.send(txt)
             except Exception as e:
                 await message.channel.send(f"Não foi possível silenciar {alvo.mention}: {e}")
 
@@ -1254,7 +1302,11 @@ async def processar_ordem(message: discord.Message) -> bool:
         for alvo in alvos:
             try:
                 await alvo.timeout(None, reason="Ordem do proprietário.")
-                await message.channel.send(f"Feito! O silenciamento de {alvo.mention} foi removido.")
+                txt = await confirmar_acao(
+                    f"Removi o silenciamento de {alvo.display_name} ({alvo.mention}).",
+                    f"Silenciamento de {alvo.mention} removido."
+                )
+                await message.channel.send(txt)
             except Exception as e:
                 await message.channel.send(f"Não foi possível dessilenciar {alvo.mention}: {e}")
 
@@ -1286,18 +1338,18 @@ async def processar_ordem(message: discord.Message) -> bool:
             try:
                 if duracao:
                     dur_texto = formatar_duracao(duracao)
-                    # Discord não tem ban temporário nativo; usamos timeout + ban ou apenas ban com nota
                     await guild.ban(discord.Object(id=uid), reason=f"{motivo_final} | Duração: {dur_texto}", delete_message_days=0)
-                    await message.channel.send(
-                        f"Feito, engenheiro! **{membro_nome}** ({mencao}) foi banido por {dur_texto}. "
-                        f"Motivo: {motivo_final}"
+                    txt = await confirmar_acao(
+                        f"Bani {membro_nome} ({mencao}) por {dur_texto}. Motivo: {motivo_final}.",
+                        f"{mencao} banido por {dur_texto}. Motivo: {motivo_final}"
                     )
                 else:
                     await guild.ban(discord.Object(id=uid), reason=motivo_final, delete_message_days=0)
-                    await message.channel.send(
-                        f"Feito, engenheiro! **{membro_nome}** ({mencao}) foi banido permanentemente. "
-                        f"Motivo: {motivo_final}"
+                    txt = await confirmar_acao(
+                        f"Bani {membro_nome} ({mencao}) permanentemente. Motivo: {motivo_final}.",
+                        f"{mencao} banido permanentemente. Motivo: {motivo_final}"
                     )
+                await message.channel.send(txt)
             except Exception as e:
                 await message.channel.send(f"Não foi possível banir **{membro_nome}**: {e}")
 
@@ -1315,15 +1367,15 @@ async def processar_ordem(message: discord.Message) -> bool:
                 ban_entry = await guild.fetch_ban(discord.Object(id=uid))
                 nome = ban_entry.user.name if ban_entry else f"ID {uid}"
                 await guild.unban(discord.Object(id=uid), reason="Banimento revogado pelo proprietário.")
-                await message.channel.send(
-                    f"Pronto, engenheiro! O banimento de **{nome}** (`{uid}`) foi revogado com sucesso."
+                txt = await confirmar_acao(
+                    f"Revoquei o banimento de {nome} (ID {uid}).",
+                    f"Banimento de {nome} revogado."
                 )
+                await message.channel.send(txt)
             except discord.NotFound:
-                await message.channel.send(
-                    f"Ei engenheiro, o ID `{uid}` não está na lista de banimentos deste servidor."
-                )
+                await message.channel.send(f"ID {uid} não está na lista de banimentos.")
             except Exception as e:
-                await message.channel.send(f"Não foi possível desbanir `{uid}`: {e}")
+                await message.channel.send(f"Não foi possível desbanir {uid}: {e}")
 
     # ── expulsar @user motivo ──────────────────────────────────────────────────
     elif cmd in ("expulsar", "kick"):
@@ -1334,9 +1386,11 @@ async def processar_ordem(message: discord.Message) -> bool:
         for alvo in alvos:
             try:
                 await alvo.kick(reason=motivo)
-                await message.channel.send(
-                    f"Feito, engenheiro! {alvo.mention} foi expulso do servidor. Motivo: {motivo}"
+                txt = await confirmar_acao(
+                    f"Expulsei {alvo.display_name} ({alvo.mention}) do servidor. Motivo: {motivo}.",
+                    f"{alvo.mention} expulso. Motivo: {motivo}"
                 )
+                await message.channel.send(txt)
             except Exception as e:
                 await message.channel.send(f"Não foi possível expulsar {alvo.mention}: {e}")
 
