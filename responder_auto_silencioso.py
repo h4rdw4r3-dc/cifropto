@@ -507,17 +507,13 @@ def limpar_texto_para_analise(mensagem: str) -> str:
     return texto.strip()
 
 
-def detectar_violacoes(mensagem: str) -> list[str]:
+def detectar_violacoes(mensagem: str) -> list[tuple[str, str]]:
     """
-    Detecta violações. Palavrões soltos (sem direcionamento) são permitidos.
-    Ofensas direcionadas e discriminação sempre são punidas.
+    Detecta violações. Retorna lista de (descricao, palavra_exata).
     """
     violacoes = []
 
-    # Analisa só o texto puro, sem URLs ou emojis que gerem falsos positivos
     texto_limpo = limpar_texto_para_analise(mensagem)
-
-    # Mensagem vazia após limpeza (ex: só GIF/sticker/link) — nada a verificar
     if not texto_limpo:
         return violacoes
 
@@ -531,14 +527,14 @@ def detectar_violacoes(mensagem: str) -> list[str]:
             else contem_fuzzy(msg_norm, palavra)
         )
         if hit:
-            violacoes.append(f"vocabulário vulgar, regra número 5 dos canais em {CANAL_REGRAS}")
+            violacoes.append((f"vocabulário vulgar, regra número 5 dos canais em {CANAL_REGRAS}", palavra))
             break
 
     # Palavrões compostos + customizados compostos
     if not violacoes:
         for sub in COMPOSTOS_VULGARES + palavras_custom["compostos"]:
             if normalizar(sub) in msg_norm:
-                violacoes.append(f"vocabulário vulgar, regra número 5 dos canais em {CANAL_REGRAS}")
+                violacoes.append((f"vocabulário vulgar, regra número 5 dos canais em {CANAL_REGRAS}", sub))
                 break
 
     # Conteúdo sexual: sempre proibido
@@ -549,18 +545,19 @@ def detectar_violacoes(mensagem: str) -> list[str]:
             else contem_fuzzy(msg_norm, termo)
         )
         if hit:
-            violacoes.append(f"conteúdo adulto ou explícito, regra número 2 dos canais em {CANAL_REGRAS}")
+            violacoes.append((f"conteúdo adulto ou explícito, regra número 2 dos canais em {CANAL_REGRAS}", termo))
             break
 
     # Discriminação: tolerância estrita + customizadas
     for termo in DISCRIMINACAO + palavras_custom["discriminacao"]:
         if contem_fuzzy_estrito(msg_norm, termo):
-            violacoes.append(f"discriminação ou bullying, regra número 4 dos canais em {CANAL_REGRAS}")
+            violacoes.append((f"discriminação ou bullying, regra número 4 dos canais em {CANAL_REGRAS}", termo))
             break
 
-    # Convites não autorizados (verifica na mensagem original para pegar URLs)
+    # Convites não autorizados
     if DISCORD_INVITE.search(mensagem):
-        violacoes.append(f"divulgação de servidor sem permissão, regra número 3 dos canais em {CANAL_REGRAS}")
+        m = DISCORD_INVITE.search(mensagem)
+        violacoes.append((f"divulgação de servidor sem permissão, regra número 3 dos canais em {CANAL_REGRAS}", m.group(0)))
 
     return violacoes
 
@@ -680,28 +677,34 @@ async def enviar_auditoria(guild: discord.Guild, membro: discord.Member, violaco
     count = infracoes.get(membro.id, 0)
 
     linhas_violacoes = []
-    for v in violacoes:
-        partes = v.split(", ", 1)
-        linhas_violacoes.append(f"  - {partes[0]}" + (f" ({partes[1]})" if len(partes) > 1 else ""))
+    for desc_v, palavra in violacoes:
+        partes = desc_v.split(", ", 1)
+        categoria = partes[0]
+        ref = partes[1] if len(partes) > 1 else ""
+        linha = f"  - {categoria}"
+        if ref:
+            linha += f" ({ref})"
+        linha += f"\n    Palavra: \"{palavra}\""
+        linhas_violacoes.append(linha)
     violacoes_txt = "\n".join(linhas_violacoes)
 
     conteudo = (
         f"REGISTRO DE AUDITORIA DE TEXTO\n"
-        f"Emissão: {data_emissao}\n"
-        f"{'─' * 40}\n\n"
+        f"Emissao: {data_emissao}\n"
+        f"{'-' * 40}\n\n"
         f"MEMBRO:       {membro.display_name}\n"
         f"ID:           {membro.id}\n"
-        f"INFRAÇÃO Nº:  {count}\n\n"
+        f"INFRACAO N:   {count}\n\n"
         f"OFENSA(S) DETECTADA(S):\n{violacoes_txt}\n\n"
-        f"AÇÃO TOMADA:  Mensagem removida (ID {msg_id})\n"
-        f"{'─' * 40}\n"
-        f"Registrado automaticamente pelo sistema de moderação.\n"
+        f"ACAO TOMADA:  Mensagem removida (ID {msg_id})\n"
+        f"{'-' * 40}\n"
+        f"Registrado automaticamente pelo sistema de moderacao.\n"
     )
 
     arquivo = io.BytesIO(conteudo.encode("utf-8"))
     nome_arquivo = f"auditoria_{membro.id}_{agora.strftime('%Y%m%d_%H%M%S')}.txt"
     await canal_audit.send(
-        f"Ofensa detectada — {membro.display_name} — infração nº {count}",
+        f"Ofensa detectada: {membro.display_name}, infracao n {count}",
         file=discord.File(arquivo, filename=nome_arquivo)
     )
 
@@ -1631,7 +1634,7 @@ async def on_message(message: discord.Message):
 
         violacoes = detectar_violacoes(conteudo)
         if violacoes:
-            lista = ", ".join(violacoes)
+            lista = ", ".join(desc for desc, _ in violacoes)
             try:
                 await message.author.send(
                     f"Ciente, {autor}. Você usou linguagem que normalmente seria punida ({lista}). "
@@ -1666,13 +1669,13 @@ async def on_message(message: discord.Message):
         infracoes[message.author.id] += 1
         count = infracoes[message.author.id]
 
-        categoria_atual = violacoes[0].split(",")[0].strip()
+        categoria_atual = violacoes[0][0].split(",")[0].strip()
         categoria_anterior = ultimo_motivo.get(message.author.id, "")
         mesmo_motivo = categoria_anterior and categoria_atual == categoria_anterior
         ultimo_motivo[message.author.id] = categoria_atual
         salvar_dados()
 
-        print(f"[INFRAÇÃO {count}/3] {autor}: {violacoes}")
+        print(f"[INFRAÇÃO {count}/3] {autor}: {[(d, p) for d, p in violacoes]}")
 
         msg_id = message.id
         try:
@@ -1690,14 +1693,15 @@ async def on_message(message: discord.Message):
                 )
         elif count == 1:
             if len(violacoes) == 1:
-                partes = violacoes[0].split(", ", 1)
+                desc_v, _ = violacoes[0]
+                partes = desc_v.split(", ", 1)
                 desc = partes[0]
                 ref = partes[1] if len(partes) > 1 else CANAL_REGRAS
                 corpo = f"por se referir de {desc} que consta na {ref}"
             else:
                 itens = []
-                for v in violacoes:
-                    partes = v.split(", ", 1)
+                for desc_v, _ in violacoes:
+                    partes = desc_v.split(", ", 1)
                     num_m = re.search(r'número (\d+)', partes[1]) if len(partes) > 1 else None
                     num = num_m.group(1) if num_m else "?"
                     itens.append(f"{partes[0]} (regra número {num})")
