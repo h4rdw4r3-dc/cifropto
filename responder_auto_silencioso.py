@@ -758,7 +758,7 @@ async def confirmar_acao(descricao: str, fallback: str) -> str:
     try:
         ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
         resp = await ac.messages.create(
-            model="claude-haiku-4-5",
+            model="claude-haiku-4-5-20251001",
             max_tokens=80,
             system=SYSTEM_ACAO,
             messages=[{"role": "user", "content": descricao}],
@@ -788,7 +788,7 @@ async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=No
     try:
         ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
         resposta = await ac.messages.create(
-            model="claude-haiku-4-5",
+            model="claude-haiku-4-5-20251001",
             max_tokens=150,
             system=SYSTEM_CLAUDE,
             messages=hist,
@@ -1623,13 +1623,14 @@ async def on_message(message: discord.Message):
             await message.reply(resposta)
         return
 
-    # ── Equipe de mod: comandos via menção ou "engenheiro", sujeita a punições ─
-    if eh_mod and mencionado:
-        tratado = await processar_ordem(message)
-        if not tratado:
-            resposta = await resposta_inicial(conteudo, autor, user_id, message.guild, message.author, message.channel.id)
-            await message.reply(resposta)
-        return
+    # ── Equipe de mod: isenta de punições, comandos via menção ───────────────────
+    if eh_mod:
+        if mencionado:
+            tratado = await processar_ordem(message)
+            if not tratado:
+                resposta = await resposta_inicial(conteudo, autor, user_id, message.guild, message.author, message.channel.id)
+                await message.reply(resposta)
+        return  # mods nunca são punidos, independente do que disserem
 
     # ── Detectar flood (membros comuns) ───────────────────────────────────────
     if detectar_flood(message.author.id, conteudo):
