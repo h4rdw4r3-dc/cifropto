@@ -115,7 +115,7 @@ SUBSTITUICOES = str.maketrans({
     'ç': 'c',
 })
 
-# ── Palavrões e xingamentos gerais (permitidos para desabafo, sem direcionamento ofensivo) ──
+# ── Palavrões e xingamentos gerais ───────────────────────────────────────────
 PALAVRAS_VULGARES = [
     "porra", "caralho", "merda", "foda", "fodase", "fodasse",
     "bosta", "bunda", "cu", "cuzao", "culhao", "arrombado",
@@ -125,11 +125,18 @@ PALAVRAS_VULGARES = [
     "fdp", "vsf", "vtc", "fds", "krl", "pqp",
     "vai se foder", "vai tomar no", "tomar no cu",
     "vai a merda", "vai pro inferno",
+    "rato no cu", "ratomanocu", "vai tomar no cu",
+]
+
+# Substrings vulgares em palavras compostas (sem verificação de limite de palavra)
+COMPOSTOS_VULGARES = [
+    "nocu", "nacu", "noculo", "paunocu", "fodase", "vtnc", "vsfd",
 ]
 
 # ── Sexual / +18 ─────────────────────────────────────────────────────────────
 CONTEUDO_SEXUAL = [
     "buceta", "xoxota", "xana", "chota", "crica", "fenda",
+    "shereka", "xereca", "xerereca", "xoroca", "chereca",  # variantes vulgares
     "pica", "picao", "piroca", "piroco", "piru", "rola",
     "penis", "vagina", "clitoris", "glande",
     "boquete", "chupada", "felacao", "siririca",
@@ -354,18 +361,23 @@ def detectar_violacoes(mensagem: str) -> list[str]:
         return violacoes
 
     msg_norm = normalizar(texto_limpo)
-    direcionado = eh_xingamento_direcionado(mensagem)
 
-    # Palavrões só viram infração se direcionados a alguém
-    if direcionado:
-        for palavra in PALAVRAS_VULGARES:
-            hit = (
-                contem_ambigua_com_contexto(msg_norm, palavra)
-                if palavra in AMBIGUAS
-                else contem_fuzzy(msg_norm, palavra)
-            )
-            if hit:
-                violacoes.append(f"vocabulário vulgar direcionado, regra número 5 dos canais em {CANAL_REGRAS}")
+    # Palavrões: sempre punidos
+    for palavra in PALAVRAS_VULGARES:
+        hit = (
+            contem_ambigua_com_contexto(msg_norm, palavra)
+            if palavra in AMBIGUAS
+            else contem_fuzzy(msg_norm, palavra)
+        )
+        if hit:
+            violacoes.append(f"vocabulário vulgar, regra número 5 dos canais em {CANAL_REGRAS}")
+            break
+
+    # Palavrões compostos (ex: "ratomanocu") — sem verificação de limite de palavra
+    if not violacoes:
+        for sub in COMPOSTOS_VULGARES:
+            if normalizar(sub) in msg_norm:
+                violacoes.append(f"vocabulário vulgar, regra número 5 dos canais em {CANAL_REGRAS}")
                 break
 
     # Conteúdo sexual: sempre proibido
