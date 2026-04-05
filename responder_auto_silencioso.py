@@ -33,6 +33,8 @@ CARGOS_SUPERIORES_IDS = {1487599082934636628, 1487599082934636627}
 # ID de usuário com nível de superior (tratado como cargo superior)
 USUARIOS_SUPERIORES_IDS = {1375560046930563306}
 
+# IDs de donos absolutos — maior hierarquia, podem apagar canais/cargos pelo bot
+DONOS_ABSOLUTOS_IDS = {1487591389653897306, 1321848653878661172}
 CONTAS_TESTE = set()  # sem contas de teste no momento
 CARGO_EQUIPE_MOD_ID = 1487859369008697556  # equipe de moderação com acesso a comandos de mod
 
@@ -1315,7 +1317,10 @@ def detectar_intencao(conteudo: str) -> tuple[str, str]:
         for gatilho in gatilhos:
             if gatilho in msg:
                 return cmd, conteudo
-    texto = conteudo.strip().lstrip("!/.")
+    # Remove menção do bot e extrai primeiro token como comando
+    texto = re.sub(r'<@!?\d+>\s*', '', conteudo).strip()
+    # Ignora prefixos de outros bots (ex: 7!, !, /, .)
+    texto = re.sub(r'^[0-9a-zA-Z]*[!/.]\s*', '', texto).strip()
     partes = texto.split(None, 1)
     cmd = partes[0].lower() if partes else ""
     return cmd, conteudo
@@ -1578,43 +1583,120 @@ async def processar_ordem(message: discord.Message) -> bool:
                 linhas.append(f"{nomes[cat]}: {', '.join(lista)}")
         await message.channel.send("Palavras customizadas:\n" + "\n".join(linhas))
 
-    # ── ausente / afk [motivo] ─────────────────────────────────────────────────
+    # ── ausente / afk [motivo] — só ativa para o próprio autor ────────────────
     elif cmd in ("ausente", "afk"):
-        # Remove o comando da string para extrair só o motivo
-        texto_sem_cmd = re.sub(r'<@!?\d+>\s*', '', conteudo).strip()
-        texto_sem_cmd = re.sub(r'^(ausente|afk)\s*', '', texto_sem_cmd, flags=re.IGNORECASE).strip()
+        # Ignora se "afk" aparece só no meio de uma frase (ex: "fez o afk")
+        texto_limpo = re.sub(r'<@!?\d+>\s*', '', conteudo).strip()
+        texto_limpo_lower = texto_limpo.lower()
+        # Verifica se o comando é a primeira palavra real da mensagem
+        primeira_palavra = texto_limpo_lower.split()[0] if texto_limpo_lower.split() else ""
+        if primeira_palavra not in ("ausente", "afk"):
+            return False
+
+        texto_sem_cmd = re.sub(r'^(ausente|afk)\s*', '', texto_limpo, flags=re.IGNORECASE).strip()
         minutos, motivo = parsear_ausencia(texto_sem_cmd) if texto_sem_cmd else (0, "")
         ate = agora_utc() + timedelta(minutes=minutos) if minutos else None
         ausencia[message.author.id] = {"ate": ate, "motivo": motivo}
 
-        partes = ["Modo ausente ativado"]
-        if motivo:
-            partes.append(f"motivo: {motivo}")
-        if minutos:
-            partes.append(f"duração: {minutos} minuto{'s' if minutos != 1 else ''}")
+        if motivo and minutos:
+            confirmacao = f"Modo ausente ativado — {motivo}, por {minutos} minuto{'s' if minutos != 1 else ''}."
+        elif motivo:
+            confirmacao = f"Modo ausente ativado — {motivo}. Mande qualquer mensagem para desativar."
+        elif minutos:
+            confirmacao = f"Modo ausente ativado por {minutos} minuto{'s' if minutos != 1 else ''}."
         else:
-            partes.append("duração: indefinida, mande qualquer mensagem para desativar")
-        await message.channel.send(". ".join(partes) + ".")
+            confirmacao = "Modo ausente ativado. Mande qualquer mensagem para desativar."
+        await message.channel.send(confirmacao)
 
     # ── voltar ─────────────────────────────────────────────────────────────────
     elif cmd in ("voltar", "voltei", "retornei", "presente"):
         if message.author.id in ausencia:
             del ausencia[message.author.id]
-            await message.channel.send("Modo ausente desativado. Bem-vindo de volta, engenheiro!")
+            await message.channel.send("Modo ausente desativado. Bem-vindo de volta.")
         else:
             await message.channel.send("Você não estava marcado como ausente.")
 
+    # ── listar membros ─────────────────────────────────────────────────────────
+    elif any(p in conteudo.lower() for p in ["lista membros", "listar membros", "membros do servidor", "lista de membros"]):
+        membros = [m for m in message.guild.members if not m.bot]
+        membros.sort(key=lambda m: m.display_name.lower())
+        blocos = []
+        bloco_atual = ""
+        for m in membros:
+            linha = f"{m.display_name} ({m.id})\n"
+            if len(bloco_atual) + len(linha) > 1900:
+                blocos.append(bloco_atual)
+                bloco_atual = linha
+            else:
+                bloco_atual += linha
+        if bloco_atual:
+            blocos.append(bloco_atual)
+        await message.channel.send(f"Membros humanos — {len(membros)} no total.")
+        for bloco in blocos:
+            await message.channel.send(f"```\n{bloco}```")
+
+    # ── envia mensagem em canal específico ─────────────────────────────────────
+    elif any(p in conteudo.lower() for p in ["envia", "manda", "fala", "diz", "escreve"]):
+        canal_destino = message.channel_mentions[0] if message.channel_mentions else None
+        if not canal_destino:
+            await message.channel.send("Menciona o canal onde devo enviar.")
+            return True
+        # Extrai o texto após a menção do canal
+        texto_msg = re.sub(r'<#\d+>', '', conteudo)
+        texto_msg = re.sub(r'<@!?\d+>', '', texto_msg)
+        # Remove o verbo do início
+        texto_msg = re.sub(r'^\s*(envia|manda|fala|diz|escreve)\s*(uma mensagem de|uma mensagem|mensagem de|mensagem)?\s*', '', texto_msg, flags=re.IGNORECASE).strip()
+        texto_msg = re.sub(r'\s*(em|no|na|para|pro|pra)\s*$', '', texto_msg, flags=re.IGNORECASE).strip()
+        if not texto_msg:
+            await message.channel.send("Qual mensagem devo enviar?")
+            return True
+        await canal_destino.send(texto_msg)
+        await message.channel.send(f"Mensagem enviada em {canal_destino.mention}.")
+
+    # ── comandos exclusivos de donos absolutos ─────────────────────────────────
+    elif message.author.id in DONOS_ABSOLUTOS_IDS and any(
+        p in conteudo.lower() for p in ["apaga canal", "deleta canal", "remove canal",
+                                         "apaga cargo", "deleta cargo", "remove cargo"]
+    ):
+        msg_l = conteudo.lower()
+
+        # Apagar canal
+        if any(p in msg_l for p in ["apaga canal", "deleta canal", "remove canal"]):
+            if message.channel_mentions:
+                canal_del = message.channel_mentions[0]
+                nome = canal_del.name
+                try:
+                    await canal_del.delete(reason=f"Ordem de {message.author.display_name}")
+                    await message.channel.send(f"Canal #{nome} apagado.")
+                except Exception as e:
+                    await message.channel.send(f"Não foi possível apagar #{nome} — {e}")
+            else:
+                await message.channel.send("Menciona o canal a apagar.")
+
+        # Apagar cargo
+        elif any(p in msg_l for p in ["apaga cargo", "deleta cargo", "remove cargo"]):
+            cargos_mencoes = message.role_mentions
+            if cargos_mencoes:
+                cargo_del = cargos_mencoes[0]
+                nome = cargo_del.name
+                try:
+                    await cargo_del.delete(reason=f"Ordem de {message.author.display_name}")
+                    await message.channel.send(f"Cargo {nome} apagado.")
+                except Exception as e:
+                    await message.channel.send(f"Não foi possível apagar o cargo {nome} — {e}")
+            else:
+                await message.channel.send("Menciona o cargo a apagar.")
 
     # ── ajuda ──────────────────────────────────────────────────────────────────
     elif cmd in ("ajuda", "help", "comandos"):
         await message.channel.send(
-            "Tudo sem prefixo. Para silenciar alguém diga silenciar e mencione o usuário, opcionalmente com o tempo em minutos. "
+            "Para silenciar alguém diga silenciar e mencione o usuário, opcionalmente com o tempo em minutos. "
             "Para desfazer diga dessilenciar. Para banir diga banir seguido do usuário, duração e motivo. "
-            "Para revogar um banimento diga desbanir. Para expulsar temporariamente diga expulsar. "
-            "Para enviar um aviso público diga avisar e mencione quem. Para chamar a moderação diga chamar mod. "
-            "Para ativar ausência diga ausente com duração e motivo, "
-            "e para voltar diga voltei. Para adicionar uma palavra ao filtro diga adicionar seguido da palavra e a categoria. "
-            "Para remover diga remover seguido da palavra. Para ver as regras diga regras."
+            "Para revogar diga desbanir. Para expulsar diga expulsar. "
+            "Para avisar alguém diga avisar e mencione quem. Para chamar a moderação diga chamar mod. "
+            "Para enviar uma mensagem em outro canal diga envia seguido do texto e mencione o canal. "
+            "Para listar membros diga lista membros. "
+            "Para ativar ausência diga ausente ou afk com motivo opcional, e para voltar diga voltei."
         )
 
     else:
@@ -1839,6 +1921,12 @@ async def on_message(message: discord.Message):
 
     # Ignorar DMs completamente — o bot não age em DM
     if not message.guild:
+        return
+
+    # Ignorar mensagens de outros bots com prefixo (ex: 7!afk, !cmd, /cmd)
+    # Só ignora se começar com prefixo e não mencionar este bot
+    conteudo_raw = message.content
+    if re.match(r'^\s*\S+[!/]\S', conteudo_raw) and client.user not in message.mentions:
         return
 
     autor = message.author.display_name
