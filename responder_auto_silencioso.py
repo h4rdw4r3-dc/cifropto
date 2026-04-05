@@ -1234,7 +1234,7 @@ async def processar_ordem(message: discord.Message) -> bool:
             pass
         if not alvos:
             await message.channel.send("Ei engenheiro, menciona quem deve ser silenciado ou passa o ID.")
-            return
+            return True
         for alvo in alvos:
             try:
                 ate = agora_utc() + timedelta(minutes=minutos)
@@ -1250,7 +1250,7 @@ async def processar_ordem(message: discord.Message) -> bool:
     elif cmd in ("dessilenciar", "unmute", "desmutar"):
         if not alvos:
             await message.channel.send("Ei engenheiro, menciona quem deve ser dessilenciado ou passa o ID.")
-            return
+            return True
         for alvo in alvos:
             try:
                 await alvo.timeout(None, reason="Ordem do proprietário.")
@@ -1264,7 +1264,7 @@ async def processar_ordem(message: discord.Message) -> bool:
             await message.channel.send(
                 "Ei engenheiro, menciona quem deve ser banido com @ ou passa o ID diretamente."
             )
-            return
+            return True
 
         motivo_limpo = re.sub(r"(<@!?\d+>\s*)+", "", resto)
         motivo_limpo = re.sub(r'\b\d{17,20}\b', '', motivo_limpo).strip()
@@ -1306,9 +1306,9 @@ async def processar_ordem(message: discord.Message) -> bool:
         if not ids_brutos:
             await message.channel.send(
                 "Ei engenheiro, passa o ID de quem quer desbanir. "
-                "Ex: `desbanir 123456789012345678`"
+                "Ex: desbanir seguido do ID."
             )
-            return
+            return True
 
         for uid in ids_brutos:
             try:
@@ -1329,7 +1329,7 @@ async def processar_ordem(message: discord.Message) -> bool:
     elif cmd in ("expulsar", "kick"):
         if not alvos:
             await message.channel.send("Ei engenheiro, menciona quem deve ser expulso ou passa o ID.")
-            return
+            return True
         motivo = re.sub(r"(<@!?\d+>\s*)+", "", resto).strip() or "Ordem do proprietário."
         for alvo in alvos:
             try:
@@ -1345,10 +1345,10 @@ async def processar_ordem(message: discord.Message) -> bool:
         texto = re.sub(r"(<@!?\d+>\s*)+", "", resto).strip()
         if not alvos:
             await message.channel.send("Ei engenheiro, menciona quem deve ser avisado.")
-            return
+            return True
         if not texto:
             await message.channel.send("Ei engenheiro, informe o conteúdo do aviso.")
-            return
+            return True
         for alvo in alvos:
             await message.channel.send(f"{alvo.mention}, aviso da administração: {texto}")
 
@@ -1369,8 +1369,8 @@ async def processar_ordem(message: discord.Message) -> bool:
         if not m:
             m = re.search(r'(?:palavra|termo|filtro|adiciona[r]?|bloqueia[r]?|filtra[r]?)\s+(\S+)', msg)
         if not m:
-            await message.channel.send("Não entendi qual palavra adicionar. Use: adicionar \"palavra\" como vulgar/sexual/discriminação")
-            return
+            await message.channel.send("Não entendi qual palavra adicionar. Use: adicionar a palavra e a categoria como vulgar, sexual ou discriminação.")
+            return True
         nova = m.group(1).strip().lower()
         cat = inferir_categoria(msg)
         if nova not in palavras_custom[cat]:
@@ -1388,8 +1388,8 @@ async def processar_ordem(message: discord.Message) -> bool:
         if not m:
             m = re.search(r'(?:remove[r]?|remov[ae][r]?|desbloqueai?[r]?|desfiltrai?[r]?)\s+(\S+)', msg)
         if not m:
-            await message.channel.send("Não entendi qual palavra remover. Use: remover \"palavra\"")
-            return
+            await message.channel.send("Não entendi qual palavra remover. Diga remover seguido da palavra.")
+            return True
         alvo = m.group(1).strip().lower()
         removida = False
         for cat in palavras_custom:
@@ -1407,7 +1407,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         total = sum(len(v) for v in palavras_custom.values())
         if total == 0:
             await message.channel.send("Nenhuma palavra customizada adicionada ainda.")
-            return
+            return True
         linhas = []
         nomes = {"vulgares": "Palavrões", "sexual": "Sexual", "discriminacao": "Discriminação", "compostos": "Compostos"}
         for cat, lista in palavras_custom.items():
@@ -1446,15 +1446,15 @@ async def processar_ordem(message: discord.Message) -> bool:
                 "Ei engenheiro, me diz quantas mensagens apagar. "
                 "Pode ser número ou por extenso, tipo: limpar cinquenta."
             )
-            return
+            return True
         if quantidade < 1:
             await message.channel.send("Ei engenheiro, a quantidade precisa ser pelo menos 1.")
-            return
+            return True
         if quantidade > 100:
             await message.channel.send(
                 "Ei engenheiro, o Discord permite apagar no máximo cem mensagens por vez."
             )
-            return
+            return True
         try:
             # +1 para incluir a própria mensagem de comando
             apagadas = await message.channel.purge(limit=quantidade + 1)
