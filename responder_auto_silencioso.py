@@ -106,6 +106,7 @@ def inferir_categoria(texto: str) -> str:
 
 def carregar_dados():
     global infracoes, ultimo_motivo, silenciamentos, palavras_custom
+    global registro_entradas, registro_saidas, nomes_historico
     if not os.path.exists(DADOS_PATH):
         return
     try:
@@ -119,8 +120,15 @@ def carregar_dados():
             silenciamentos[int(k)] = v
         for cat in palavras_custom:
             palavras_custom[cat] = dados.get("palavras_custom", {}).get(cat, [])
+        for k, v in dados.get("registro_entradas", {}).items():
+            registro_entradas[int(k)] = v
+        for k, v in dados.get("registro_saidas", {}).items():
+            registro_saidas[int(k)] = v
+        for k, v in dados.get("nomes_historico", {}).items():
+            nomes_historico[int(k)] = v
         total = sum(len(v) for v in palavras_custom.values())
-        print(f"[DADOS] {len(infracoes)} usuários e {total} palavras customizadas carregadas.")
+        print(f"[DADOS] {len(infracoes)} usuários, {total} palavras customizadas, "
+              f"{len(registro_entradas)} históricos de entrada carregados.")
     except Exception as e:
         print(f"[DADOS] Erro ao carregar: {e}")
 
@@ -132,6 +140,9 @@ def salvar_dados():
                 "ultimo_motivo": {str(k): v for k, v in ultimo_motivo.items()},
                 "silenciamentos": {str(k): v for k, v in silenciamentos.items()},
                 "palavras_custom": palavras_custom,
+                "registro_entradas": {str(k): v for k, v in registro_entradas.items()},
+                "registro_saidas": {str(k): v for k, v in registro_saidas.items()},
+                "nomes_historico": {str(k): v for k, v in nomes_historico.items()},
             }, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"[DADOS] Erro ao salvar: {e}")
@@ -144,9 +155,17 @@ silenciamentos: dict[int, int] = defaultdict(int)
 ultimo_motivo: dict[int, str] = {}
 conversas: dict[int, dict] = {}
 ausencia: dict[int, dict] = {}
-historico_claude: dict[int, list] = {}  # histórico de conversa por usuário para API Claude
-conversas_claude: dict[int, dict] = {}  # {user_id: {"canal": int, "ultima": datetime}}
-TIMEOUT_CONVERSA_CLAUDE = timedelta(minutes=5)  # tempo sem mensagem para encerrar conversa
+historico_claude: dict[int, list] = {}
+conversas_claude: dict[int, dict] = {}
+TIMEOUT_CONVERSA_CLAUDE = timedelta(minutes=5)
+
+# ── Rastreamento de entradas e saídas ─────────────────────────────────────────
+# registro_entradas: user_id -> lista de ISO timestamps de cada entrada
+registro_entradas: dict[int, list[str]] = {}
+# registro_saidas: user_id -> lista de {"nome", "saiu" (ISO), "ficou_segundos"}
+registro_saidas: dict[int, list[dict]] = {}
+# nomes_historico: último nome conhecido de cada user_id (inclui quem já saiu)
+nomes_historico: dict[int, str] = {}
 
 GATILHOS_NOME = re.compile(r"\bshell\b|\bengenheir\w*", re.IGNORECASE)
 
@@ -253,11 +272,21 @@ async def info_membro(membro: discord.Member) -> str:
         singularidades.append("membro ativo com vários cargos")
     sing_txt = ", ".join(singularidades) if singularidades else "nenhuma singularidade registrada"
 
+    # Dados de rastreamento
+    n_entradas = len(registro_entradas.get(membro.id, []))
+    n_saidas = len(registro_saidas.get(membro.id, []))
+    tracking_txt = ""
+    if n_entradas > 0:
+        tracking_txt = f" Entradas registradas: {n_entradas}."
+    if n_saidas > 0:
+        tracking_txt += f" Saídas registradas: {n_saidas}."
+
     return (
         f"{membro.display_name} tem conta criada há {idade_conta} "
         f"e está no servidor há {tempo_servidor}. "
         f"Cargos: {cargos_txt}. "
         f"Singularidades: {sing_txt}."
+        f"{tracking_txt}"
     )
 
 
@@ -287,6 +316,75 @@ async def stats_servidor(guild: discord.Guild) -> str:
         tempo = formatar_duracao(agora - mais_novo.joined_at.replace(tzinfo=timezone.utc))
         linhas.append(f"Entrada mais recente: {mais_novo.display_name}, há {tempo}.")
     return " ".join(linhas)
+
+
+async def relatorio_membros(guild: discord.Guild, periodo_dias: int = 7) -> str:
+    """Relatório de entradas, saídas e fluxo do servidor no período."""
+    brasilia = timezone(timedelta(hours=-3))
+    agora = agora_utc()
+    corte = agora - timedelta(days=periodo_dias)
+    corte_iso = corte.isoformat()
+
+    entradas_recentes = []
+    for uid, timestamps in registro_entradas.items():
+        for ts in timestamps:
+            if ts >= corte_iso:
+                membro = guild.get_member(uid)
+                nome = membro.display_name if membro else nomes_historico.get(uid, f"ID {uid}")
+                entradas_recentes.append((ts, nome, uid))
+
+    saidas_recentes = []
+    for uid, saidas in registro_saidas.items():
+        for s in saidas:
+            if s["saiu"] >= corte_iso:
+                saidas_recentes.append((s["saiu"], s["nome"], uid, s.get("ficou_segundos")))
+
+    entradas_recentes.sort(key=lambda x: x[0], reverse=True)
+    saidas_recentes.sort(key=lambda x: x[0], reverse=True)
+
+    total_humanos = sum(1 for m in guild.members if not m.bot)
+    periodo_txt = "hoje" if periodo_dias == 1 else f"últimos {periodo_dias} dias"
+
+    linhas = [
+        f"Servidor: {total_humanos} membros humanos agora.",
+        f"Período: {periodo_txt}.",
+        "",
+        f"Entradas: {len(entradas_recentes)}",
+    ]
+    for ts, nome, uid in entradas_recentes[:8]:
+        dt = datetime.fromisoformat(ts).astimezone(brasilia)
+        vezes = len(registro_entradas.get(uid, []))
+        reincidencia = f" (vez {vezes})" if vezes > 1 else ""
+        linhas.append(f"  {dt.strftime('%d/%m %H:%M')}  {nome}{reincidencia}")
+
+    linhas += ["", f"Saídas: {len(saidas_recentes)}"]
+    for ts, nome, uid, ficou in saidas_recentes[:8]:
+        dt = datetime.fromisoformat(ts).astimezone(brasilia)
+        ficou_txt = f" — ficou {formatar_duracao(timedelta(seconds=ficou))}" if ficou else ""
+        linhas.append(f"  {dt.strftime('%d/%m %H:%M')}  {nome}{ficou_txt}")
+
+    return "\n".join(linhas)
+
+
+async def historico_membro(uid: int, nome_display: str) -> str:
+    """Histórico completo de entradas e saídas de um membro."""
+    brasilia = timezone(timedelta(hours=-3))
+    entradas = sorted(registro_entradas.get(uid, []), reverse=True)
+    saidas = sorted(registro_saidas.get(uid, []), key=lambda x: x["saiu"], reverse=True)
+
+    linhas = [f"Histórico de {nome_display} ({uid}):", f"Entradas: {len(entradas)}"]
+    for ts in entradas[:10]:
+        dt = datetime.fromisoformat(ts).astimezone(brasilia)
+        linhas.append(f"  Entrou: {dt.strftime('%d/%m/%Y %H:%M')}")
+
+    linhas.append(f"Saídas: {len(saidas)}")
+    for s in saidas[:10]:
+        dt = datetime.fromisoformat(s["saiu"]).astimezone(brasilia)
+        ficou = s.get("ficou_segundos")
+        ficou_txt = f" (ficou {formatar_duracao(timedelta(seconds=ficou))})" if ficou else ""
+        linhas.append(f"  Saiu:   {dt.strftime('%d/%m/%Y %H:%M')}{ficou_txt}")
+
+    return "\n".join(linhas)
 
 
 SUBSTITUICOES = str.maketrans({
@@ -1666,6 +1764,35 @@ async def processar_ordem(message: discord.Message) -> bool:
             else:
                 await message.channel.send("Menciona o cargo a apagar.")
 
+    # ── relatório de entradas/saídas ───────────────────────────────────────────
+    elif any(p in conteudo.lower() for p in [
+        "entradas", "saidas", "saídas", "fluxo de membros",
+        "movimento de membros", "relatorio", "relatório",
+    ]):
+        msg_l = conteudo.lower()
+        if "hoje" in msg_l:
+            dias = 1
+        elif "semana" in msg_l:
+            dias = 7
+        elif any(p in msg_l for p in ["mes", "mês"]):
+            dias = 30
+        else:
+            dias = 7
+        rel = await relatorio_membros(guild, dias)
+        blocos = [rel[i:i+1900] for i in range(0, len(rel), 1900)]
+        for bloco in blocos:
+            await message.channel.send(f"```\n{bloco}\n```")
+
+    # ── histórico de membro específico ─────────────────────────────────────────
+    elif any(p in conteudo.lower() for p in ["historico", "histórico"]):
+        if alvos:
+            alvo = alvos[0]
+            hist = await historico_membro(alvo.id, alvo.display_name)
+            await message.channel.send(f"```\n{hist}\n```")
+        else:
+            await message.channel.send("Menciona o membro para ver o histórico.")
+        return True
+
     # ── ajuda ──────────────────────────────────────────────────────────────────
     elif cmd in ("ajuda", "help", "comandos"):
         await message.channel.send(
@@ -1675,6 +1802,8 @@ async def processar_ordem(message: discord.Message) -> bool:
             "Para avisar alguém diga avisar e mencione quem. Para chamar a moderação diga chamar mod. "
             "Para enviar uma mensagem em outro canal diga envia seguido do texto e mencione o canal. "
             "Para listar membros diga lista membros. "
+            "Para ver entradas e saídas diga entradas, saídas ou fluxo de membros (com: hoje, semana ou mês). "
+            "Para ver histórico de um membro diga histórico e mencione quem. "
             "Para ativar ausência diga ausente ou afk com motivo opcional, e para voltar diga voltei."
         )
 
@@ -1705,6 +1834,8 @@ async def processar_ordem_mod(message: discord.Message) -> bool:
         "adicionar", "adiciona", "bloquear", "bloqueia", "filtrar", "filtra",
         "remover", "remove", "desbloquear", "desbloqueia",
         "ajuda", "help", "comandos",
+        "entradas", "saidas", "saídas", "fluxo", "relatorio", "relatório",
+        "historico", "histórico",
     }
 
     if cmd in CMDS_MOD:
@@ -1888,6 +2019,78 @@ async def on_guild_role_delete(role):
     global _contexto_servidor
     if role.guild.id == SERVIDOR_ID:
         _contexto_servidor = build_server_context(role.guild)
+
+
+@client.event
+async def on_member_join(member: discord.Member):
+    """Registra entrada de membro e loga no canal de auditoria."""
+    if member.guild.id != SERVIDOR_ID:
+        return
+
+    agora = agora_utc()
+    ts = agora.isoformat()
+
+    if member.id not in registro_entradas:
+        registro_entradas[member.id] = []
+    registro_entradas[member.id].append(ts)
+    nomes_historico[member.id] = member.display_name
+    salvar_dados()
+
+    idade_conta = agora - member.created_at.replace(tzinfo=timezone.utc)
+    conta_nova = idade_conta.days < 7
+    vezes = len(registro_entradas[member.id])
+
+    canal_audit = member.guild.get_channel(CANAL_AUDITORIA_ID)
+    if canal_audit:
+        aviso = " ⚠️ CONTA NOVA" if conta_nova else ""
+        reentrada = f" | Reentrada n.{vezes}" if vezes > 1 else ""
+        await canal_audit.send(
+            f"[ENTRADA]{aviso}{reentrada} {member.display_name} ({member.id}) "
+            f"entrou. Conta criada há {formatar_duracao(idade_conta)}."
+        )
+
+    # Atualiza contexto do servidor
+    global _contexto_servidor
+    _contexto_servidor = build_server_context(member.guild)
+    print(f"[ENTRADA] {member.display_name} ({member.id}) | conta: {formatar_duracao(idade_conta)}{' | CONTA NOVA' if conta_nova else ''}")
+
+
+@client.event
+async def on_member_remove(member: discord.Member):
+    """Registra saída de membro e loga no canal de auditoria."""
+    if member.guild.id != SERVIDOR_ID:
+        return
+
+    agora = agora_utc()
+    ts = agora.isoformat()
+
+    ficou_segundos = None
+    ficou_txt = "tempo desconhecido"
+    if member.joined_at:
+        delta = agora - member.joined_at.replace(tzinfo=timezone.utc)
+        ficou_segundos = int(delta.total_seconds())
+        ficou_txt = formatar_duracao(delta)
+
+    if member.id not in registro_saidas:
+        registro_saidas[member.id] = []
+    registro_saidas[member.id].append({
+        "nome": member.display_name,
+        "saiu": ts,
+        "ficou_segundos": ficou_segundos,
+    })
+    nomes_historico[member.id] = member.display_name
+    salvar_dados()
+
+    canal_audit = member.guild.get_channel(CANAL_AUDITORIA_ID)
+    if canal_audit:
+        await canal_audit.send(
+            f"[SAÍDA] {member.display_name} ({member.id}) saiu. "
+            f"Ficou por {ficou_txt}."
+        )
+
+    global _contexto_servidor
+    _contexto_servidor = build_server_context(member.guild)
+    print(f"[SAÍDA] {member.display_name} ({member.id}) | ficou: {ficou_txt}")
 
 
 # Palavras-chave ofensivas em nomes de emoji customizado do servidor
