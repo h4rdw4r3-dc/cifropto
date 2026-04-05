@@ -1621,4 +1621,12 @@ async def on_message(message: discord.Message):
         print(f"[RESPONDIDO] {autor}")
 
 
-client.run(TOKEN)
+if not TOKEN:
+    raise SystemExit("DISCORD_TOKEN não definido. Configure a variável de ambiente antes de iniciar.")
+
+try:
+    client.run(TOKEN)
+except discord.errors.LoginFailure:
+    raise SystemExit("Token inválido ou expirado. Atualize a variável DISCORD_TOKEN no Railway.")
+except KeyboardInterrupt:
+    pass
