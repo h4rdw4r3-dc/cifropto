@@ -11,17 +11,17 @@ from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 
 try:
-    import anthropic
-    ANTHROPIC_DISPONIVEL = True
+    from openai import AsyncOpenAI
+    GROQ_DISPONIVEL = True
 except ImportError:
-    ANTHROPIC_DISPONIVEL = False
-    print("[AVISO] Pacote anthropic não encontrado. Respostas via Claude desativadas.")
+    GROQ_DISPONIVEL = False
+    print("[AVISO] Pacote openai não encontrado. Respostas via IA desativadas.")
 
 def agora_utc():
     return datetime.now(timezone.utc)
 
 TOKEN = os.environ.get("DISCORD_TOKEN", "")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 SERVIDOR_ID = 1487599082825584761
 DONOS_IDS = {1487591389653897306, 1321848653878661172}
 CONTAS_TESTE = {1375560046930563306}  # têm comandos de dono mas NÃO são isentos de punição
@@ -751,30 +751,33 @@ SYSTEM_ACAO = (
     "Sem emojis, sem asteriscos, sem markdown. Inclua os dados exatos que receber no contexto."
 )
 
+def _groq_client():
+    return AsyncOpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+
+
 async def confirmar_acao(descricao: str, fallback: str) -> str:
-    """Gera confirmação de ação de moderação via Claude. Usa fallback se API indisponível."""
-    if not ANTHROPIC_DISPONIVEL or not ANTHROPIC_API_KEY:
+    if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return fallback
     try:
-        ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-        resp = await ac.messages.create(
-            model="claude-haiku-4-5-20251001",
+        resp = await _groq_client().chat.completions.create(
+            model="llama-3.1-8b-instant",
             max_tokens=80,
-            system=SYSTEM_ACAO,
-            messages=[{"role": "user", "content": descricao}],
+            messages=[
+                {"role": "system", "content": SYSTEM_ACAO},
+                {"role": "user", "content": descricao},
+            ],
         )
-        return resp.content[0].text.strip()
+        return resp.choices[0].message.content.strip()
     except Exception as e:
-        print(f"[Claude Ação] Erro: {e}")
+        print(f"[Groq Ação] Erro: {e}")
         return fallback
 
 
 async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=None, canal_id: int = None) -> str:
-    # Mantém conversa ativa no canal atual (independe de ter API key)
     if canal_id:
         conversas_claude[user_id] = {"canal": canal_id, "ultima": agora_utc()}
 
-    if not ANTHROPIC_DISPONIVEL or not ANTHROPIC_API_KEY:
+    if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return random.choice([
             "Fala.", f"Tô aqui, {autor}. O que é?", "Pode falar.",
             "Diz.", "Sim?", "O que quer?", "Tô ouvindo.",
@@ -785,19 +788,19 @@ async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=No
     if len(hist) > 12:
         hist[:] = hist[-12:]
 
+    mensagens = [{"role": "system", "content": SYSTEM_CLAUDE}] + hist
+
     try:
-        ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-        resposta = await ac.messages.create(
-            model="claude-haiku-4-5-20251001",
+        resp = await _groq_client().chat.completions.create(
+            model="llama-3.3-70b-versatile",
             max_tokens=150,
-            system=SYSTEM_CLAUDE,
-            messages=hist,
+            messages=mensagens,
         )
-        texto = resposta.content[0].text.strip()
+        texto = resp.choices[0].message.content.strip()
         hist.append({"role": "assistant", "content": texto})
         return texto
     except Exception as e:
-        print(f"[Claude API] Erro: {e}")
+        print(f"[Groq API] Erro: {e}")
         return random.choice(["Não sei disso.", "Sem informação.", "Tenta a moderação."])
 
 
