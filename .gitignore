@@ -1,1 +1,5 @@
 .env
+meu_env/
+__pycache__/
+dados.json
+*.pyc
