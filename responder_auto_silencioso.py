@@ -1216,18 +1216,13 @@ async def processar_ordem(message: discord.Message):
     # ── ajuda ──────────────────────────────────────────────────────────────────
     elif cmd in ("ajuda", "help", "comandos"):
         await message.channel.send(
-            'Comandos disponíveis (sem prefixo, engenheiro):\n'
-            'silenciar @user [minutos]: silencia o usuário\n'
-            'dessilenciar @user: remove silenciamento\n'
-            'banir @user ou ID [duração] [motivo]: bane o usuário\n'
-            'desbanir @user ou ID: revoga o banimento\n'
-            'expulsar @user [motivo]: expulsa do servidor\n'
-            'avisar @user mensagem: envia aviso público\n'
-            'chamar mod motivo: menciona a equipe de moderação\n'
-            'limpar [quantidade]: apaga mensagens do canal\n'
-            'ausente [duração] [motivo]: ativa modo ausente\n'
-            'voltar: desativa modo ausente\n'
-            'regras: exibe as regras do servidor'
+            "Tudo sem prefixo. Para silenciar alguém diga silenciar e mencione o usuário, opcionalmente com o tempo em minutos. "
+            "Para desfazer diga dessilenciar. Para banir diga banir seguido do usuário, duração e motivo. "
+            "Para revogar um banimento diga desbanir. Para expulsar temporariamente diga expulsar. "
+            "Para enviar um aviso público diga avisar e mencione quem. Para chamar a moderação diga chamar mod. "
+            "Para apagar mensagens diga limpar e a quantidade. Para ativar ausência diga ausente com duração e motivo, "
+            "e para voltar diga voltei. Para adicionar uma palavra ao filtro diga adicionar seguido da palavra e a categoria. "
+            "Para remover diga remover seguido da palavra. Para ver as regras diga regras."
         )
 
 
