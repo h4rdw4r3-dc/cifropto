@@ -111,6 +111,8 @@ ultimo_motivo: dict[int, str] = {}
 conversas: dict[int, dict] = {}
 ausencia: dict[int, dict] = {}
 historico_claude: dict[int, list] = {}  # histórico de conversa por usuário para API Claude
+conversas_claude: dict[int, dict] = {}  # {user_id: {"canal": int, "ultima": datetime}}
+TIMEOUT_CONVERSA_CLAUDE = timedelta(minutes=5)  # tempo sem mensagem para encerrar conversa
 
 GATILHOS_NOME = re.compile(r"\bshell\b|\bengenheir\w*", re.IGNORECASE)
 
@@ -761,15 +763,18 @@ async def confirmar_acao(descricao: str, fallback: str) -> str:
         return fallback
 
 
-async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=None) -> str:
+async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=None, canal_id: int = None) -> str:
     if not ANTHROPIC_API_KEY:
         return random.choice(["Não sei disso.", "Sem resposta pra isso.", "Pergunta pra um mod."])
 
     hist = historico_claude.setdefault(user_id, [])
     hist.append({"role": "user", "content": f"{autor}: {pergunta}"})
-    # Manter só os últimos 6 turnos (3 do usuário + 3 do assistente)
     if len(hist) > 12:
         hist[:] = hist[-12:]
+
+    # Mantém conversa ativa no canal atual
+    if canal_id:
+        conversas_claude[user_id] = {"canal": canal_id, "ultima": agora_utc()}
 
     try:
         ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
@@ -987,7 +992,7 @@ async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, 
             "Por aqui. E você?",
         ])
 
-    return await responder_com_claude(conteudo, autor, user_id, guild)
+    return await responder_com_claude(conteudo, autor, user_id, guild, canal_id)
 
 
 def parsear_ausencia(texto: str) -> tuple[int, str]:
@@ -1746,8 +1751,22 @@ async def on_message(message: discord.Message):
                 await message.reply(resposta)
                 return
         else:
-            # Conversa iniciada em outro canal — descarta para não responder fora do contexto
             del conversas[user_id]
+
+    # ── Continuar conversa Claude ativa (sem novo gatilho, mesmo canal, dentro do timeout) ──
+    estado_claude = conversas_claude.get(user_id)
+    if estado_claude and client.user not in message.mentions and not GATILHOS_NOME.search(conteudo):
+        if estado_claude["canal"] == message.channel.id:
+            tempo_ocioso = agora_utc() - estado_claude["ultima"]
+            if tempo_ocioso <= TIMEOUT_CONVERSA_CLAUDE:
+                resposta = await responder_com_claude(conteudo, autor, user_id, message.guild, message.channel.id)
+                print(f"[CLAUDE CONT] {autor}: {conteudo}")
+                await message.reply(resposta)
+                return
+            else:
+                del conversas_claude[user_id]
+        else:
+            del conversas_claude[user_id]
 
     # ── Responder menção/gatilho de membros comuns ────────────────────────────
     if mencionado:
