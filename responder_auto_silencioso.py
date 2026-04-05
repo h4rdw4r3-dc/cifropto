@@ -23,8 +23,8 @@ def agora_utc():
 TOKEN = os.environ.get("DISCORD_TOKEN", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 SERVIDOR_ID = 1487599082825584761
-DONOS_IDS = {1487591389653897306, 1321848653878661172}
-CONTAS_TESTE = {1375560046930563306}  # têm comandos de dono mas NÃO são isentos de punição
+DONOS_IDS = {1487591389653897306, 1321848653878661172, 1375560046930563306}
+CONTAS_TESTE = set()  # sem contas de teste no momento
 CARGO_EQUIPE_MOD_ID = 1487859369008697556  # equipe de moderação com acesso a comandos
 
 # ── Canal de auditoria ───────────────────────────────────────────────────────
