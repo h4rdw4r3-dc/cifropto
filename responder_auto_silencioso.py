@@ -5,6 +5,7 @@ import json
 import os
 import xml.etree.ElementTree as ET
 import random
+import anthropic
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -13,8 +14,9 @@ def agora_utc():
     return datetime.now(timezone.utc)
 
 TOKEN = os.environ.get("DISCORD_TOKEN", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 SERVIDOR_ID = 1487599082825584761
-DONOS_IDS = {1487591389653897306}
+DONOS_IDS = {1487591389653897306, 1321848653878661172}
 CONTAS_TESTE = {1375560046930563306}  # têm comandos de dono mas NÃO são isentos de punição
 CARGO_EQUIPE_MOD_ID = 1487859369008697556  # equipe de moderação com acesso a comandos
 
@@ -107,6 +109,7 @@ silenciamentos: dict[int, int] = defaultdict(int)
 ultimo_motivo: dict[int, str] = {}
 conversas: dict[int, dict] = {}
 ausencia: dict[int, dict] = {}
+historico_claude: dict[int, list] = {}  # histórico de conversa por usuário para API Claude
 
 GATILHOS_NOME = re.compile(r"\bshell\b|\bengenheiro\b", re.IGNORECASE)
 
@@ -698,6 +701,43 @@ def eh_nao(msg: str) -> bool:
     return any(p in msg.lower().split() for p in NAO)
 
 
+SYSTEM_CLAUDE = (
+    "Você é o assistente automático de um servidor Discord brasileiro. "
+    "Personalidade: direto, seco, rude quando necessário, mas nunca abusivo. "
+    "Fala como brasileiro jovem, com gírias naturais do cotidiano. "
+    "Sem emojis, sem listas, sem markdown, sem asteriscos. "
+    "Respostas curtas, máximo 2 frases. "
+    "Você conhece as regras do servidor e orienta usuários quando perguntado. "
+    "Quando não souber algo, admite na lata sem inventar. "
+    "Você não é um bot amigável, é um sistema de moderação que tolera conversas."
+)
+
+async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=None) -> str:
+    if not ANTHROPIC_API_KEY:
+        return random.choice(["Não sei disso.", "Sem resposta pra isso.", "Pergunta pra um mod."])
+
+    hist = historico_claude.setdefault(user_id, [])
+    hist.append({"role": "user", "content": f"{autor}: {pergunta}"})
+    # Manter só os últimos 6 turnos (3 do usuário + 3 do assistente)
+    if len(hist) > 12:
+        hist[:] = hist[-12:]
+
+    try:
+        ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+        resposta = await ac.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=150,
+            system=SYSTEM_CLAUDE,
+            messages=hist,
+        )
+        texto = resposta.content[0].text.strip()
+        hist.append({"role": "assistant", "content": texto})
+        return texto
+    except Exception as e:
+        print(f"[Claude API] Erro: {e}")
+        return random.choice(["Não sei disso.", "Sem informação.", "Tenta a moderação."])
+
+
 async def continuar_conversa(user_id: int, msg: str, autor: str, guild=None) -> str:
     estado = conversas.get(user_id)
     if not estado:
@@ -818,10 +858,10 @@ async def continuar_conversa(user_id: int, msg: str, autor: str, guild=None) -> 
         del conversas[user_id]
         if any(p in msg_l for p in ["regra", "norma", "proibido", "pode", "posso", "permitido"]):
             return REGRAS
-        return random.choice([f"Não sei disso, {autor}. Pergunta pra um mod.", "Isso não tá no meu alcance.", "Sem informação sobre isso. Tenta a moderação."])
+        return await responder_com_claude(msg, autor, user_id, guild)
 
     del conversas[user_id]
-    return random.choice(["Não entendi. Fala de novo.", "Repete isso.", "Não peguei. Elabora.", "Hein?"])
+    return await responder_com_claude(msg, autor, user_id, guild)
 
 
 async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, membro=None, canal_id: int = None) -> str:
@@ -898,22 +938,7 @@ async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, 
             "Por aqui. E você?",
         ])
 
-    if "?" in conteudo:
-        iniciar_conversa(user_id, "pergunta", canal_id=canal_id)
-        return random.choice([
-            f"Não entendi. Fala de novo.",
-            f"Elabora mais.",
-            f"Não captei. Explica.",
-            f"Não ficou claro. Repete.",
-            f"Hmm? Fala direito.",
-            f"Que é isso? Detalha.",
-        ])
-
-    iniciar_conversa(user_id, conteudo, canal_id=canal_id)
-    return random.choice([
-        f"Fala.", f"O que é?", f"Tô aqui.", f"Sim?", f"Pode falar.",
-        f"O que quer, {autor}?", f"Oi, {autor}.",
-    ])
+    return await responder_com_claude(conteudo, autor, user_id, guild)
 
 
 def parsear_ausencia(texto: str) -> tuple[int, str]:
