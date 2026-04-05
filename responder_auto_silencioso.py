@@ -23,9 +23,18 @@ def agora_utc():
 TOKEN = os.environ.get("DISCORD_TOKEN", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 SERVIDOR_ID = 1487599082825584761
+
+# IDs de donos/proprietários (maior hierarquia — nunca punidos, comandos sempre ativos)
 DONOS_IDS = {1487591389653897306, 1321848653878661172, 1375560046930563306}
+
+# Cargos superiores que podem dar ordens gerais ao bot (boas-vindas, histórias, etc.)
+CARGOS_SUPERIORES_IDS = {1487599082934636628, 1487599082934636627}
+
+# ID de usuário com nível de superior (tratado como cargo superior)
+USUARIOS_SUPERIORES_IDS = {1375560046930563306}
+
 CONTAS_TESTE = set()  # sem contas de teste no momento
-CARGO_EQUIPE_MOD_ID = 1487859369008697556  # equipe de moderação com acesso a comandos
+CARGO_EQUIPE_MOD_ID = 1487859369008697556  # equipe de moderação com acesso a comandos de mod
 
 # ── Canal de auditoria ───────────────────────────────────────────────────────
 CANAL_AUDITORIA_ID = 1490180079899115591
@@ -47,9 +56,27 @@ def tem_permissao_moderacao(guild: discord.Guild) -> bool:
 
 
 def eh_autorizado(member: discord.Member) -> bool:
-    """Retorna True se o membro é dono ou pertence à equipe de moderação."""
+    """Retorna True se o membro é dono, superior ou pertence à equipe de moderação."""
     if member.id in DONOS_IDS or member.id in CONTAS_TESTE:
         return True
+    if member.id in USUARIOS_SUPERIORES_IDS:
+        return True
+    return any(cargo.id in CARGOS_SUPERIORES_IDS or cargo.id == CARGO_EQUIPE_MOD_ID for cargo in member.roles)
+
+
+def eh_superior(member: discord.Member) -> bool:
+    """Retorna True se o membro é dono ou tem cargo superior (pode dar ordens gerais ao bot)."""
+    if member.id in DONOS_IDS or member.id in USUARIOS_SUPERIORES_IDS:
+        return True
+    return any(cargo.id in CARGOS_SUPERIORES_IDS for cargo in member.roles)
+
+
+def eh_mod_exclusivo(member: discord.Member) -> bool:
+    """Retorna True se membro tem cargo de moderação (mas não é superior nem dono)."""
+    if member.id in DONOS_IDS or member.id in USUARIOS_SUPERIORES_IDS:
+        return False
+    if any(cargo.id in CARGOS_SUPERIORES_IDS for cargo in member.roles):
+        return False
     return any(cargo.id == CARGO_EQUIPE_MOD_ID for cargo in member.roles)
 
 DADOS_PATH = "dados.json"
@@ -737,7 +764,7 @@ SYSTEM_CLAUDE = (
     "Você é o assistente automático de um servidor Discord brasileiro. "
     "Personalidade: direto, seco, rude quando necessário, mas nunca abusivo. "
     "Fala como brasileiro jovem, com gírias naturais do cotidiano. "
-    "Sem emojis, sem listas, sem markdown, sem asteriscos. "
+    "Sem emojis, sem listas, sem markdown, sem asteriscos, sem dois pontos. "
     "Respostas curtas, máximo 2 frases. "
     "Você conhece as regras do servidor e orienta usuários quando perguntado. "
     "Quando não souber algo, admite na lata sem inventar. "
@@ -748,7 +775,7 @@ SYSTEM_ACAO = (
     "Você é o sistema de moderação de um servidor Discord brasileiro. "
     "Acabei de executar uma ação de moderação. Gere UMA frase curta confirmando o que foi feito, "
     "de forma direta e seca, como um brasileiro jovem falaria. "
-    "Sem emojis, sem asteriscos, sem markdown. Inclua os dados exatos que receber no contexto."
+    "Sem emojis, sem asteriscos, sem markdown, sem dois pontos. Inclua os dados exatos que receber no contexto."
 )
 
 def _groq_client():
@@ -858,7 +885,7 @@ async def continuar_conversa(user_id: int, msg: str, autor: str, guild=None) -> 
             return random.choice(["Ok.", "Certo.", "Tá.", "Beleza."])
         if etapa == 2:
             del conversas[user_id]
-            return f"Registrado. Moderação vai ver que {autor} precisa de atenção: {msg}."
+            return f"Registrado. Moderação vai ver que {autor} precisa de atenção — {msg}."
 
     # ── CAPACIDADES ───────────────────────────────────────────────────────────
     if ctx == "capacidades":
@@ -1170,7 +1197,7 @@ INTENCOES = {
     "ausente": [
         "vou sumir", "vou ficar ausente", "estarei ausente", "to saindo",
         "vou sair", "ausente", "não estarei", "nao estarei",
-        "vou me ausentar", "ausentar",
+        "vou me ausentar", "ausentar", "afk",
     ],
     "voltar": [
         "voltei", "to de volta", "tô de volta", "retornei", "estou de volta",
@@ -1420,12 +1447,12 @@ async def processar_ordem(message: discord.Message) -> bool:
             await message.channel.send("Ei engenheiro, informe o conteúdo do aviso.")
             return True
         for alvo in alvos:
-            await message.channel.send(f"{alvo.mention}, aviso da administração: {texto}")
+            await message.channel.send(f"{alvo.mention}, aviso da administração — {texto}")
 
     # ── chamar mod ─────────────────────────────────────────────────────────────
     elif cmd in ("chamar-mod", "chamarmod", "mod", "moderação", "moderacao", "chamar"):
         motivo = resto or "sem motivo especificado."
-        await message.channel.send(f"{mod}, atenção necessária: {motivo}")
+        await message.channel.send(f"{mod}, atenção necessária — {motivo}")
 
     # ── regras ─────────────────────────────────────────────────────────────────
     elif cmd == "regras":
@@ -1485,9 +1512,12 @@ async def processar_ordem(message: discord.Message) -> bool:
                 linhas.append(f"{nomes[cat]}: {', '.join(lista)}")
         await message.channel.send("Palavras customizadas:\n" + "\n".join(linhas))
 
-    # ── ausente [duração] [motivo] ─────────────────────────────────────────────
-    elif cmd == "ausente":
-        minutos, motivo = parsear_ausencia(message.content)
+    # ── ausente / afk [motivo] ─────────────────────────────────────────────────
+    elif cmd in ("ausente", "afk"):
+        # Remove o comando da string para extrair só o motivo
+        texto_sem_cmd = re.sub(r'<@!?\d+>\s*', '', conteudo).strip()
+        texto_sem_cmd = re.sub(r'^(ausente|afk)\s*', '', texto_sem_cmd, flags=re.IGNORECASE).strip()
+        minutos, motivo = parsear_ausencia(texto_sem_cmd) if texto_sem_cmd else (0, "")
         ate = agora_utc() + timedelta(minutes=minutos) if minutos else None
         ausencia[message.author.id] = {"ate": ate, "motivo": motivo}
 
@@ -1497,7 +1527,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         if minutos:
             partes.append(f"duração: {minutos} minuto{'s' if minutos != 1 else ''}")
         else:
-            partes.append("duração: indefinida, use 'voltar' para desativar")
+            partes.append("duração: indefinida, mande qualquer mensagem para desativar")
         await message.channel.send(". ".join(partes) + ".")
 
     # ── voltar ─────────────────────────────────────────────────────────────────
@@ -1525,6 +1555,108 @@ async def processar_ordem(message: discord.Message) -> bool:
         return False
 
     return True
+
+
+async def processar_ordem_mod(message: discord.Message) -> bool:
+    """
+    Processa apenas comandos de moderação para o cargo de mod (1487859369008697556).
+    Comandos disponíveis: silenciar, dessilenciar, banir, desbanir, expulsar, avisar, regras, listar.
+    Não executa ordens gerais (boas-vindas, histórias, etc.) — isso é privilégio dos superiores.
+    """
+    conteudo = message.content.strip()
+    cmd, resto = extrair_comando(conteudo)
+
+    CMDS_MOD = {
+        "silenciar", "mute", "mutar", "calar",
+        "dessilenciar", "unmute", "desmutar",
+        "banir", "ban",
+        "desbanir", "unban",
+        "expulsar", "kick",
+        "avisar", "avisa",
+        "regras",
+        "listar", "lista", "palavras", "filtros",
+        "adicionar", "adiciona", "bloquear", "bloqueia", "filtrar", "filtra",
+        "remover", "remove", "desbloquear", "desbloqueia",
+        "ajuda", "help", "comandos",
+    }
+
+    if cmd in CMDS_MOD:
+        return await processar_ordem(message)
+
+    # Comando não reconhecido para mod — não executa ordens gerais
+    return False
+
+
+async def resposta_inicial_superior(conteudo: str, autor: str, user_id: int, guild=None, membro=None, canal_id: int = None) -> str:
+    """
+    Versão estendida de resposta_inicial para superiores.
+    Aceita ordens diretas como dar boas-vindas (somente quando solicitado),
+    contar histórias, interagir com o público, etc.
+    """
+    msg = conteudo.lower()
+
+    # ── Ordens de boas-vindas (só executa quando explicitamente solicitado) ────
+    if any(p in msg for p in ["boas-vindas", "boas vindas", "dá boas-vindas", "da boas-vindas",
+                               "bem-vindo", "bem vindo", "recepciona", "receba os membros"]):
+        # Tenta mencionar membros que entraram recentemente
+        alvos = []
+        if membro and membro.guild:
+            alvos = [m for m in membro.guild.members
+                     if m.joined_at and not m.bot
+                     and (datetime.now(timezone.utc) - m.joined_at.replace(tzinfo=timezone.utc)).days < 1
+                     and m.id != client.user.id]
+        if alvos:
+            nomes = " ".join(m.mention for m in alvos[:5])
+            return f"Sejam bem-vindos ao servidor {nomes}. Leiam as regras em {CANAL_REGRAS} e bom aprendizado."
+        return f"Bem-vindos ao servidor. Leiam as regras em {CANAL_REGRAS} e aproveitem."
+
+    # ── Ordens de história / contar algo ──────────────────────────────────────
+    if any(p in msg for p in ["conta uma história", "conta uma historia", "conta um caso",
+                               "narra uma história", "me conta algo", "conta pra galera",
+                               "conta algo interessante", "história"]):
+        prompt = (
+            "Você é um assistente de servidor Discord brasileiro, direto e sem floreios. "
+            "Conte uma história curta (máximo 4 frases) sobre tecnologia, ciência ou cultura brasileira. "
+            "Sem emojis, sem asteriscos, sem markdown, sem dois pontos. Fale como brasileiro jovem."
+        )
+        try:
+            resp = await _groq_client().chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                max_tokens=200,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": conteudo},
+                ],
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception:
+            return "Não consigo contar histórias agora. Tenta mais tarde."
+
+    # ── Ordens de interação com o público ─────────────────────────────────────
+    if any(p in msg for p in ["anima o servidor", "anima a galera", "interaja", "interage",
+                               "fala pra galera", "chama atenção", "engaja", "movimenta"]):
+        opcoes = [
+            "Ei galera, qual foi a última coisa útil que vocês aprenderam essa semana?",
+            "Alguém aqui tem projeto em andamento? Fala o que tá construindo.",
+            "Pergunta rápida, qual linguagem de programação vocês mais usam atualmente?",
+            "Debate rápido, terminal ou IDE? Fala aí.",
+            "Galera, qual foi o último bug mais bizarro que vocês encontraram?",
+        ]
+        return random.choice(opcoes)
+
+    # ── Ordens de aviso público ────────────────────────────────────────────────
+    if any(p in msg for p in ["avisa o servidor", "avisa a galera", "comunica", "anuncia"]):
+        for prefixo in ["avisa o servidor", "avisa a galera", "comunica que", "anuncia que", "comunica", "anuncia"]:
+            if prefixo in msg:
+                idx = msg.find(prefixo) + len(prefixo)
+                texto_aviso = conteudo[idx:].strip(" :,.")
+                if texto_aviso:
+                    mencao_todos = guild.default_role if guild else "@everyone"
+                    return f"Atenção {mencao_todos}, {texto_aviso}"
+        return "Qual é o aviso? Manda o conteúdo depois do comando."
+
+    # ── Fallback ───────────────────────────────────────────────────────────────
+    return await resposta_inicial(conteudo, autor, user_id, guild, membro, canal_id)
 
 
 ESCALA_SILENCIO = [
@@ -1574,14 +1706,22 @@ async def on_message(message: discord.Message):
     if not message.guild or message.guild.id != SERVIDOR_ID:
         return
 
+    # Ignorar DMs completamente — o bot não age em DM
+    if not message.guild:
+        return
+
     autor = message.author.display_name
     user_id = message.author.id
     conteudo = message.content
-    eh_dono = message.author.id in DONOS_IDS
-    eh_teste = message.author.id in CONTAS_TESTE
-    eh_mod = eh_autorizado(message.author)  # donos, contas teste e equipe de mod
+    membro_autor = message.author
 
-    # ── Verificar menção/gatilho para autorizar comandos ──────────────────────
+    _eh_dono = message.author.id in DONOS_IDS
+    _eh_superior_ = eh_superior(message.author)   # donos + cargos superiores
+    _eh_mod_ = eh_mod_exclusivo(message.author)    # só moderação (não superiores)
+    _eh_autorizado = eh_autorizado(message.author) # qualquer nível acima de membro comum
+    eh_teste = message.author.id in CONTAS_TESTE
+
+    # ── Verificar menção/gatilho ───────────────────────────────────────────────
     ids_mencionados = {m.id for m in message.mentions} | {
         int(m) for m in ID_PATTERN.findall(conteudo)
     }
@@ -1591,50 +1731,63 @@ async def on_message(message: discord.Message):
         or bool(GATILHOS_NOME.search(conteudo))
     )
 
-    # ── Conta de teste: comandos liberados, mas sofre punições normalmente ────
-    if eh_teste and not eh_dono:
-        if message.author.id in ausencia:
-            del ausencia[message.author.id]
-            await message.channel.send(f"{message.author.mention}, modo ausente desativado.")
-        if mencionado:
-            tratado = await processar_ordem(message)
-            if tratado:
-                return
-            # Comando não reconhecido: cai na conversa normal abaixo
-        # Continua para verificação de violações abaixo
+    # ── AFK: se alguém marca o próprio usuário que está AFK, responde no canal ─
+    if message.mentions:
+        for mencionado_user in message.mentions:
+            if mencionado_user == client.user:
+                continue
+            estado_afk = ausencia.get(mencionado_user.id)
+            if estado_afk:
+                motivo_afk = estado_afk.get("motivo", "")
+                if motivo_afk:
+                    msg_afk = f"Eae, {mencionado_user.mention} está AFK no momento — {motivo_afk}"
+                else:
+                    msg_afk = f"Eae, {mencionado_user.mention} está AFK no momento."
+                await message.channel.send(msg_afk)
 
-    # ── Donos: isentos de punição, comandos sempre ativos ─────────────────────
-    if eh_dono:
-        if message.author.id in ausencia:
-            del ausencia[message.author.id]
-            await message.channel.send(f"{message.author.mention}, modo ausente desativado.")
+    # ── Desativar AFK quando o próprio usuário manda mensagem ─────────────────
+    if message.author.id in ausencia and not mencionado:
+        del ausencia[message.author.id]
+        await message.channel.send(f"{message.author.mention}, modo ausente desativado.")
 
-        violacoes = detectar_violacoes(conteudo)
-        if violacoes:
-            lista = ", ".join(desc for desc, _ in violacoes)
-            try:
-                await message.author.send(
-                    f"Ciente, {autor}. Você usou linguagem que normalmente seria punida ({lista}). "
-                    f"Como proprietário está isento, mas tenha ciência do exemplo que passa ao servidor."
-                )
-            except Exception:
-                pass
-
+    # ── Conta de teste: comandos liberados, sofre punições normalmente ─────────
+    if eh_teste and not _eh_dono:
         tratado = await processar_ordem(message)
-        await processar_links(message)
+        if tratado:
+            return
+        # continua para verificação de violações abaixo
+
+    # ── Donos: isentos de punição, comandos sempre ativos (sem precisar mencionar) ──
+    if _eh_dono:
+        if message.author.id in ausencia:
+            del ausencia[message.author.id]
+        tratado = await processar_ordem(message)
         if not tratado and mencionado:
             resposta = await resposta_inicial(conteudo, autor, user_id, message.guild, message.author, message.channel.id)
             await message.reply(resposta)
+        elif not tratado:
+            await processar_links(message)
         return
 
-    # ── Equipe de mod: isenta de punições, comandos via menção ───────────────────
-    if eh_mod:
-        if mencionado:
-            tratado = await processar_ordem(message)
-            if not tratado:
-                resposta = await resposta_inicial(conteudo, autor, user_id, message.guild, message.author, message.channel.id)
-                await message.reply(resposta)
-        return  # mods nunca são punidos, independente do que disserem
+    # ── Superiores: isentos de punição, comandos + ordens gerais (sem precisar mencionar) ──
+    if _eh_superior_:
+        if message.author.id in ausencia:
+            del ausencia[message.author.id]
+        tratado = await processar_ordem(message)
+        if not tratado and mencionado:
+            resposta = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id)
+            await message.reply(resposta)
+        elif not tratado:
+            await processar_links(message)
+        return
+
+    # ── Equipe de mod: isenta de punições, comandos de moderação (sem precisar mencionar) ──
+    if _eh_mod_:
+        tratado = await processar_ordem_mod(message)
+        if not tratado and mencionado:
+            resposta = await resposta_inicial(conteudo, autor, user_id, message.guild, message.author, message.channel.id)
+            await message.reply(resposta)
+        return  # mods nunca são punidos
 
     # ── Detectar flood (membros comuns) ───────────────────────────────────────
     if detectar_flood(message.author.id, conteudo):
@@ -1706,7 +1859,6 @@ async def on_message(message: discord.Message):
         return
 
     # ── Info de membro via menção ─────────────────────────────────────────────
-    user_id = message.author.id
     if mencionado and message.mentions:
         alvos_info = [m for m in message.mentions if m != client.user]
         if alvos_info and any(p in conteudo.lower() for p in ["info", "informação", "quem é", "tempo no", "quando entrou", "idade"]):
@@ -1732,7 +1884,7 @@ async def on_message(message: discord.Message):
         else:
             del conversas[user_id]
 
-    # ── Continuar conversa Claude ativa (sem novo gatilho, mesmo canal, dentro do timeout) ──
+    # ── Continuar conversa Claude ativa ──────────────────────────────────────
     estado_claude = conversas_claude.get(user_id)
     if estado_claude and client.user not in message.mentions and not GATILHOS_NOME.search(conteudo):
         if estado_claude["canal"] == message.channel.id:
