@@ -697,66 +697,68 @@ async def continuar_conversa(user_id: int, msg: str, autor: str, guild=None) -> 
         if etapa == 1:
             estado["etapa"] = 2
             if any(p in msg_l for p in ["bem", "bom", "otimo", "ótimo", "tranquilo", "tudo"]):
-                return f"Ótimo. Tem algo que posso fazer por você, {autor}?"
+                return f"Que bom. O que quer?"
             if any(p in msg_l for p in ["mal", "ruim", "chateado", "cansado", "triste"]):
                 estado["contexto"] = "desabafo"
-                return f"Entendo. Quer falar sobre o que está acontecendo?"
-            return f"O que precisa, {autor}?"
+                return f"O que aconteceu?"
+            return f"O que quer, {autor}?"
         if etapa == 2:
             del conversas[user_id]
             if any(p in msg_l for p in ["regra", "norma", "proibido"]):
                 return REGRAS
             if "?" in msg:
-                return f"Não tenho como responder isso agora. Um moderador pode te ajudar melhor."
-            return f"Entendido. Se precisar de algo, é só chamar."
+                return f"Isso não é comigo. Chama um mod."
+            return f"Fala logo o que precisa."
 
     # ── DESABAFO ──────────────────────────────────────────────────────────────
     if ctx == "desabafo":
         del conversas[user_id]
-        return f"Isso é compreensível, {autor}. Se for algo relacionado ao servidor, fale com a moderação. Caso contrário, espero que melhore."
+        if any(p in msg_l for p in ["servidor", "member", "membro", "mod", "admin", "alguem", "alguém"]):
+            return f"Se é algo do servidor, vai no canal de denúncias e descreve o que aconteceu."
+        return f"Vida que segue. Se precisar de algo aqui dentro, chama."
 
     # ── PUNIÇÃO ───────────────────────────────────────────────────────────────
     if ctx == "punicao":
         if etapa == 1:
             estado["etapa"] = 2
-            return f"Qual seria o motivo da punição, {autor}?"
+            return f"Qual o motivo?"
         if etapa == 2:
             del conversas[user_id]
-            return f"{autor}, para aplicar punições diga o comando diretamente: banir, silenciar ou expulsar seguido do usuário. Ou acione a equipe de moderação."
+            return f"Diz o comando direto: banir, silenciar ou expulsar seguido do usuário. Ou aciona a moderação."
 
     # ── MODERAÇÃO ─────────────────────────────────────────────────────────────
     if ctx == "chamar_mod":
         if etapa == 1:
             if eh_sim(msg):
                 estado["etapa"] = 2
-                return f"Qual o motivo? Descreva brevemente o que está acontecendo."
+                return f"Qual o motivo? Resume o que tá acontecendo."
             del conversas[user_id]
-            return f"Entendido, {autor}. Se precisar, é só chamar."
+            return f"Ok."
         if etapa == 2:
             del conversas[user_id]
-            return f"Anotado. Quando um moderador estiver disponível, saberá que {autor} precisa de atenção por: {msg}."
+            return f"Registrado. Moderação vai ver que {autor} precisa de atenção: {msg}."
 
     # ── CAPACIDADES ───────────────────────────────────────────────────────────
     if ctx == "capacidades":
         if etapa == 1:
             if eh_sim(msg):
                 estado["etapa"] = 2
-                return f"Posso moderar o chat automaticamente, silenciar quem infringe as regras, responder perguntas sobre o servidor, buscar notícias, mostrar estatísticas do servidor e informações de membros. O que quer saber mais?"
+                return f"Monitoro o chat, aplico as regras, silencio quem infringe, busco notícias, mostro estatísticas do servidor e dados de membros. Quer saber de algo específico?"
             del conversas[user_id]
-            return f"Certo, {autor}. Se precisar de algo, é só chamar."
+            return f"Ok."
         if etapa == 2:
             del conversas[user_id]
             if any(p in msg_l for p in ["noticia", "notícia", "news"]):
                 noticias = await buscar_noticias()
                 if noticias:
                     n = random.choice(noticias)
-                    return f"Uma notícia recente de {n['fonte']}: {n['titulo']}. Tem opinião sobre isso?"
-                return f"Não consegui buscar notícias agora. Tente mais tarde."
+                    return f"{n['fonte']}: {n['titulo']}. O que acha disso?"
+                return f"Sem notícias no momento. Tenta mais tarde."
             if any(p in msg_l for p in ["estat", "membro", "servidor"]):
                 if guild:
                     return await stats_servidor(guild)
-                return f"Não tenho acesso ao servidor agora."
-            return f"Essa funcionalidade específica está fora do meu alcance, {autor}."
+                return f"Sem acesso ao servidor agora."
+            return f"Não faço isso."
 
     # ── NOTÍCIAS ──────────────────────────────────────────────────────────────
     if ctx == "noticias":
@@ -764,46 +766,46 @@ async def continuar_conversa(user_id: int, msg: str, autor: str, guild=None) -> 
             del conversas[user_id]
             noticias = await buscar_noticias()
             if not noticias:
-                return f"Não consegui buscar notícias agora, {autor}. Tente mais tarde."
+                return f"Não tô conseguindo pegar notícias agora. Tenta mais tarde."
             n = random.choice(noticias)
             iniciar_conversa(user_id, "opiniao_noticia", {"noticia": n["titulo"]})
-            return f"Uma notícia recente de {n['fonte']}: {n['titulo']}. Você tinha visto? O que acha?"
+            return f"{n['fonte']}: {n['titulo']}. Tinha visto isso?"
         if etapa == 2:
             del conversas[user_id]
-            return f"É um assunto relevante. Se quiser mais notícias, é só pedir."
+            return f"É. Tá aí. Quer mais alguma?"
 
     # ── OPINIÃO SOBRE NOTÍCIA ─────────────────────────────────────────────────
     if ctx == "opiniao_noticia":
         del conversas[user_id]
         if any(p in msg_l for p in ["não", "nao", "nunca", "desconhecia"]):
-            return f"Faz sentido, esse tipo de notícia passa despercebida. Vale a pena acompanhar."
+            return f"Pois é, passa batido. Vale prestar atenção nisso."
         if any(p in msg_l for p in ["sim", "vi", "sei", "conheço", "soube"]):
-            return f"Que bom que estava por dentro. Tem algum ponto de vista sobre isso?"
-        return f"Interessante perspectiva. Esse tema tende a gerar debate."
+            return f"Tá por dentro então. Tem alguma opinião formada sobre isso?"
+        return f"Cada um tem o seu ponto de vista. Faz sentido pro teu lado?"
 
     # ── AJUDA ─────────────────────────────────────────────────────────────────
     if ctx == "ajuda":
         del conversas[user_id]
         if any(p in msg_l for p in ["regra", "norma", "proibido", "pode", "posso"]):
             return REGRAS
-        return f"Não consigo resolver isso diretamente, {autor}. Chame um moderador."
+        return f"Isso não tô resolvendo, {autor}. Chama um mod."
 
     # ── PROBLEMA ──────────────────────────────────────────────────────────────
     if ctx == "problema":
         del conversas[user_id]
         if any(p in msg_l for p in ["ban", "mute", "silenci", "expuls", "kick"]):
-            return f"{autor}, se acredita que foi punido incorretamente, descreva o ocorrido no canal de denúncias."
-        return f"Entendido, {autor}. Acione um moderador com detalhes do problema."
+            return f"Se acha que foi punido errado, vai no canal de denúncias e explica o que rolou."
+        return f"Chama um moderador e explica direitinho o que aconteceu."
 
     # ── PERGUNTA GENÉRICA ────────────────────────────────────────────────────
     if ctx == "pergunta":
         del conversas[user_id]
         if any(p in msg_l for p in ["regra", "norma", "proibido", "pode", "posso", "permitido"]):
             return REGRAS
-        return f"Não tenho essa informação, {autor}. Um moderador pode ajudar melhor."
+        return f"Não sei disso, {autor}. Pergunta pra um mod."
 
     del conversas[user_id]
-    return f"Entendido, {autor}. Se precisar de algo, é só chamar."
+    return f"Não entendi. Fala de novo."
 
 
 async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None) -> str:
@@ -813,56 +815,70 @@ async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None) 
         return REGRAS
 
     if any(p in msg for p in ["denúncia", "denuncia", "reportar", "report", "infração", "infringindo", "desrespeitando", "abusando"]):
-        return f"{autor}, use o canal de denúncias com prints do ocorrido. A equipe de moderação analisa assim que possível."
+        return f"{autor}, vai no canal de denúncias com prints. A moderação resolve."
 
     if any(p in msg for p in ["ban", "banir", "expulsar", "kick", "punir", "silenciar", "mutar"]):
         iniciar_conversa(user_id, "punicao")
-        return f"Você quer que alguém seja punido, {autor}? Mencione o usuário ou me passe o ID."
+        return f"Quem você quer punir? Menciona ou passa o ID."
 
     if any(p in msg for p in ["chamar mod", "acionar mod", "chamar a mod", "precisa de mod", "mod aqui"]):
         iniciar_conversa(user_id, "chamar_mod")
-        return f"Sim, diga. Você deseja acionar a equipe de moderação agora?"
+        return f"Sim, diga. Quer acionar a moderação agora?"
 
     if any(p in msg for p in ["problema", "erro", "bug", "quebrado", "não funciona", "nao funciona", "travou", "falhou"]):
         iniciar_conversa(user_id, "problema")
-        return f"Qual o problema, {autor}? Descreva o que está acontecendo."
+        return f"Que problema? Descreve."
 
-    if any(p in msg for p in ["notícia", "noticia", "news", "novidade", "aconteceu", "você viu", "voce viu", "viu que"]):
+    if any(p in msg for p in ["notícia", "noticia", "news", "novidade", "aconteceu", "você viu", "voce viu", "viu que", "o que tá rolando", "o que ta rolando", "mundo atual", "aconteceu hoje"]):
         noticias = await buscar_noticias()
         if noticias:
             n = random.choice(noticias)
             iniciar_conversa(user_id, "opiniao_noticia", {"noticia": n["titulo"]})
-            return f"Recentemente saiu isso em {n['fonte']}: {n['titulo']}. Tinha visto?"
-        return f"Não consegui buscar notícias agora. Tente mais tarde."
+            return f"{n['fonte']}: {n['titulo']}. Sabia disso?"
+        return f"Sem acesso a notícias agora."
 
     if any(p in msg for p in ["estatística", "estatistica", "quantos membros", "quantos são", "quantos tem", "membros do servidor", "quem está"]):
         if guild:
             return await stats_servidor(guild)
-        return f"Não tenho acesso às informações do servidor agora."
+        return f"Sem acesso ao servidor agora."
 
-    if any(p in msg for p in ["info", "informação", "quem é", "quem e", "tempo no servidor", "quando entrou", "idade da conta"]):
-        return f"{autor}, mencione o usuário que quer consultar."
+    if any(p in msg for p in ["tempo no servidor", "quando entrou", "idade da conta", "há quanto tempo"]):
+        if guild:
+            return await info_membro(message.author) if False else f"Menciona quem quer consultar."
+        return f"Menciona quem quer consultar."
 
-    if any(p in msg for p in ["consegue", "consegue banir", "pode banir", "você bane", "voce bane", "o que você faz", "o que voce faz", "pra que serve", "para que serve", "você pode", "voce pode"]):
+    if any(p in msg for p in ["consegue", "pode banir", "você bane", "voce bane", "o que você faz", "o que voce faz", "pra que serve", "para que serve", "você pode", "voce pode", "poderia banir"]):
         iniciar_conversa(user_id, "capacidades")
-        return f"Posso fazer várias coisas por aqui. Quer que eu explique o que está ao meu alcance?"
+        return f"Posso sim. Quer saber o que exatamente tô fazendo aqui?"
 
     if any(p in msg for p in ["obrigado", "obrigada", "valeu", "vlw", "thanks", "grato", "grata"]):
-        return f"Disponha, {autor}."
+        return random.choice([f".", f"Tá.", f"Certo."])
 
-    if any(p in msg for p in ["oi", "olá", "ola", "hey", "salve", "eai", "tudo bem", "tudo bom", "boa tarde", "bom dia", "boa noite"]):
+    if any(p in msg for p in ["oi", "olá", "ola", "hey", "salve", "eai", "fala", "tudo bem", "tudo bom", "boa tarde", "bom dia", "boa noite"]):
         iniciar_conversa(user_id, "saudacao")
-        return f"Tudo bem, {autor}. Como você está?"
+        return random.choice([
+            f"Fala, {autor}. O que quer?",
+            f"Oi. O que precisa?",
+            f"Tô aqui. O que é?",
+        ])
 
-    if any(p in msg for p in ["quem é você", "quem e voce"]):
-        return f"{autor}, sou o assistente automático deste servidor. Monitoro o chat, aplico as regras e respondo quando chamado."
+    if any(p in msg for p in ["quem é você", "quem e voce", "quem és"]):
+        return f"Sou o sistema deste servidor. Monitoro o chat, aplico as regras e respondo quando chamado."
 
     if "?" in conteudo:
         iniciar_conversa(user_id, "pergunta")
-        return f"Não entendi exatamente o que precisa, {autor}. Pode elaborar?"
+        return random.choice([
+            f"Não entendi. Fala de novo.",
+            f"Que isso? Elabora.",
+            f"Não captei. Explica melhor.",
+        ])
 
     iniciar_conversa(user_id, conteudo)
-    return f"Me chamou, {autor}? Fala o que precisa."
+    return random.choice([
+        f"Fala.",
+        f"O que é?",
+        f"Tô aqui.",
+    ])
 
 
 def parsear_ausencia(texto: str) -> tuple[int, str]:
