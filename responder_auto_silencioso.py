@@ -1587,28 +1587,42 @@ async def processar_ordem_mod(message: discord.Message) -> bool:
     return False
 
 
-async def resposta_inicial_superior(conteudo: str, autor: str, user_id: int, guild=None, membro=None, canal_id: int = None) -> str:
+async def resposta_inicial_superior(conteudo: str, autor: str, user_id: int, guild=None, membro=None, canal_id: int = None, message: discord.Message = None) -> str:
     """
     Versão estendida de resposta_inicial para superiores.
-    Aceita ordens diretas como dar boas-vindas (somente quando solicitado),
-    contar histórias, interagir com o público, etc.
+    Aceita ordens diretas. Quando a ordem envolve enviar em canal específico,
+    envia diretamente lá e retorna string vazia para o caller não reenviar.
     """
     msg = conteudo.lower()
+
+    # ── Detectar canal mencionado na mensagem (<#ID>) ─────────────────────────
+    canal_alvo = None
+    if message and message.channel_mentions:
+        canal_alvo = message.channel_mentions[0]
+    elif guild and canal_id:
+        canal_alvo = guild.get_channel(canal_id)
 
     # ── Ordens de boas-vindas (só executa quando explicitamente solicitado) ────
     if any(p in msg for p in ["boas-vindas", "boas vindas", "dá boas-vindas", "da boas-vindas",
                                "bem-vindo", "bem vindo", "recepciona", "receba os membros"]):
-        # Tenta mencionar membros que entraram recentemente
         alvos = []
         if membro and membro.guild:
             alvos = [m for m in membro.guild.members
                      if m.joined_at and not m.bot
                      and (datetime.now(timezone.utc) - m.joined_at.replace(tzinfo=timezone.utc)).days < 1
                      and m.id != client.user.id]
+
         if alvos:
             nomes = " ".join(m.mention for m in alvos[:5])
-            return f"Sejam bem-vindos ao servidor {nomes}. Leiam as regras em {CANAL_REGRAS} e bom aprendizado."
-        return f"Bem-vindos ao servidor. Leiam as regras em {CANAL_REGRAS} e aproveitem."
+            texto_bv = f"Sejam bem-vindos ao servidor {nomes}. Leiam as regras em {CANAL_REGRAS} e bom aprendizado."
+        else:
+            texto_bv = f"Bem-vindos ao servidor. Leiam as regras em {CANAL_REGRAS} e aproveitem."
+
+        # Se o superior especificou um canal diferente do atual, envia lá
+        if canal_alvo and message and canal_alvo.id != message.channel.id:
+            await canal_alvo.send(texto_bv)
+            return f"Boas-vindas enviadas em {canal_alvo.mention}."
+        return texto_bv
 
     # ── Ordens de história / contar algo ──────────────────────────────────────
     if any(p in msg for p in ["conta uma história", "conta uma historia", "conta um caso",
@@ -1628,9 +1642,14 @@ async def resposta_inicial_superior(conteudo: str, autor: str, user_id: int, gui
                     {"role": "user", "content": conteudo},
                 ],
             )
-            return resp.choices[0].message.content.strip()
+            texto_hist = resp.choices[0].message.content.strip()
         except Exception:
-            return "Não consigo contar histórias agora. Tenta mais tarde."
+            texto_hist = "Não consigo contar histórias agora. Tenta mais tarde."
+
+        if canal_alvo and message and canal_alvo.id != message.channel.id:
+            await canal_alvo.send(texto_hist)
+            return f"História enviada em {canal_alvo.mention}."
+        return texto_hist
 
     # ── Ordens de interação com o público ─────────────────────────────────────
     if any(p in msg for p in ["anima o servidor", "anima a galera", "interaja", "interage",
@@ -1642,7 +1661,11 @@ async def resposta_inicial_superior(conteudo: str, autor: str, user_id: int, gui
             "Debate rápido, terminal ou IDE? Fala aí.",
             "Galera, qual foi o último bug mais bizarro que vocês encontraram?",
         ]
-        return random.choice(opcoes)
+        texto_eng = random.choice(opcoes)
+        if canal_alvo and message and canal_alvo.id != message.channel.id:
+            await canal_alvo.send(texto_eng)
+            return f"Mensagem enviada em {canal_alvo.mention}."
+        return texto_eng
 
     # ── Ordens de aviso público ────────────────────────────────────────────────
     if any(p in msg for p in ["avisa o servidor", "avisa a galera", "comunica", "anuncia"]):
@@ -1650,9 +1673,16 @@ async def resposta_inicial_superior(conteudo: str, autor: str, user_id: int, gui
             if prefixo in msg:
                 idx = msg.find(prefixo) + len(prefixo)
                 texto_aviso = conteudo[idx:].strip(" :,.")
+                # Remove menção de canal do texto do aviso
+                texto_aviso = re.sub(r'<#\d+>\s*', '', texto_aviso).strip()
                 if texto_aviso:
                     mencao_todos = guild.default_role if guild else "@everyone"
-                    return f"Atenção {mencao_todos}, {texto_aviso}"
+                    msg_aviso = f"Atenção {mencao_todos}, {texto_aviso}"
+                    destino = canal_alvo if (canal_alvo and message and canal_alvo.id != message.channel.id) else None
+                    if destino:
+                        await destino.send(msg_aviso)
+                        return f"Aviso enviado em {destino.mention}."
+                    return msg_aviso
         return "Qual é o aviso? Manda o conteúdo depois do comando."
 
     # ── Fallback ───────────────────────────────────────────────────────────────
@@ -1775,7 +1805,7 @@ async def on_message(message: discord.Message):
             del ausencia[message.author.id]
         tratado = await processar_ordem(message)
         if not tratado and mencionado:
-            resposta = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id)
+            resposta = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
             await message.reply(resposta)
         elif not tratado:
             await processar_links(message)
