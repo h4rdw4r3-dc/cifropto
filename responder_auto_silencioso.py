@@ -770,17 +770,20 @@ async def confirmar_acao(descricao: str, fallback: str) -> str:
 
 
 async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=None, canal_id: int = None) -> str:
+    # Mantém conversa ativa no canal atual (independe de ter API key)
+    if canal_id:
+        conversas_claude[user_id] = {"canal": canal_id, "ultima": agora_utc()}
+
     if not ANTHROPIC_DISPONIVEL or not ANTHROPIC_API_KEY:
-        return random.choice(["Não sei disso.", "Sem resposta pra isso.", "Pergunta pra um mod."])
+        return random.choice([
+            "Fala.", f"Tô aqui, {autor}. O que é?", "Pode falar.",
+            "Diz.", "Sim?", "O que quer?", "Tô ouvindo.",
+        ])
 
     hist = historico_claude.setdefault(user_id, [])
     hist.append({"role": "user", "content": f"{autor}: {pergunta}"})
     if len(hist) > 12:
         hist[:] = hist[-12:]
-
-    # Mantém conversa ativa no canal atual
-    if canal_id:
-        conversas_claude[user_id] = {"canal": canal_id, "ultima": agora_utc()}
 
     try:
         ac = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
