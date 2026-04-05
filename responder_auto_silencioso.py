@@ -43,8 +43,30 @@ def eh_autorizado(member: discord.Member) -> bool:
 
 DADOS_PATH = "dados.json"
 
+# Palavras customizadas adicionadas pelos donos em tempo real
+palavras_custom: dict[str, list[str]] = {
+    "vulgares": [], "sexual": [], "discriminacao": [], "compostos": []
+}
+
+CATEGORIAS_ALIAS = {
+    "vulgar": "vulgares", "palavrao": "vulgares", "xingamento": "vulgares",
+    "vulgares": "vulgares", "palavroes": "vulgares",
+    "sexual": "sexual", "adulto": "sexual", "18": "sexual", "explicit": "sexual",
+    "discriminacao": "discriminacao", "racismo": "discriminacao",
+    "preconceito": "discriminacao", "lgbtfobia": "discriminacao", "bullying": "discriminacao",
+    "composto": "compostos", "compostos": "compostos", "palavra composta": "compostos",
+}
+
+def inferir_categoria(texto: str) -> str:
+    """Tenta descobrir a categoria pelo contexto da mensagem. Padrão: vulgares."""
+    t = texto.lower()
+    for alias, cat in CATEGORIAS_ALIAS.items():
+        if alias in t:
+            return cat
+    return "vulgares"
+
 def carregar_dados():
-    global infracoes, ultimo_motivo, silenciamentos
+    global infracoes, ultimo_motivo, silenciamentos, palavras_custom
     if not os.path.exists(DADOS_PATH):
         return
     try:
@@ -56,7 +78,10 @@ def carregar_dados():
             ultimo_motivo[int(k)] = v
         for k, v in dados.get("silenciamentos", {}).items():
             silenciamentos[int(k)] = v
-        print(f"[DADOS] {len(infracoes)} usuários carregados do histórico.")
+        for cat in palavras_custom:
+            palavras_custom[cat] = dados.get("palavras_custom", {}).get(cat, [])
+        total = sum(len(v) for v in palavras_custom.values())
+        print(f"[DADOS] {len(infracoes)} usuários e {total} palavras customizadas carregadas.")
     except Exception as e:
         print(f"[DADOS] Erro ao carregar: {e}")
 
@@ -67,15 +92,16 @@ def salvar_dados():
                 "infracoes": {str(k): v for k, v in infracoes.items()},
                 "ultimo_motivo": {str(k): v for k, v in ultimo_motivo.items()},
                 "silenciamentos": {str(k): v for k, v in silenciamentos.items()},
-            }, f)
+                "palavras_custom": palavras_custom,
+            }, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"[DADOS] Erro ao salvar: {e}")
 
 # Histórico de flood, infrações e conversas por usuário
 historico_mensagens = defaultdict(list)
-historico_conteudo: dict[int, list] = defaultdict(list)  # para detectar copy-paste repetido
+historico_conteudo: dict[int, list] = defaultdict(list)
 infracoes: dict[int, int] = defaultdict(int)
-silenciamentos: dict[int, int] = defaultdict(int)  # quantas vezes foi silenciado
+silenciamentos: dict[int, int] = defaultdict(int)
 ultimo_motivo: dict[int, str] = {}
 conversas: dict[int, dict] = {}
 ausencia: dict[int, dict] = {}
@@ -363,7 +389,7 @@ def detectar_violacoes(mensagem: str) -> list[str]:
     msg_norm = normalizar(texto_limpo)
 
     # Palavrões: sempre punidos
-    for palavra in PALAVRAS_VULGARES:
+    for palavra in PALAVRAS_VULGARES + palavras_custom["vulgares"]:
         hit = (
             contem_ambigua_com_contexto(msg_norm, palavra)
             if palavra in AMBIGUAS
@@ -373,15 +399,15 @@ def detectar_violacoes(mensagem: str) -> list[str]:
             violacoes.append(f"vocabulário vulgar, regra número 5 dos canais em {CANAL_REGRAS}")
             break
 
-    # Palavrões compostos (ex: "ratomanocu") — sem verificação de limite de palavra
+    # Palavrões compostos + customizados compostos
     if not violacoes:
-        for sub in COMPOSTOS_VULGARES:
+        for sub in COMPOSTOS_VULGARES + palavras_custom["compostos"]:
             if normalizar(sub) in msg_norm:
                 violacoes.append(f"vocabulário vulgar, regra número 5 dos canais em {CANAL_REGRAS}")
                 break
 
     # Conteúdo sexual: sempre proibido
-    for termo in CONTEUDO_SEXUAL:
+    for termo in CONTEUDO_SEXUAL + palavras_custom["sexual"]:
         hit = (
             contem_ambigua_com_contexto(msg_norm, termo)
             if termo in AMBIGUAS
@@ -391,8 +417,8 @@ def detectar_violacoes(mensagem: str) -> list[str]:
             violacoes.append(f"conteúdo adulto ou explícito, regra número 2 dos canais em {CANAL_REGRAS}")
             break
 
-    # Discriminação: tolerância estrita para evitar falsos positivos
-    for termo in DISCRIMINACAO:
+    # Discriminação: tolerância estrita + customizadas
+    for termo in DISCRIMINACAO + palavras_custom["discriminacao"]:
         if contem_fuzzy_estrito(msg_norm, termo):
             violacoes.append(f"discriminação ou bullying, regra número 4 dos canais em {CANAL_REGRAS}")
             break
@@ -827,6 +853,9 @@ INTENCOES = {
     ],
     "regras": ["mostra as regras", "exibe as regras", "quais as regras", "regras"],
     "ajuda":  ["ajuda", "help", "comandos", "o que você faz", "o que voce faz"],
+    "adicionar": ["adiciona ", "adicionar ", "bloqueia ", "bloquear ", "filtra ", "filtrar "],
+    "remover":   ["remove ", "remover ", "desbloqueia ", "desbloquear "],
+    "listar":    ["lista palavras", "listar palavras", "palavras adicionadas", "palavras bloqueadas", "filtros ativos"],
 }
 
 
@@ -1068,6 +1097,60 @@ async def processar_ordem(message: discord.Message):
     # ── regras ─────────────────────────────────────────────────────────────────
     elif cmd == "regras":
         await message.channel.send(REGRAS)
+
+    # ── adicionar palavra ──────────────────────────────────────────────────────
+    elif cmd in ("adicionar", "adiciona", "bloquear", "bloqueia", "filtrar", "filtra"):
+        msg = conteudo.lower()
+        # Extrai a palavra entre aspas ou após "palavra/termo/filtro"
+        m = re.search(r'["\']([^"\']+)["\']', conteudo)
+        if not m:
+            m = re.search(r'(?:palavra|termo|filtro|adiciona[r]?|bloqueia[r]?|filtra[r]?)\s+(\S+)', msg)
+        if not m:
+            await message.channel.send("Não entendi qual palavra adicionar. Use: adicionar \"palavra\" como vulgar/sexual/discriminação")
+            return
+        nova = m.group(1).strip().lower()
+        cat = inferir_categoria(msg)
+        if nova not in palavras_custom[cat]:
+            palavras_custom[cat].append(nova)
+            salvar_dados()
+            nomes = {"vulgares": "palavrões", "sexual": "conteúdo sexual", "discriminacao": "discriminação", "compostos": "compostos"}
+            await message.channel.send(f'"{nova}" adicionada à lista de {nomes[cat]}.')
+        else:
+            await message.channel.send(f'"{nova}" já está na lista.')
+
+    # ── remover palavra ────────────────────────────────────────────────────────
+    elif cmd in ("remover", "remove", "desbloquear", "desbloqueia", "desfiltrar"):
+        msg = conteudo.lower()
+        m = re.search(r'["\']([^"\']+)["\']', conteudo)
+        if not m:
+            m = re.search(r'(?:remove[r]?|remov[ae][r]?|desbloqueai?[r]?|desfiltrai?[r]?)\s+(\S+)', msg)
+        if not m:
+            await message.channel.send("Não entendi qual palavra remover. Use: remover \"palavra\"")
+            return
+        alvo = m.group(1).strip().lower()
+        removida = False
+        for cat in palavras_custom:
+            if alvo in palavras_custom[cat]:
+                palavras_custom[cat].remove(alvo)
+                removida = True
+        if removida:
+            salvar_dados()
+            await message.channel.send(f'"{alvo}" removida da detecção.')
+        else:
+            await message.channel.send(f'"{alvo}" não estava em nenhuma lista customizada.')
+
+    # ── listar palavras customizadas ───────────────────────────────────────────
+    elif cmd in ("listar", "lista", "palavras", "filtros"):
+        total = sum(len(v) for v in palavras_custom.values())
+        if total == 0:
+            await message.channel.send("Nenhuma palavra customizada adicionada ainda.")
+            return
+        linhas = []
+        nomes = {"vulgares": "Palavrões", "sexual": "Sexual", "discriminacao": "Discriminação", "compostos": "Compostos"}
+        for cat, lista in palavras_custom.items():
+            if lista:
+                linhas.append(f"{nomes[cat]}: {', '.join(lista)}")
+        await message.channel.send("Palavras customizadas:\n" + "\n".join(linhas))
 
     # ── ausente [duração] [motivo] ─────────────────────────────────────────────
     elif cmd == "ausente":
