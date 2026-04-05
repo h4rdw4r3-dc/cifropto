@@ -778,6 +778,72 @@ SYSTEM_ACAO = (
     "Sem emojis, sem asteriscos, sem markdown, sem dois pontos. Inclua os dados exatos que receber no contexto."
 )
 
+# ── Conhecimento dinâmico do servidor ────────────────────────────────────────
+_contexto_servidor: str = ""  # preenchido no on_ready
+
+
+def build_server_context(guild: discord.Guild) -> str:
+    """
+    Mapeia o servidor inteiro (canais, categorias, cargos, membros)
+    e retorna uma string de contexto para injetar no system prompt da IA.
+    """
+    linhas = [f"Servidor: {guild.name} (ID {guild.id})"]
+
+    # Categorias e canais
+    linhas.append("Canais e categorias:")
+    categorias_vistas = set()
+    for canal in guild.channels:
+        if isinstance(canal, discord.CategoryChannel):
+            continue  # processa junto com os filhos
+    for categoria in sorted(guild.categories, key=lambda c: c.position):
+        categorias_vistas.add(categoria.id)
+        filhos = [c for c in categoria.channels if not isinstance(c, discord.CategoryChannel)]
+        nomes_filhos = ", ".join(
+            f"#{c.name} ({c.id})" + (" [voz]" if isinstance(c, discord.VoiceChannel) else "")
+            for c in sorted(filhos, key=lambda c: c.position)
+        )
+        linhas.append(f"  [{categoria.name}] {nomes_filhos}")
+    # Canais sem categoria
+    sem_cat = [c for c in guild.channels
+               if not isinstance(c, discord.CategoryChannel) and c.category is None]
+    if sem_cat:
+        nomes = ", ".join(f"#{c.name} ({c.id})" for c in sorted(sem_cat, key=lambda c: c.position))
+        linhas.append(f"  [sem categoria] {nomes}")
+
+    # Cargos
+    cargos = [r for r in guild.roles if r.name != "@everyone"]
+    cargos_txt = ", ".join(f"{r.name} ({r.id})" for r in sorted(cargos, key=lambda r: -r.position))
+    linhas.append(f"Cargos: {cargos_txt}")
+
+    # Contagem de membros
+    total = guild.member_count
+    bots = sum(1 for m in guild.members if m.bot)
+    linhas.append(f"Membros: {total - bots} humanos, {bots} bots")
+
+    # Proprietário
+    if guild.owner:
+        linhas.append(f"Dono do servidor: {guild.owner.display_name} ({guild.owner.id})")
+
+    return "\n".join(linhas)
+
+
+def system_com_contexto() -> str:
+    """Retorna o system prompt completo com o contexto do servidor injetado."""
+    base = (
+        "Você é o assistente automático de um servidor Discord brasileiro. "
+        "Personalidade: direto, seco, rude quando necessário, mas nunca abusivo. "
+        "Fala como brasileiro jovem, com gírias naturais do cotidiano. "
+        "Sem emojis, sem listas, sem markdown, sem asteriscos, sem dois pontos. "
+        "Respostas curtas, máximo 2 frases. "
+        "Você conhece o servidor por completo — canais, categorias, cargos e membros estão listados abaixo. "
+        "Use esse conhecimento para responder perguntas sobre o servidor com precisão. "
+        "Quando não souber algo que não esteja no contexto, admite sem inventar. "
+        "Você não é um bot amigável, é um sistema de moderação que tolera conversas.\n\n"
+    )
+    if _contexto_servidor:
+        base += f"CONTEXTO DO SERVIDOR:\n{_contexto_servidor}\n\nREGRAS:\n{REGRAS}"
+    return base
+
 def _groq_client():
     return AsyncOpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
 
@@ -815,7 +881,7 @@ async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=No
     if len(hist) > 12:
         hist[:] = hist[-12:]
 
-    mensagens = [{"role": "system", "content": SYSTEM_CLAUDE}] + hist
+    mensagens = [{"role": "system", "content": system_com_contexto()}] + hist
 
     try:
         resp = await _groq_client().chat.completions.create(
@@ -1718,14 +1784,49 @@ async def silenciar(membro: discord.Member, canal, motivo: str):
 
 @client.event
 async def on_ready():
+    global _contexto_servidor
     carregar_dados()
     print(f"Conectado como {client.user}")
     guild = client.get_guild(SERVIDOR_ID)
     if guild:
         pode = tem_permissao_moderacao(guild)
         print(f"Servidor: {guild.name} | Permissao de moderacao: {'sim' if pode else 'não, apenas avisos'}")
+        _contexto_servidor = build_server_context(guild)
+        print(f"[CONTEXTO] Servidor mapeado: {len(guild.channels)} canais, {len(guild.roles)} cargos, {guild.member_count} membros.")
     else:
         print(f"Servidor {SERVIDOR_ID} nao encontrado. Verifique se esta no servidor.")
+
+
+@client.event
+async def on_guild_channel_create(channel):
+    """Atualiza o contexto quando um canal é criado."""
+    global _contexto_servidor
+    if channel.guild.id == SERVIDOR_ID:
+        _contexto_servidor = build_server_context(channel.guild)
+
+
+@client.event
+async def on_guild_channel_delete(channel):
+    """Atualiza o contexto quando um canal é deletado."""
+    global _contexto_servidor
+    if channel.guild.id == SERVIDOR_ID:
+        _contexto_servidor = build_server_context(channel.guild)
+
+
+@client.event
+async def on_guild_role_create(role):
+    """Atualiza o contexto quando um cargo é criado."""
+    global _contexto_servidor
+    if role.guild.id == SERVIDOR_ID:
+        _contexto_servidor = build_server_context(role.guild)
+
+
+@client.event
+async def on_guild_role_delete(role):
+    """Atualiza o contexto quando um cargo é deletado."""
+    global _contexto_servidor
+    if role.guild.id == SERVIDOR_ID:
+        _contexto_servidor = build_server_context(role.guild)
 
 
 @client.event
