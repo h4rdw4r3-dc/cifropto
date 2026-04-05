@@ -1648,13 +1648,19 @@ async def on_message(message: discord.Message):
             except Exception:
                 pass
 
-        await processar_ordem(message)
+        tratado = await processar_ordem(message)
         await processar_links(message)
+        if not tratado and mencionado:
+            resposta = await resposta_inicial(conteudo, autor, user_id, message.guild, message.author, message.channel.id)
+            await message.reply(resposta)
         return
 
     # ── Equipe de mod: comandos via menção ou "engenheiro", sujeita a punições ─
     if eh_mod and mencionado:
-        await processar_ordem(message)
+        tratado = await processar_ordem(message)
+        if not tratado:
+            resposta = await resposta_inicial(conteudo, autor, user_id, message.guild, message.author, message.channel.id)
+            await message.reply(resposta)
         return
 
     # ── Detectar flood (membros comuns) ───────────────────────────────────────
