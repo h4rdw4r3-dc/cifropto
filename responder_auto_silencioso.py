@@ -789,7 +789,18 @@ def build_server_context(guild: discord.Guild) -> str:
     Mapeia o servidor inteiro (canais, categorias, cargos, membros)
     e retorna uma string de contexto para injetar no system prompt da IA.
     """
-    linhas = [f"Servidor: {guild.name} (ID {guild.id})"]
+    brasilia = timezone(timedelta(hours=-3))
+    criado_em = guild.created_at.astimezone(brasilia).strftime("%d/%m/%Y às %H:%M")
+
+    linhas = [
+        f"Servidor: {guild.name} (ID {guild.id})",
+        f"Criado/inaugurado em: {criado_em} (horário de Brasília)",
+    ]
+
+    if guild.description:
+        linhas.append(f"Descrição: {guild.description}")
+
+    linhas.append(f"Nível de boost: {guild.premium_tier} ({guild.premium_subscription_count} boosts)")
 
     # Categorias e canais
     linhas.append("Canais e categorias:")
@@ -912,20 +923,22 @@ async def continuar_conversa(user_id: int, msg: str, autor: str, guild=None) -> 
     # ── SAUDAÇÃO ──────────────────────────────────────────────────────────────
     if ctx == "saudacao":
         if etapa == 1:
-            estado["etapa"] = 2
             if any(p in msg_l for p in ["bem", "bom", "otimo", "ótimo", "tranquilo", "tudo"]):
+                estado["etapa"] = 2
                 return random.choice(["Que bom. O que quer?", "Ótimo. O que precisa?", "Beleza. O que é?"])
             if any(p in msg_l for p in ["mal", "ruim", "chateado", "cansado", "triste"]):
+                estado["etapa"] = 2
                 estado["contexto"] = "desabafo"
                 return random.choice(["O que aconteceu?", "Me conta.", "O que rolou?", "Fala o que é."])
-            return random.choice([f"O que quer, {autor}?", f"O que é, {autor}?", f"Fala.", "Sim?"])
+            # Mensagem não é resposta à saudação — encerra e deixa o fluxo principal processar
+            del conversas[user_id]
+            return None
         if etapa == 2:
             del conversas[user_id]
             if any(p in msg_l for p in ["regra", "norma", "proibido"]):
                 return REGRAS
-            if "?" in msg:
-                return f"Isso não é comigo. Chama um mod."
-            return random.choice(["Fala logo o que precisa.", "Pode falar.", "Tô ouvindo.", "Qual é?"])
+            # Qualquer outra coisa: devolve None para o chamador tratar corretamente
+            return None
 
     # ── DESABAFO ──────────────────────────────────────────────────────────────
     if ctx == "desabafo":
@@ -1641,12 +1654,19 @@ async def processar_ordem(message: discord.Message) -> bool:
         if not canal_destino:
             await message.channel.send("Menciona o canal onde devo enviar.")
             return True
-        # Extrai o texto após a menção do canal
-        texto_msg = re.sub(r'<#\d+>', '', conteudo)
-        texto_msg = re.sub(r'<@!?\d+>', '', texto_msg)
-        # Remove o verbo do início
-        texto_msg = re.sub(r'^\s*(envia|manda|fala|diz|escreve)\s*(uma mensagem de|uma mensagem|mensagem de|mensagem)?\s*', '', texto_msg, flags=re.IGNORECASE).strip()
-        texto_msg = re.sub(r'\s*(em|no|na|para|pro|pra)\s*$', '', texto_msg, flags=re.IGNORECASE).strip()
+        # Remove menções de canal e usuário
+        texto_msg = re.sub(r'<#\d+>\s*', '', conteudo).strip()
+        texto_msg = re.sub(r'<@!?\d+>\s*', '', texto_msg).strip()
+        # Remove tudo até o verbo inclusive (captura greedy mínimo para pegar o primeiro verbo)
+        texto_msg = re.sub(
+            r'^.*?(?:envia|manda|fala|diz|escreve)\s+(?:uma?\s+mensagem\s+(?:de\s+)?)?',
+            '', texto_msg, flags=re.IGNORECASE
+        ).strip()
+        # Remove indicador de destino que ficou no final (ex: "no canal de", "em", "para", "de")
+        texto_msg = re.sub(
+            r'\s+(?:no canal de|no canal|em|no|na|para|pro|pra|de)\s*$',
+            '', texto_msg, flags=re.IGNORECASE
+        ).strip()
         if not texto_msg:
             await message.channel.send("Qual mensagem devo enviar?")
             return True
@@ -1982,6 +2002,13 @@ async def on_message(message: discord.Message):
             del ausencia[message.author.id]
         tratado = await processar_ordem(message)
         if not tratado and mencionado:
+            # Continua conversa ativa antes de cair em resposta_inicial
+            estado_conv = conversas.get(user_id)
+            if estado_conv and (estado_conv.get("canal") is None or estado_conv["canal"] == message.channel.id):
+                resp_conv = await continuar_conversa(user_id, conteudo, autor, message.guild)
+                if resp_conv:
+                    await message.reply(resp_conv)
+                    return
             resposta = await resposta_inicial(conteudo, autor, user_id, message.guild, message.author, message.channel.id)
             await message.reply(resposta)
         elif not tratado:
@@ -1994,6 +2021,13 @@ async def on_message(message: discord.Message):
             del ausencia[message.author.id]
         tratado = await processar_ordem(message)
         if not tratado and mencionado:
+            # Continua conversa ativa antes de cair em resposta_inicial_superior
+            estado_conv = conversas.get(user_id)
+            if estado_conv and (estado_conv.get("canal") is None or estado_conv["canal"] == message.channel.id):
+                resp_conv = await continuar_conversa(user_id, conteudo, autor, message.guild)
+                if resp_conv:
+                    await message.reply(resp_conv)
+                    return
             resposta = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
             await message.reply(resposta)
         elif not tratado:
