@@ -909,7 +909,11 @@ def system_com_contexto() -> str:
         "Quando não souber algo, assume sem inventar. "
         "Nunca aja de forma infantil, exagerada ou servil. Sem exclamações forçadas, sem bajulação.\n\n"
         "Você conhece o servidor por completo — canais, cargos e membros listados abaixo. "
-        "Use esse conhecimento para responder sobre o servidor com precisão.\n\n"
+        "Use esse conhecimento para responder sobre o servidor com precisão. "
+        "CRÍTICO: sobre canais, membros e eventos do servidor, use APENAS o que estiver "
+        "explicitamente listado no contexto abaixo. Nunca invente, presuma nem extrapole "
+        "detalhes que não estejam no contexto — se não souber, diz que não tem essa informação. "
+        "Nomes de usuários são pessoas, não tópicos: 'Hardware' é um membro, não um canal sobre hardware.\n\n"
     )
     if _contexto_servidor:
         base += f"CONTEXTO DO SERVIDOR:\n{_contexto_servidor}\n\nREGRAS:\n{REGRAS}"
@@ -1688,7 +1692,9 @@ async def processar_ordem(message: discord.Message) -> bool:
             await message.channel.send(f"```\n{bloco}```")
 
     # ── envia mensagem em canal específico ─────────────────────────────────────
-    elif any(p in conteudo.lower() for p in ["envia", "manda", "fala", "diz", "escreve"]):
+    # Só dispara se houver menção de canal <#ID> — evita falsos positivos com
+    # palavras comuns como "fala", "manda", "diz" em frases normais
+    elif message.channel_mentions and any(p in conteudo.lower() for p in ["envia", "manda", "fala", "diz", "escreve"]):
         canal_destino = message.channel_mentions[0] if message.channel_mentions else None
         if not canal_destino:
             await message.channel.send("Menciona o canal onde devo enviar.")
