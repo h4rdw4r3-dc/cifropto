@@ -1575,6 +1575,7 @@ async def on_message(message: discord.Message):
         return
 
     autor = message.author.display_name
+    user_id = message.author.id
     conteudo = message.content
     eh_dono = message.author.id in DONOS_IDS
     eh_teste = message.author.id in CONTAS_TESTE
