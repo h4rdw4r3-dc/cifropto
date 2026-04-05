@@ -349,11 +349,14 @@ RACISMO = [
     "macaco", "macaca", "crioulo", "criulo",
     "negao", "mulatao", "cabelo duro", "cabelo pixaim", "cabelo ruim",
     "preto feio", "negro feio", "preto de alma branca",
-    "a coisa ficou preta", "humor negro", "lista negra",
-    "mercado negro", "inveja branca", "nao sou tuas negas",
-    "farinha do mesmo saco", "japoronga", "japinha",
-    "carcamano", "bugre", "monhe", "chinoca",
-    "vachina", "xing ling", "gringo sujo",
+    "volta pra africa", "volta para africa", "nao sao gente",
+    "sub-humano", "subhumano", "raça inferior", "raca inferior",
+    "escravo", "escrava", "senzala", "quilombo sujo",
+    "japoronga", "japinha", "carcamano", "bugre", "monhe", "chinoca",
+    "vachina", "xing ling", "gringo sujo", "gringo lixo",
+    "nordestino burro", "paraiba burro", "baiano burro",
+    "judeu sujo", "nazi", "nazista", "holocausto foi bom",
+    "genero inferior", "inferioridade racial", "limpeza racial",
 ]
 
 # ── LGBTfobia ────────────────────────────────────────────────────────────────
@@ -362,7 +365,9 @@ LGBTFOBIA = [
     "veado", "veadao", "veada",
     "bicha", "bichinha", "bixa",
     "boiola", "bolta", "bolagato",
-    "sapatao", "gilete", "traveco",
+    "sapatao", "gilete", "traveco", "travesti lixo",
+    "cura gay", "opção sexual", "doenca", "doença mental gay",
+    "abominacao", "abominação",
 ]
 
 # ── Capacitismo ───────────────────────────────────────────────────────────────
@@ -370,22 +375,32 @@ CAPACITISMO = [
     "retardado", "retardada", "mongoloide", "mongol",
     "debil mental", "debil", "aleijado", "aleijada",
     "coxo", "maneta", "surdo mudo", "anao",
+    "invalido", "inválido", "defeituoso", "defeituosa",
+    "louco varrido", "maluco varrido", "doido varrido",
 ]
 
 # ── Misoginia ─────────────────────────────────────────────────────────────────
 MISOGINIA = [
     "puta", "piranha", "vaca", "cachorra", "galinha",
     "mulher da vida", "mulher de vida facil",
-    "maria vai com as outras", "prostituta", "meretriz",
+    "prostituta", "meretriz", "rapariga",
     "corna", "corno",
+    "mulher nao presta", "mulher nao sabe", "lugar de mulher",
+    "mulher nao tem", "so serve pra", "volta pra cozinha",
+    "vai lavar roupa", "vai fazer comida",
 ]
 
-# ── Ofensas indiretas / incitação ────────────────────────────────────────────
+# ── Ofensas diretas / incitação a violência ──────────────────────────────────
 FRASES_OFENSIVAS = [
-    "vai se enforcar", "se mata", "morre logo", "se suicida",
+    "vai se enforcar", "se enforca", "se mata", "morre logo", "se suicida",
+    "devia morrer", "devia se matar", "vai morrer", "vai se matar",
     "sua mae", "sua mãe",
     "nao presta", "nao vale nada", "lixo da sociedade",
     "feito nas coxas", "meia tigela", "lixo humano",
+    "escoria", "escória", "verme", "parasita",
+    "inutil", "inútil", "fracassado", "fracassada",
+    "ninguem te quer", "ninguem gosta de voce", "some daqui",
+    "vai embora", "some da minha frente",
 ]
 
 # Lista unificada de ofensas sérias (discriminação, etc.)
@@ -848,6 +863,9 @@ def system_com_contexto() -> str:
         "Fala como brasileiro jovem, com gírias naturais do cotidiano. "
         "Sem emojis, sem listas, sem markdown, sem asteriscos, sem dois pontos. "
         "Respostas curtas, máximo 2 frases. "
+        "IMPORTANTE: perguntas de matemática, fatos, datas ou qualquer coisa com resposta objetiva — "
+        "responda direto com a resposta correta, sem rodeios nem filosofia. "
+        "Exemplo: 'quanto é 1+1?' → '2.' Exemplo: 'qual a capital do Brasil?' → 'Brasília.' "
         "Você conhece o servidor por completo — canais, categorias, cargos e membros estão listados abaixo. "
         "Use esse conhecimento para responder perguntas sobre o servidor com precisão. "
         "Quando não souber algo que não esteja no contexto, admite sem inventar. "
@@ -1662,9 +1680,10 @@ async def processar_ordem(message: discord.Message) -> bool:
             r'^.*?(?:envia|manda|fala|diz|escreve)\s+(?:uma?\s+mensagem\s+(?:de\s+)?)?',
             '', texto_msg, flags=re.IGNORECASE
         ).strip()
-        # Remove indicador de destino que ficou no final (ex: "no canal de", "em", "para", "de")
+        # Remove indicador de destino que ficou no final
+        # Ex: "no canal de", "em", "para", "pro shell", "no shell"
         texto_msg = re.sub(
-            r'\s+(?:no canal de|no canal|em|no|na|para|pro|pra|de)\s*$',
+            r'\s+(?:no canal de|no canal|n[oa]s?\s+\w+|em|no|na|para|pro|pra|de)\s*$',
             '', texto_msg, flags=re.IGNORECASE
         ).strip()
         if not texto_msg:
@@ -1931,6 +1950,67 @@ async def on_guild_role_delete(role):
         _contexto_servidor = build_server_context(role.guild)
 
 
+# Emojis/termos usados como reação ofensiva (ex: reação a mensagem de alguém)
+REACOES_OFENSIVAS = {
+    "🐒", "🦧", "🐵",           # usados com conotação racista
+    "💩",                         # usado para ofender
+    "🤮", "🤢",                  # nojo direcionado a pessoas
+}
+
+# Palavras-chave ofensivas em nomes de emoji customizado
+NOMES_EMOJI_OFENSIVOS = [
+    "macaco", "monkey", "nigger", "negro", "preto", "crioulo",
+    "viado", "gay", "bicha", "retardado", "idiota", "lixo",
+    "nazi", "hitler", "kkk",
+]
+
+
+@client.event
+async def on_reaction_add(reaction: discord.Reaction, user):
+    """Remove reações ofensivas de membros comuns."""
+    if not reaction.message.guild or reaction.message.guild.id != SERVIDOR_ID:
+        return
+    if user == client.user:
+        return
+    if eh_autorizado(user):
+        return
+
+    deve_remover = False
+    nome_emoji = ""
+
+    emoji = reaction.emoji
+    if isinstance(emoji, str):
+        # Emoji Unicode padrão
+        if emoji in REACOES_OFENSIVAS:
+            deve_remover = True
+            nome_emoji = emoji
+    else:
+        # Emoji customizado — verifica o nome
+        nome_lower = emoji.name.lower()
+        nome_norm = normalizar(nome_lower)
+        for termo in NOMES_EMOJI_OFENSIVOS:
+            if termo in nome_norm:
+                deve_remover = True
+                nome_emoji = emoji.name
+                break
+
+    if deve_remover:
+        try:
+            await reaction.remove(user)
+        except Exception:
+            pass
+        try:
+            await reaction.message.channel.send(
+                f"{user.mention}, reações ofensivas não são permitidas aqui. "
+                f"Leia as regras em {CANAL_REGRAS}."
+            )
+        except Exception:
+            pass
+        infracoes[user.id] += 1
+        salvar_dados()
+        print(f"[REAÇÃO REMOVIDA] {user.display_name}: {nome_emoji}")
+
+
 @client.event
 async def on_message(message: discord.Message):
     if message.author == client.user:
@@ -2065,6 +2145,12 @@ async def on_message(message: discord.Message):
         ultimo_motivo[message.author.id] = categoria_atual
         salvar_dados()
 
+        # Verifica se é discriminação/racismo para punição imediata
+        eh_discriminacao = any(
+            "discriminação" in desc or "bullying" in desc
+            for desc, _ in violacoes
+        )
+
         print(f"[INFRAÇÃO {count}/3] {autor}: {[(d, p) for d, p in violacoes]}")
 
         msg_id = message.id
@@ -2073,6 +2159,17 @@ async def on_message(message: discord.Message):
         except Exception:
             pass
         await enviar_auditoria(message.guild, message.author, violacoes, msg_id)
+
+        # Racismo/discriminação: silêncio imediato na 1ª infração
+        if eh_discriminacao:
+            if tem_permissao_moderacao(message.guild) and hasattr(message.author, 'timeout'):
+                await silenciar(message.author, message.channel, "discriminação — tolerância zero")
+            else:
+                await message.channel.send(
+                    f"{message.author.mention}, mensagem removida por discriminação ou racismo. "
+                    f"Tolerância zero para esse tipo de conduta. {mencao_mod(message.guild)}, tomem providências."
+                )
+            return
 
         if count >= 3:
             if tem_permissao_moderacao(message.guild) and hasattr(message.author, 'timeout'):
