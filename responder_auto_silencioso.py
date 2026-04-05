@@ -8,7 +8,6 @@ import xml.etree.ElementTree as ET
 import random
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from difflib import SequenceMatcher
 
 try:
     from openai import AsyncOpenAI
@@ -232,18 +231,6 @@ async def buscar_noticias() -> list[dict]:
     return _cache_noticias
 
 
-def formatar_duracao(delta: timedelta) -> str:
-    dias = delta.days
-    anos = dias // 365
-    meses = (dias % 365) // 30
-    dias_r = dias % 30
-    partes = []
-    if anos: partes.append(f"{anos} ano{'s' if anos != 1 else ''}")
-    if meses: partes.append(f"{meses} {'meses' if meses != 1 else 'mês'}")
-    if dias_r and not anos: partes.append(f"{dias_r} dia{'s' if dias_r != 1 else ''}")
-    return ", ".join(partes) if partes else "menos de um dia"
-
-
 async def info_membro(membro: discord.Member) -> str:
     agora = agora_utc()
     conta_criada = membro.created_at.replace(tzinfo=timezone.utc) if membro.created_at.tzinfo is None else membro.created_at
@@ -366,41 +353,33 @@ LGBTFOBIA = [
     "bicha", "bichinha", "bixa",
     "boiola", "bolta", "bolagato",
     "sapatao", "gilete", "traveco", "travesti lixo",
-    "cura gay", "opção sexual", "doenca", "doença mental gay",
+    "cura gay", "doenca mental gay",
     "abominacao", "abominação",
 ]
 
 # ── Capacitismo ───────────────────────────────────────────────────────────────
 CAPACITISMO = [
     "retardado", "retardada", "mongoloide", "mongol",
-    "debil mental", "debil", "aleijado", "aleijada",
+    "debil mental", "aleijado", "aleijada",
     "coxo", "maneta", "surdo mudo", "anao",
     "invalido", "inválido", "defeituoso", "defeituosa",
-    "louco varrido", "maluco varrido", "doido varrido",
 ]
 
 # ── Misoginia ─────────────────────────────────────────────────────────────────
 MISOGINIA = [
-    "puta", "piranha", "vaca", "cachorra", "galinha",
+    "puta", "piranha",
     "mulher da vida", "mulher de vida facil",
     "prostituta", "meretriz", "rapariga",
-    "corna", "corno",
     "mulher nao presta", "mulher nao sabe", "lugar de mulher",
-    "mulher nao tem", "so serve pra", "volta pra cozinha",
+    "so serve pra", "volta pra cozinha",
     "vai lavar roupa", "vai fazer comida",
 ]
 
-# ── Ofensas diretas / incitação a violência ──────────────────────────────────
+# ── Incitação a violência e desumanização grave ──────────────────────────────
 FRASES_OFENSIVAS = [
-    "vai se enforcar", "se enforca", "se mata", "morre logo", "se suicida",
-    "devia morrer", "devia se matar", "vai morrer", "vai se matar",
-    "sua mae", "sua mãe",
-    "nao presta", "nao vale nada", "lixo da sociedade",
-    "feito nas coxas", "meia tigela", "lixo humano",
-    "escoria", "escória", "verme", "parasita",
-    "inutil", "inútil", "fracassado", "fracassada",
-    "ninguem te quer", "ninguem gosta de voce", "some daqui",
-    "vai embora", "some da minha frente",
+    "vai se enforcar", "se enforca", "se suicida",
+    "devia morrer", "devia se matar",
+    "lixo da sociedade", "lixo humano",
 ]
 
 # Lista unificada de ofensas sérias (discriminação, etc.)
@@ -410,7 +389,7 @@ DISCORD_INVITE = re.compile(r"discord\.(gg|com\/invite)\/\w+", re.IGNORECASE)
 URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
 
 # Palavras ambíguas que só disparam com reforço de contexto
-AMBIGUAS = {"pau", "comer", "rola", "comer", "gala", "fenda"}
+AMBIGUAS = {"pau", "comer", "rola", "gala", "fenda"}
 
 def normalizar(texto: str) -> str:
     texto = re.sub(r'(?<=\w)[.\-_*#](?=\w)', '', texto)
@@ -481,36 +460,12 @@ def contem_fuzzy(texto_norm: str, palavra: str) -> bool:
     return False
 
 
-def score_contexto(msg_norm: str, listas: list[list[str]]) -> int:
-    return sum(
-        1 for lista in listas
-        if any(contem_fuzzy(msg_norm, p) for p in lista)
-    )
-
-
 def contem_ambigua_com_contexto(msg_norm: str, palavra: str) -> bool:
     if not contem_fuzzy(msg_norm, palavra):
         return False
     reforco = PALAVRAS_VULGARES + CONTEUDO_SEXUAL + DISCRIMINACAO
     reforco_sem_ambigua = [p for p in reforco if normalizar(p) != normalizar(palavra)]
     return any(contem_fuzzy(msg_norm, p) for p in reforco_sem_ambigua)
-
-
-def eh_xingamento_direcionado(mensagem: str) -> bool:
-    """
-    Verifica se o xingamento é direcionado a alguém (ofensa) ou solto (desabafo/diversão).
-    Considera ofensa quando há menção (@) ou expressões como "seu/sua/você/vc".
-    """
-    msg = mensagem.lower()
-    padroes_direcao = [
-        r"<@!?\d+>",             # menção direta
-        r"\bseu\b", r"\bsua\b",  # "seu idiota", "sua merda"
-        r"\bvocê\b", r"\bvc\b",  # "você é um..."
-        r"\bele\b", r"\bela\b",  # falando de alguém
-        r"\besse cara\b", r"\bessa cara\b",
-        r"\besse membro\b",
-    ]
-    return any(re.search(p, msg) for p in padroes_direcao)
 
 
 def contem_fuzzy_estrito(texto_norm: str, palavra: str) -> bool:
@@ -615,7 +570,7 @@ def detectar_violacoes(mensagem: str) -> list[tuple[str, str]]:
 
 
 def detectar_flood(user_id: int, conteudo: str = "") -> bool:
-    agora = datetime.now()
+    agora = agora_utc()
 
     # Flood por velocidade: 5 mensagens em 10 segundos
     historico_mensagens[user_id] = [
@@ -777,17 +732,6 @@ def eh_nao(msg: str) -> bool:
     return any(p in msg.lower().split() for p in NAO)
 
 
-SYSTEM_CLAUDE = (
-    "Você é o assistente automático de um servidor Discord brasileiro. "
-    "Personalidade: direto, seco, rude quando necessário, mas nunca abusivo. "
-    "Fala como brasileiro jovem, com gírias naturais do cotidiano. "
-    "Sem emojis, sem listas, sem markdown, sem asteriscos, sem dois pontos. "
-    "Respostas curtas, máximo 2 frases. "
-    "Você conhece as regras do servidor e orienta usuários quando perguntado. "
-    "Quando não souber algo, admite na lata sem inventar. "
-    "Você não é um bot amigável, é um sistema de moderação que tolera conversas."
-)
-
 SYSTEM_ACAO = (
     "Você é o sistema de moderação de um servidor Discord brasileiro. "
     "Acabei de executar uma ação de moderação. Gere UMA frase curta confirmando o que foi feito, "
@@ -819,10 +763,6 @@ def build_server_context(guild: discord.Guild) -> str:
 
     # Categorias e canais
     linhas.append("Canais e categorias:")
-    categorias_vistas = set()
-    for canal in guild.channels:
-        if isinstance(canal, discord.CategoryChannel):
-            continue  # processa junto com os filhos
     for categoria in sorted(guild.categories, key=lambda c: c.position):
         categorias_vistas.add(categoria.id)
         filhos = [c for c in categoria.channels if not isinstance(c, discord.CategoryChannel)]
@@ -1950,65 +1890,54 @@ async def on_guild_role_delete(role):
         _contexto_servidor = build_server_context(role.guild)
 
 
-# Emojis/termos usados como reação ofensiva (ex: reação a mensagem de alguém)
-REACOES_OFENSIVAS = {
-    "🐒", "🦧", "🐵",           # usados com conotação racista
-    "💩",                         # usado para ofender
-    "🤮", "🤢",                  # nojo direcionado a pessoas
-}
-
-# Palavras-chave ofensivas em nomes de emoji customizado
+# Palavras-chave ofensivas em nomes de emoji customizado do servidor
+# (emojis Unicode são ambíguos demais para filtrar — muitos usos legítimos)
 NOMES_EMOJI_OFENSIVOS = [
-    "macaco", "monkey", "nigger", "negro", "preto", "crioulo",
-    "viado", "gay", "bicha", "retardado", "idiota", "lixo",
+    "nigger", "crioulo",
+    "viado", "bicha",
+    "retardado",
     "nazi", "hitler", "kkk",
 ]
 
 
 @client.event
 async def on_reaction_add(reaction: discord.Reaction, user):
-    """Remove reações ofensivas de membros comuns."""
+    """Remove reações com emojis customizados ofensivos de membros comuns."""
     if not reaction.message.guild or reaction.message.guild.id != SERVIDOR_ID:
         return
     if user == client.user:
         return
-    if eh_autorizado(user):
+
+    # Garante que user é Member (tem .roles); reações podem retornar User
+    membro = reaction.message.guild.get_member(user.id)
+    if membro is None:
+        return
+    if eh_autorizado(membro):
         return
 
-    deve_remover = False
-    nome_emoji = ""
-
+    # Só filtra emojis customizados — Unicode tem muitos usos legítimos
     emoji = reaction.emoji
     if isinstance(emoji, str):
-        # Emoji Unicode padrão
-        if emoji in REACOES_OFENSIVAS:
-            deve_remover = True
-            nome_emoji = emoji
-    else:
-        # Emoji customizado — verifica o nome
-        nome_lower = emoji.name.lower()
-        nome_norm = normalizar(nome_lower)
-        for termo in NOMES_EMOJI_OFENSIVOS:
-            if termo in nome_norm:
-                deve_remover = True
-                nome_emoji = emoji.name
-                break
+        return
 
-    if deve_remover:
-        try:
-            await reaction.remove(user)
-        except Exception:
-            pass
-        try:
-            await reaction.message.channel.send(
-                f"{user.mention}, reações ofensivas não são permitidas aqui. "
-                f"Leia as regras em {CANAL_REGRAS}."
-            )
-        except Exception:
-            pass
-        infracoes[user.id] += 1
-        salvar_dados()
-        print(f"[REAÇÃO REMOVIDA] {user.display_name}: {nome_emoji}")
+    nome_norm = normalizar(emoji.name.lower())
+    for termo in NOMES_EMOJI_OFENSIVOS:
+        if termo in nome_norm:
+            try:
+                await reaction.remove(user)
+            except Exception:
+                pass
+            try:
+                await reaction.message.channel.send(
+                    f"{membro.mention}, emojis com esse nome não são permitidos aqui. "
+                    f"Leia as regras em {CANAL_REGRAS}."
+                )
+            except Exception:
+                pass
+            infracoes[membro.id] += 1
+            salvar_dados()
+            print(f"[REAÇÃO REMOVIDA] {membro.display_name}: {emoji.name}")
+            break
 
 
 @client.event
@@ -2032,12 +1961,10 @@ async def on_message(message: discord.Message):
     autor = message.author.display_name
     user_id = message.author.id
     conteudo = message.content
-    membro_autor = message.author
 
     _eh_dono = message.author.id in DONOS_IDS
     _eh_superior_ = eh_superior(message.author)   # donos + cargos superiores
     _eh_mod_ = eh_mod_exclusivo(message.author)    # só moderação (não superiores)
-    _eh_autorizado = eh_autorizado(message.author) # qualquer nível acima de membro comum
     eh_teste = message.author.id in CONTAS_TESTE
 
     # ── Verificar menção/gatilho ───────────────────────────────────────────────
@@ -2076,20 +2003,20 @@ async def on_message(message: discord.Message):
             return
         # continua para verificação de violações abaixo
 
-    # ── Donos: isentos de punição, comandos sempre ativos (sem precisar mencionar) ──
+    # ── Donos: isentos de punição, comandos + ordens gerais sempre ativos ────────
     if _eh_dono:
         if message.author.id in ausencia:
             del ausencia[message.author.id]
         tratado = await processar_ordem(message)
         if not tratado and mencionado:
-            # Continua conversa ativa antes de cair em resposta_inicial
+            # Continua conversa ativa antes de cair em resposta_inicial_superior
             estado_conv = conversas.get(user_id)
             if estado_conv and (estado_conv.get("canal") is None or estado_conv["canal"] == message.channel.id):
                 resp_conv = await continuar_conversa(user_id, conteudo, autor, message.guild)
                 if resp_conv:
                     await message.reply(resp_conv)
                     return
-            resposta = await resposta_inicial(conteudo, autor, user_id, message.guild, message.author, message.channel.id)
+            resposta = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
             await message.reply(resposta)
         elif not tratado:
             await processar_links(message)
