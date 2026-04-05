@@ -896,18 +896,20 @@ def build_server_context(guild: discord.Guild) -> str:
 def system_com_contexto() -> str:
     """Retorna o system prompt completo com o contexto do servidor injetado."""
     base = (
-        "Você é o assistente automático de um servidor Discord brasileiro. "
-        "Personalidade: direto, seco, rude quando necessário, mas nunca abusivo. "
-        "Fala como brasileiro jovem, com gírias naturais do cotidiano. "
-        "Sem emojis, sem listas, sem markdown, sem asteriscos, sem dois pontos. "
-        "Respostas curtas, máximo 2 frases. "
-        "IMPORTANTE: perguntas de matemática, fatos, datas ou qualquer coisa com resposta objetiva — "
-        "responda direto com a resposta correta, sem rodeios nem filosofia. "
-        "Exemplo: 'quanto é 1+1?' → '2.' Exemplo: 'qual a capital do Brasil?' → 'Brasília.' "
-        "Você conhece o servidor por completo — canais, categorias, cargos e membros estão listados abaixo. "
-        "Use esse conhecimento para responder perguntas sobre o servidor com precisão. "
-        "Quando não souber algo que não esteja no contexto, admite sem inventar. "
-        "Você não é um bot amigável, é um sistema de moderação que tolera conversas.\n\n"
+        "Você é o shell_engenheiro, presença central de um servidor Discord brasileiro. "
+        "Personalidade: adulto, direto, inteligente, sarcástico quando apropriado, mas nunca grosseiro sem motivo. "
+        "Fala como brasileiro jovem e culto — gírias naturais, sem forçar. "
+        "Sem emojis, sem listas, sem markdown, sem asteriscos. "
+        "Comprimento da resposta proporcional ao assunto: perguntas simples = resposta curta; "
+        "debates, explicações ou temas complexos = resposta completa, sem cortar. "
+        "Pode falar sobre qualquer assunto — tecnologia, ciência, política, cultura, filosofia, "
+        "jogos, história, esportes, cotidiano, humor, etc. — desde que não infrinja os termos do Discord. "
+        "Não redirecione nem esquive de assuntos legítimos. Engaje de verdade. "
+        "Perguntas com resposta objetiva (math, fatos, datas): responda direto e correto, sem rodeio. "
+        "Quando não souber algo, assume sem inventar. "
+        "Nunca aja de forma infantil, exagerada ou servil. Sem exclamações forçadas, sem bajulação.\n\n"
+        "Você conhece o servidor por completo — canais, cargos e membros listados abaixo. "
+        "Use esse conhecimento para responder sobre o servidor com precisão.\n\n"
     )
     if _contexto_servidor:
         base += f"CONTEXTO DO SERVIDOR:\n{_contexto_servidor}\n\nREGRAS:\n{REGRAS}"
@@ -955,7 +957,7 @@ async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=No
     try:
         resp = await _groq_client().chat.completions.create(
             model="llama-3.3-70b-versatile",
-            max_tokens=150,
+            max_tokens=400,
             messages=mensagens,
         )
         texto = resp.choices[0].message.content.strip()
@@ -1133,39 +1135,20 @@ async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, 
             return await info_membro(membro)
         return f"Menciona quem quer consultar."
 
-    if any(p in msg for p in ["consegue", "pode banir", "você bane", "voce bane", "o que você faz", "o que voce faz", "pra que serve", "para que serve", "você pode", "voce pode", "poderia banir"]):
-        iniciar_conversa(user_id, "capacidades", canal_id=canal_id)
-        return f"Posso sim. Quer saber o que exatamente tô fazendo aqui?"
-
     if any(p in msg for p in ["obrigado", "obrigada", "valeu", "vlw", "thanks", "grato", "grata"]):
         return random.choice([
             ".", "Tá.", "Certo.", "Ok.", "Tmj.", "Nada não.",
             f"Isso aí, {autor}.", "De nada.", "Tranquilo.",
         ])
 
-    if any(p in msg for p in ["oi", "olá", "ola", "hey", "salve", "eai", "fala", "tudo bem", "tudo bom", "boa tarde", "bom dia", "boa noite"]):
+    if any(p in msg for p in ["oi", "olá", "ola", "hey", "salve", "eai", "tudo bem", "tudo bom", "boa tarde", "bom dia", "boa noite"]):
         iniciar_conversa(user_id, "saudacao", canal_id=canal_id)
         return random.choice([
-            f"Fala, {autor}. O que quer?",
-            f"Oi. O que é?",
-            f"Tô aqui.",
-            f"Sim?",
-            f"O que há, {autor}?",
-            f"Pode falar.",
+            f"Fala, {autor}.",
             f"Oi.",
-        ])
-
-    if any(p in msg for p in ["quem é você", "quem e voce", "quem és", "o que é você", "o que voce é"]):
-        return random.choice([
-            f"Sou o sistema deste servidor. Monitoro o chat e aplico as regras.",
-            f"Sou o assistente daqui. Cuido do chat e respondo quando chamado.",
-            f"Sistema de moderação automática. Por que pergunta?",
-        ])
-
-    if any(p in msg for p in ["como vai", "como você tá", "como voce ta", "tá bem", "ta bem", "tudo certo"]):
-        return random.choice([
-            "Operando normalmente.", "Tô por aqui.", "Funcionando.", "Aqui firme.",
-            "Por aqui. E você?",
+            f"Tô aqui.",
+            f"O que há?",
+            f"Sim?",
         ])
 
     return await responder_com_claude(conteudo, autor, user_id, guild, canal_id)
