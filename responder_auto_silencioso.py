@@ -2157,10 +2157,19 @@ async def on_message(message: discord.Message):
     ids_mencionados = {m.id for m in message.mentions} | {
         int(m) for m in ID_PATTERN.findall(conteudo)
     }
+
+    # Detecta resposta direta a uma mensagem do bot (reply com seta)
+    eh_resposta_ao_bot = bool(
+        message.reference
+        and isinstance(getattr(message.reference, "resolved", None), discord.Message)
+        and message.reference.resolved.author == client.user
+    )
+
     mencionado = (
         client.user in message.mentions
         or client.user.id in ids_mencionados
         or bool(GATILHOS_NOME.search(conteudo))
+        or eh_resposta_ao_bot
     )
 
     # ── AFK: se alguém marca o próprio usuário que está AFK, responde no canal ─
