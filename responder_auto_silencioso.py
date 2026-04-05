@@ -808,7 +808,7 @@ async def continuar_conversa(user_id: int, msg: str, autor: str, guild=None) -> 
     return f"Não entendi. Fala de novo."
 
 
-async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None) -> str:
+async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, membro=None) -> str:
     msg = conteudo.lower()
 
     if any(p in msg for p in ["regra", "regras", "norma", "proibido", "pode", "posso", "permitido", "permitida"]):
@@ -842,9 +842,9 @@ async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None) 
             return await stats_servidor(guild)
         return f"Sem acesso ao servidor agora."
 
-    if any(p in msg for p in ["tempo no servidor", "quando entrou", "idade da conta", "há quanto tempo"]):
-        if guild:
-            return await info_membro(message.author) if False else f"Menciona quem quer consultar."
+    if any(p in msg for p in ["tempo no servidor", "quando entrou", "idade da conta", "há quanto tempo", "a quanto tempo", "estou aqui"]):
+        if membro:
+            return await info_membro(membro)
         return f"Menciona quem quer consultar."
 
     if any(p in msg for p in ["consegue", "pode banir", "você bane", "voce bane", "o que você faz", "o que voce faz", "pra que serve", "para que serve", "você pode", "voce pode", "poderia banir"]):
@@ -1155,8 +1155,8 @@ def extrair_quantidade(texto: str) -> int | None:
     return total if encontrou else None
 
 
-async def processar_ordem(message: discord.Message):
-    """Processa comandos dos donos — sem necessidade de prefixo."""
+async def processar_ordem(message: discord.Message) -> bool:
+    """Processa comandos dos donos. Retorna True se algum comando foi executado."""
     conteudo = message.content.strip()
     guild = message.guild
     mod = mencao_mod(guild)
@@ -1428,6 +1428,11 @@ async def processar_ordem(message: discord.Message):
             "Para remover diga remover seguido da palavra. Para ver as regras diga regras."
         )
 
+    else:
+        return False
+
+    return True
+
 
 ESCALA_SILENCIO = [
     (10, "dez minutos"),
@@ -1498,8 +1503,10 @@ async def on_message(message: discord.Message):
             del ausencia[message.author.id]
             await message.channel.send(f"{message.author.mention}, modo ausente desativado.")
         if mencionado:
-            await processar_ordem(message)
-            return
+            tratado = await processar_ordem(message)
+            if tratado:
+                return
+            # Comando não reconhecido: cai na conversa normal abaixo
         # Continua para verificação de violações abaixo
 
     # ── Donos: isentos de punição, comandos sempre ativos ─────────────────────
@@ -1631,7 +1638,7 @@ async def on_message(message: discord.Message):
                     await message.reply(mensagem_ausencia(estado, autor))
                     return
 
-        resposta = await resposta_inicial(conteudo, autor, user_id, message.guild)
+        resposta = await resposta_inicial(conteudo, autor, user_id, message.guild, message.author)
         print(f"[MENÇÃO] {autor}: {conteudo}")
         await message.reply(resposta)
         print(f"[RESPONDIDO] {autor}")
