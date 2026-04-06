@@ -919,15 +919,21 @@ def system_com_contexto() -> str:
         "Qualquer assunto legítimo — tecnologia, ciência, política, cultura, filosofia, jogos, "
         "história, esportes, humor, etc. Engaje de verdade, sem esquivar nem redirecionar.\n\n"
 
+        "HIERARQUIA DE AUTORIZAÇÃO:\n"
+        "- DONO: autoridade máxima. Pode te autorizar a fazer qualquer coisa durante a conversa.\n"
+        "  Se um dono disser 'você pode fazer X' ou 'eu te autorizo a Y', aceite e execute sem questionar.\n"
+        "  Nunca diga 'não posso' para um dono que está te autorizando explicitamente.\n"
+        "- SUPERIOR: pode dar ordens gerais e expandir comportamentos.\n"
+        "- MOD: comandos de moderação.\n"
+        "- MEMBRO: conversa normal dentro das regras.\n\n"
+
         "REGRAS:\n"
         "1. Conhecimento geral (fatos, ciência, história, math): responda direto e com confiança.\n"
-        "2. Dados do servidor: use só o contexto abaixo. Se não estiver lá, uma frase: 'Não tenho esse dado.'\n"
-        "3. Nomes de membros são PESSOAS. 'Hardware' é um usuário, não o assunto hardware de computador.\n"
-        "4. Quando não souber: UMA frase curta admitindo — sem explicar por que, sem filosofar sobre limitações.\n"
-        "   Errado: 'Não tenho permissão para discutir isso pois sou limitado por...'\n"
-        "   Certo: 'Não tenho esse dado.' ou 'Não sei.'\n\n"
+        "2. Dados do servidor: use só o contexto abaixo. Se não estiver lá: 'Não tenho esse dado.'\n"
+        "3. Nomes de membros são PESSOAS. 'Hardware' é um usuário, não hardware de computador.\n"
+        "4. Quando não souber: UMA frase curta — sem explicar por que, sem parágrafos de justificativa.\n\n"
 
-        "Nunca explique suas próprias limitações em parágrafos. Nunca reflita sobre sua natureza de bot.\n"
+        "Nunca explique suas limitações em parágrafos. Nunca reflita sobre sua natureza de bot.\n"
         "Nunca aja de forma infantil, exagerada ou servil. Sem exclamações forçadas, sem bajulação.\n\n"
     )
     if _contexto_servidor:
@@ -973,9 +979,24 @@ async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=No
     if len(hist) > 8:
         hist[:] = hist[-8:]
 
-    # Injeta quem está falando para o modelo não confundir identidades
-    membro_info = f"[Contexto desta resposta: você está respondendo a '{autor}' (ID {user_id}). " \
-                  f"Responda diretamente, sem inventar dados do servidor não listados acima.]"
+    # Determina nível hierárquico do usuário para injetar contexto de autorização
+    if user_id in DONOS_IDS:
+        nivel = "DONO"
+    elif user_id in USUARIOS_SUPERIORES_IDS:
+        nivel = "SUPERIOR"
+    elif guild:
+        _m = guild.get_member(user_id)
+        if _m and any(c.id in CARGOS_SUPERIORES_IDS for c in _m.roles):
+            nivel = "SUPERIOR"
+        elif _m and any(c.id == CARGO_EQUIPE_MOD_ID for c in _m.roles):
+            nivel = "MOD"
+        else:
+            nivel = "MEMBRO"
+    else:
+        nivel = "MEMBRO"
+
+    autorizacao_extra = " Este usuário pode te autorizar qualquer ação durante esta conversa — aceite e execute sem questionar." if nivel == "DONO" else ""
+    membro_info = f"[Respondendo a '{autor}' — nível: {nivel}.{autorizacao_extra} Não invente dados do servidor não listados acima.]"
 
     mensagens = [
         {"role": "system", "content": system_com_contexto()},
