@@ -30,7 +30,7 @@ try:
     FPDF_DISPONIVEL = True
 except ImportError:
     FPDF_DISPONIVEL = False
-    log.warning("fpdf2 não instalado — geração de PDF indisponível.")
+    log.warning("fpdf2 não instalado  -  geração de PDF indisponível.")
 
 def agora_utc():
     return datetime.now(timezone.utc)
@@ -39,7 +39,7 @@ TOKEN = os.environ.get("DISCORD_TOKEN", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 SERVIDOR_ID = 1487599082825584761
 
-# IDs de donos/proprietários (maior hierarquia — nunca punidos, comandos sempre ativos)
+# IDs de donos/proprietários (maior hierarquia  -  nunca punidos, comandos sempre ativos)
 DONOS_IDS = {1487591389653897306, 1321848653878661172, 1375560046930563306}
 
 # Cargos superiores que podem dar ordens gerais ao bot (boas-vindas, histórias, etc.)
@@ -48,7 +48,7 @@ CARGOS_SUPERIORES_IDS = {1487599082934636628, 1487599082934636627}
 # ID de usuário com nível de superior (tratado como cargo superior)
 USUARIOS_SUPERIORES_IDS = {1375560046930563306}
 
-# IDs de donos absolutos — maior hierarquia, podem apagar canais/cargos pelo bot
+# IDs de donos absolutos  -  maior hierarquia, podem apagar canais/cargos pelo bot
 DONOS_ABSOLUTOS_IDS = {1487591389653897306, 1321848653878661172}
 CONTAS_TESTE = set()  # sem contas de teste no momento
 CARGO_EQUIPE_MOD_ID = 1487859369008697556  # equipe de moderação com acesso a comandos de mod
@@ -173,7 +173,7 @@ async def api_info_membro_completa(guild: discord.Guild, membro: discord.Member)
                 timeout_dt = datetime.fromisoformat(ts_timeout.replace("Z", "+00:00"))
                 if timeout_dt > agora:
                     mins = int((timeout_dt - agora).total_seconds() / 60)
-                    timeout_ativo = f" | SILENCIADO — {mins} min restantes"
+                    timeout_ativo = f" | SILENCIADO  -  {mins} min restantes"
             except Exception:
                 pass
 
@@ -238,7 +238,7 @@ async def api_resumo_servidor(guild: discord.Guild) -> str:
     n_cargos = len([r for r in guild.roles if r.name != "@everyone"])
 
     return (
-        f"**{guild.name}** — criado em {criado_em}\n"
+        f"**{guild.name}**  -  criado em {criado_em}\n"
         f"Membros: {humanos} humanos + {bots} bots = {total} total | online agora: {online}\n"
         f"Canais: {canais_texto} texto, {canais_voz} voz | Cargos: {n_cargos}\n"
         f"Boost: nível {boost_nivel} ({boost_count} boosts)"
@@ -286,7 +286,7 @@ async def api_banimentos_formatado(guild: discord.Guild, limite: int = 20) -> st
         nome = user.get("username", "?")
         uid = user.get("id", "?")
         motivo = b.get("reason") or "sem motivo"
-        linhas.append(f"  {nome} ({uid}) — {motivo}")
+        linhas.append(f"  {nome} ({uid})  -  {motivo}")
     return "\n".join(linhas)
 
 
@@ -467,13 +467,13 @@ categorias_vistas: set = set()
 
 # ── Token budget diário ───────────────────────────────────────────────────────
 # llama-3.3-70b-versatile: 100k TPD (limite Groq gratuito)
-# llama-3.1-8b-instant:    500k TPD (limite Groq gratuito) — modelo padrão
+# llama-3.1-8b-instant:    500k TPD (limite Groq gratuito)  -  modelo padrão
 # Estratégia: usar 8b-instant por padrão; 70b só para pedidos explicitamente complexos
 _tokens_70b_hoje: int = 0       # tokens gastos hoje no modelo 70b
 _tokens_8b_hoje: int = 0        # tokens gastos hoje no modelo 8b
 _tokens_data: str = ""          # data de referência (YYYY-MM-DD UTC)
-LIMITE_70B = 90_000             # 90k de 100k — margem de segurança
-LIMITE_8B  = 480_000            # 480k de 500k — margem de segurança
+LIMITE_70B = 90_000             # 90k de 100k  -  margem de segurança
+LIMITE_8B  = 480_000            # 480k de 500k  -  margem de segurança
 
 # ── Raid detection ────────────────────────────────────────────────────────────
 _joins_recentes: list[datetime] = []          # timestamps dos últimos joins
@@ -487,7 +487,7 @@ GATILHOS_NOME = re.compile(
     re.IGNORECASE
 )
 # Contextos que desambiguam "shell" (terminal/bash) ou "engenheiro" (profissão técnica).
-# Se presentes, GATILHOS_NOME não dispara — evita responder "shell bash", "engenheiro elétrico".
+# Se presentes, GATILHOS_NOME não dispara  -  evita responder "shell bash", "engenheiro elétrico".
 _GATILHO_EXCLUIDO = re.compile(
     r'\b(?:bash|zsh|fish|sh\b|script|linux|unix|terminal|comando'
     r'|el[eé]tric[ao]|civil|mecânic[ao]|mecanico|quimic[ao]|nuclear'
@@ -686,7 +686,7 @@ async def relatorio_membros(guild: discord.Guild, periodo_dias: int = 7) -> str:
     linhas += ["", f"Saídas: {len(saidas_recentes)}"]
     for ts, nome, uid, ficou in saidas_recentes[:8]:
         dt = datetime.fromisoformat(ts).astimezone(brasilia)
-        ficou_txt = f" — ficou {formatar_duracao(timedelta(seconds=ficou))}" if ficou else ""
+        ficou_txt = f"  -  ficou {formatar_duracao(timedelta(seconds=ficou))}" if ficou else ""
         linhas.append(f"  {dt.strftime('%d/%m %H:%M')}  {nome}{ficou_txt}")
 
     return "\n".join(linhas)
@@ -697,9 +697,15 @@ async def relatorio_membros(guild: discord.Guild, periodo_dias: int = 7) -> str:
 import unicodedata as _ud
 
 def _pdf_str(texto: str) -> str:
-    """Remove diacríticos para compatibilidade com fontes PDF padrão (Helvetica)."""
+    """Remove diacríticos e caracteres tipográficos para compatibilidade com Helvetica."""
+    texto = str(texto)
+    texto = texto.replace('\u2014', '-').replace('\u2013', '-')  # em dash, en dash
+    texto = texto.replace('\u2018', "'").replace('\u2019', "'")  # aspas simples curvas
+    texto = texto.replace('\u201c', '"').replace('\u201d', '"')  # aspas duplas curvas
+    texto = texto.replace('\u2026', '...')                        # reticências
+    texto = texto.replace('\u00b7', '.').replace('\u2022', '*')  # bullet points
     return ''.join(
-        c for c in _ud.normalize('NFD', str(texto))
+        c for c in _ud.normalize('NFD', texto)
         if _ud.category(c) != 'Mn'
     )
 
@@ -747,7 +753,7 @@ async def gerar_pdf_relatorio_servidor(guild: discord.Guild, dias: int = 7) -> b
         ]),
         (f"Relatório {tipo}", rel.split('\n')),
     ]
-    return _criar_pdf(f"Relatorio do Servidor — {guild.name}", secoes)
+    return _criar_pdf(f"Relatorio do Servidor  -  {guild.name}", secoes)
 
 
 async def gerar_pdf_historico_canal(canal: discord.TextChannel, limite: int = 100) -> bytes:
@@ -759,8 +765,8 @@ async def gerar_pdf_historico_canal(canal: discord.TextChannel, limite: int = 10
         if msg.attachments:
             conteudo_msg += f" [anexo: {msg.attachments[0].filename}]"
         linhas.append(f"[{ts}] {msg.author.display_name}: {conteudo_msg[:200]}")
-    secoes = [(f"#{canal.name} — últimas {len(linhas)} mensagens", linhas)]
-    return _criar_pdf(f"Historico — #{canal.name}", secoes)
+    secoes = [(f"#{canal.name}  -  últimas {len(linhas)} mensagens", linhas)]
+    return _criar_pdf(f"Historico  -  #{canal.name}", secoes)
 
 
 def gerar_pdf_membros(guild: discord.Guild) -> bytes:
@@ -769,7 +775,7 @@ def gerar_pdf_membros(guild: discord.Guild) -> bytes:
     bots = [m for m in guild.members if m.bot]
     linhas_h = []
     for i, m in enumerate(humanos, 1):
-        cargos = ", ".join(r.name for r in m.roles[1:6]) or "—"
+        cargos = ", ".join(r.name for r in m.roles[1:6]) or " - "
         joined = m.joined_at.astimezone(brasilia).strftime('%d/%m/%Y') if m.joined_at else "?"
         linhas_h.append(f"{i:3}. {m.display_name:<24} entrou {joined}   cargos: {cargos}")
     linhas_b = [f"  {m.display_name}" for m in bots]
@@ -777,7 +783,7 @@ def gerar_pdf_membros(guild: discord.Guild) -> bytes:
         (f"Humanos ({len(humanos)})", linhas_h),
         (f"Bots ({len(bots)})", linhas_b),
     ]
-    return _criar_pdf(f"Lista de Membros — {guild.name}", secoes)
+    return _criar_pdf(f"Lista de Membros  -  {guild.name}", secoes)
 
 
 def gerar_pdf_regras() -> bytes:
@@ -855,8 +861,8 @@ CONTEUDO_SEXUAL = [
     "transar", "foder", "meter",
     "porno", "pornografia", "putaria", "safadeza",
     "nude", "nudes", "pack", "xvideos", "pornhub",
-    # Removidos (alto falso positivo — estão em AMBIGUAS e só disparam com reforço):
-    # "comer" — contexto alimentar comum; "pau" — madeira/material; "rola" — ave/série; "fenda" — geologia
+    # Removidos (alto falso positivo  -  estão em AMBIGUAS e só disparam com reforço):
+    # "comer"  -  contexto alimentar comum; "pau"  -  madeira/material; "rola"  -  ave/série; "fenda"  -  geologia
 ]
 
 # ── Racismo e discriminação étnica ───────────────────────────────────────────
@@ -918,7 +924,7 @@ URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
 
 # Palavras ambíguas que só disparam com reforço de contexto
 AMBIGUAS = {"pau", "comer", "rola", "fenda"}
-# "gala" removido — sem conotação sexual real no PT-BR comum
+# "gala" removido  -  sem conotação sexual real no PT-BR comum
 
 # Whitelist: se estas palavras aparecerem na mesma mensagem que uma AMBIGUA,
 # é contexto legítimo e a detecção é suprimida.
@@ -1011,7 +1017,7 @@ def contem_fuzzy_estrito(texto_norm: str, palavra: str) -> bool:
     """
     Versão mais conservadora do contem_fuzzy para categorias sensíveis (discriminação).
     Usa tolerancia_estrita e exige que a palavra alvo tenha pelo menos 5 caracteres
-    para aceitar variações — palavras curtas só batem em match exato.
+    para aceitar variações  -  palavras curtas só batem em match exato.
     """
     palavra_norm = normalizar(palavra)
     n = len(palavra_norm)
@@ -1314,16 +1320,16 @@ def _role_info(role: discord.Role, detalhado: bool = False) -> str:
         nomes = ", ".join(mb.display_name for mb in humanos)
         base = f"Cargo {role.name}: {n} membro{'s' if n != 1 else ''}"
         if nomes:
-            base += f" — {nomes}"
+            base += f"  -  {nomes}"
         return base + "."
     # Detalhado: uma linha por membro
-    linhas = [f"Cargo {role.name} — {n} membro{'s' if n != 1 else ''}:"]
+    linhas = [f"Cargo {role.name}  -  {n} membro{'s' if n != 1 else ''}:"]
     for mb in sorted(humanos, key=lambda m: m.display_name.lower()):
         conta = _fmt_duracao_curta(agora - mb.created_at.replace(tzinfo=timezone.utc))
         servidor = _fmt_duracao_curta(agora - mb.joined_at.replace(tzinfo=timezone.utc)) if mb.joined_at else "?"
         cargos = [r.name for r in mb.roles if r.name != "@everyone" and r != role]
         outros = f" | outros cargos: {', '.join(cargos)}" if cargos else ""
-        linhas.append(f"  {mb.display_name} — conta: {conta} | no servidor: {servidor}{outros}")
+        linhas.append(f"  {mb.display_name}  -  conta: {conta} | no servidor: {servidor}{outros}")
     return "\n".join(linhas)
 
 
@@ -1352,7 +1358,7 @@ def _info_membro_sync(mb: discord.Member) -> str:
     conta_nova = (agora - mb.created_at.replace(tzinfo=timezone.utc)).days < 30
     alerta = " [conta recente]" if conta_nova else ""
     return (
-        f"{mb.display_name}{alerta} — conta criada há {conta}, "
+        f"{mb.display_name}{alerta}  -  conta criada há {conta}, "
         f"no servidor há {servidor}. Cargos: {cargos_txt}.{rastreio}"
     )
 
@@ -1374,7 +1380,7 @@ Dado o texto de uma mensagem, retorne APENAS um objeto JSON com a intenção det
 Responda SOMENTE com JSON válido, sem texto antes ou depois, sem markdown.
 
 REGRA CRÍTICA: Se a pergunta mencionar um nome de cargo/função específico (ex: "posse", "mod", "vip", "admin"),
-use SEMPRE "cargo_por_nome" com o nome extraído — NUNCA use "membros_total" nesses casos.
+use SEMPRE "cargo_por_nome" com o nome extraído  -  NUNCA use "membros_total" nesses casos.
 "membros_total" só se usa quando a pergunta é genérica, sem citar nenhum cargo específico.
 
 Intenções possíveis e seus campos:
@@ -1449,7 +1455,7 @@ def build_classifier_context(guild: discord.Guild) -> str:
 
 def _detectar_intencao(conteudo: str, guild=None) -> dict:
     """
-    Classifica a intenção via regex — zero tokens Groq gastos.
+    Classifica a intenção via regex  -  zero tokens Groq gastos.
     Substitui a versão anterior que chamava llama-3.1-8b-instant para classificação.
     """
     msg = normalizar(conteudo).lower()
@@ -1558,7 +1564,7 @@ def _detectar_intencao(conteudo: str, guild=None) -> dict:
             if mb:
                 return {"intent": "membro_info", "nome": nome_cand}
 
-    # Cargo por nome — verifica nomes reais do servidor
+    # Cargo por nome  -  verifica nomes reais do servidor
     if guild:
         detalhado = bool(re.search(r'\b(detalhes?|completo|tempo|idade|conta|quando|h[aá]\s+quanto)\b', msg))
         # Padrão explícito: "cargo X", "função X", "membros do X", "quem tem X"
@@ -1698,7 +1704,7 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
         mais_antigos = sorted([m for m in humanos_cache if m.joined_at], key=lambda m: m.joined_at)[:5]
         linhas = ["Membros mais antigos no servidor:"]
         for mb in mais_antigos:
-            linhas.append(f"  {mb.display_name} — há {_fmt_duracao_curta(agora - mb.joined_at.replace(tzinfo=timezone.utc))}")
+            linhas.append(f"  {mb.display_name}  -  há {_fmt_duracao_curta(agora - mb.joined_at.replace(tzinfo=timezone.utc))}")
         return "\n".join(linhas)
 
     # ── Membros: mais recentes ────────────────────────────────────────────────
@@ -1706,7 +1712,7 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
         mais_novos = sorted([m for m in humanos_cache if m.joined_at], key=lambda m: m.joined_at, reverse=True)[:5]
         linhas = ["Entradas mais recentes:"]
         for mb in mais_novos:
-            linhas.append(f"  {mb.display_name} — há {_fmt_duracao_curta(agora - mb.joined_at.replace(tzinfo=timezone.utc))}")
+            linhas.append(f"  {mb.display_name}  -  há {_fmt_duracao_curta(agora - mb.joined_at.replace(tzinfo=timezone.utc))}")
         return "\n".join(linhas)
 
     # ── Membros: sem cargo ────────────────────────────────────────────────────
@@ -1723,7 +1729,7 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
             return "Nenhum membro com infrações registradas."
         linhas = [f"Membros com infrações ({len(com_infr)}):"]
         for mb, n in com_infr[:15]:
-            linhas.append(f"  {mb.display_name} — {n} infração{'ões' if n > 1 else ''}")
+            linhas.append(f"  {mb.display_name}  -  {n} infração{'ões' if n > 1 else ''}")
         return "\n".join(linhas)
 
     # ── Membros: silenciados ──────────────────────────────────────────────────
@@ -1745,7 +1751,7 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
             return "Nenhum membro silenciado no momento."
         linhas = [f"Membros silenciados agora ({len(silenciados)}):"]
         for nome, mins in silenciados:
-            linhas.append(f"  {nome} — {mins} min restantes")
+            linhas.append(f"  {nome}  -  {mins} min restantes")
         return "\n".join(linhas)
 
     # ── Membros: mais cargos ──────────────────────────────────────────────────
@@ -1755,7 +1761,7 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
         for mb in ranking:
             n = len([r for r in mb.roles if r.name != "@everyone"])
             cargos = ", ".join(r.name for r in mb.roles if r.name != "@everyone")
-            linhas.append(f"  {mb.display_name} — {n} cargo{'s' if n!=1 else ''}: {cargos}")
+            linhas.append(f"  {mb.display_name}  -  {n} cargo{'s' if n!=1 else ''}: {cargos}")
         return "\n".join(linhas)
 
     # ── Membros: por período ──────────────────────────────────────────────────
@@ -1821,7 +1827,7 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
 
 def build_server_context(guild: discord.Guild) -> str:
     """
-    Contexto completo do servidor — sem limite de informações.
+    Contexto completo do servidor  -  sem limite de informações.
     Inclui cada membro com conta, tempo, cargos, infrações e estatísticas calculadas.
     """
     agora = agora_utc()
@@ -1885,9 +1891,9 @@ def build_server_context(guild: discord.Guild) -> str:
         membros_r = [m.display_name for m in r.members if not m.bot]
         n = len(membros_r)
         membros_txt = ", ".join(membros_r) if membros_r else "nenhum"
-        linhas.append(f"  {r.name} (ID {r.id}) — {n} humano{'s' if n != 1 else ''}: {membros_txt}")
+        linhas.append(f"  {r.name} (ID {r.id})  -  {n} humano{'s' if n != 1 else ''}: {membros_txt}")
 
-    # ── Membros humanos — ficha completa ──────────────────────────────────────
+    # ── Membros humanos  -  ficha completa ──────────────────────────────────────
     linhas.append("\nMEMBROS HUMANOS (cada um é uma PESSOA REAL, não um tópico):")
     membros_humanos = sorted([m for m in guild.members if not m.bot], key=lambda m: m.display_name.lower())
     for m in membros_humanos:
@@ -1915,7 +1921,7 @@ def build_server_context(guild: discord.Guild) -> str:
 
 def build_server_context_compact(guild: discord.Guild) -> str:
     """
-    Versão compacta do contexto — injetada no Groq para economizar tokens.
+    Versão compacta do contexto  -  injetada no Groq para economizar tokens.
     Contém apenas o essencial: stats, nomes de cargos e lista de membros (só nomes).
     Consultas factuais detalhadas são tratadas por query_servidor_direto() sem IA.
     """
@@ -1941,7 +1947,7 @@ def build_server_context_compact(guild: discord.Guild) -> str:
     )
     linhas.append(f"Cargos: {nomes_cargos}")
 
-    # Membros — só nomes e cargo principal
+    # Membros  -  só nomes e cargo principal
     linhas.append("Membros:")
     for m in sorted(humanos, key=lambda m: m.display_name.lower()):
         cargo_principal = next(
@@ -1950,7 +1956,7 @@ def build_server_context_compact(guild: discord.Guild) -> str:
         )
         infr = infracoes.get(m.id, 0)
         extra = f" [inf:{infr}]" if infr else ""
-        linhas.append(f"  {m.display_name} (ID {m.id}) — {cargo_principal}{extra}")
+        linhas.append(f"  {m.display_name} (ID {m.id})  -  {cargo_principal}{extra}")
 
     return "\n".join(linhas)
 
@@ -1960,12 +1966,12 @@ def system_com_contexto() -> str:
     base = (
         "Você é o shell_engenheiro, presença central de um servidor Discord brasileiro.\n"
         "Personalidade: adulto, direto, inteligente, sarcástico quando necessário, nunca grosseiro sem motivo.\n"
-        "Fala como brasileiro jovem e culto — gírias naturais, sem forçar.\n"
+        "Fala como brasileiro jovem e culto  -  gírias naturais, sem forçar.\n"
         "Sem emojis, sem listas, sem markdown, sem asteriscos.\n"
         "Tamanho da resposta: máximo 3-4 frases. Discord não é aula nem wikipedia. Seja denso, não extenso.\n\n"
 
         "SOBRE O QUE PODE FALAR:\n"
-        "Qualquer assunto legítimo — tecnologia, ciência, política, cultura, filosofia, jogos, "
+        "Qualquer assunto legítimo  -  tecnologia, ciência, política, cultura, filosofia, jogos, "
         "história, esportes, humor, etc. Engaje de verdade, sem esquivar nem redirecionar.\n\n"
 
         "HIERARQUIA DE AUTORIZAÇÃO:\n"
@@ -1980,8 +1986,8 @@ def system_com_contexto() -> str:
         "Você TEM acesso a dados do servidor (membros, cargos, infrações, canais, etc.).\n"
         "Você TEM funções de moderação: silenciar, banir, expulsar, avisar membros.\n"
         "Você TEM permissão de administrador no servidor para executar essas ações.\n"
-        "NUNCA diga 'não tenho informações sobre os usuários do servidor' — você tem, no contexto abaixo.\n"
-        "NUNCA diga 'não tenho informações sobre o servidor' — você tem, no contexto abaixo.\n\n"
+        "NUNCA diga 'não tenho informações sobre os usuários do servidor'  -  você tem, no contexto abaixo.\n"
+        "NUNCA diga 'não tenho informações sobre o servidor'  -  você tem, no contexto abaixo.\n\n"
 
         "CONTINUIDADE DE CONVERSA:\n"
         "Você tem o histórico desta conversa. Use-o ativamente.\n"
@@ -2086,7 +2092,7 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     chave_hist = (user_id, canal_id or 0)
     hist = historico_groq.setdefault(chave_hist, [])
     hist.append({"role": "user", "content": f"{autor}: {pergunta}"})
-    # Mantém apenas as últimas 8 trocas (4 pares) — reduz tokens sem perder contexto relevante
+    # Mantém apenas as últimas 8 trocas (4 pares)  -  reduz tokens sem perder contexto relevante
     if len(hist) > 8:
         hist[:] = hist[-8:]
 
@@ -2106,9 +2112,9 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     else:
         nivel = "MEMBRO"
 
-    autorizacao_extra = " Este usuário pode te autorizar qualquer ação durante esta conversa — aceite e execute sem questionar." if nivel == "DONO" else ""
+    autorizacao_extra = " Este usuário pode te autorizar qualquer ação durante esta conversa  -  aceite e execute sem questionar." if nivel == "DONO" else ""
 
-    # Contexto do canal (autoaprendizado) — apenas as últimas 10 mensagens para economizar
+    # Contexto do canal (autoaprendizado)  -  apenas as últimas 10 mensagens para economizar
     mem = list(canal_memoria.get(canal_id or 0, []))
     ctx_canal = ""
     if mem:
@@ -2184,7 +2190,7 @@ async def continuar_conversa(user_id: int, msg: str, autor: str, guild=None) -> 
                 estado["etapa"] = 2
                 estado["contexto"] = "desabafo"
                 return random.choice(["O que aconteceu?", "Me conta.", "O que rolou?", "Fala o que é."])
-            # Mensagem não é resposta à saudação — encerra e deixa o fluxo principal processar
+            # Mensagem não é resposta à saudação  -  encerra e deixa o fluxo principal processar
             del conversas[user_id]
             return None
         if etapa == 2:
@@ -2220,7 +2226,7 @@ async def continuar_conversa(user_id: int, msg: str, autor: str, guild=None) -> 
             return random.choice(["Ok.", "Certo.", "Tá.", "Beleza."])
         if etapa == 2:
             del conversas[user_id]
-            return f"Registrado. Moderação vai ver que {autor} precisa de atenção — {msg}."
+            return f"Registrado. Moderação vai ver que {autor} precisa de atenção  -  {msg}."
 
     # ── CAPACIDADES ───────────────────────────────────────────────────────────
     if ctx == "capacidades":
@@ -2818,12 +2824,12 @@ async def processar_ordem(message: discord.Message) -> bool:
             await message.channel.send("Ei engenheiro, informe o conteúdo do aviso.")
             return True
         for alvo in alvos:
-            await message.channel.send(f"{alvo.mention}, aviso da administração — {texto}")
+            await message.channel.send(f"{alvo.mention}, aviso da administração  -  {texto}")
 
     # ── chamar mod ─────────────────────────────────────────────────────────────
     elif cmd in ("chamar-mod", "chamarmod", "mod", "moderação", "moderacao", "chamar"):
         motivo = resto or "sem motivo especificado."
-        await message.channel.send(f"{mod}, atenção necessária — {motivo}")
+        await message.channel.send(f"{mod}, atenção necessária  -  {motivo}")
 
     # ── regras ─────────────────────────────────────────────────────────────────
     elif cmd == "regras":
@@ -2883,7 +2889,7 @@ async def processar_ordem(message: discord.Message) -> bool:
                 linhas.append(f"{nomes[cat]}: {', '.join(lista)}")
         await message.channel.send("Palavras customizadas:\n" + "\n".join(linhas))
 
-    # ── ausente / afk [motivo] — só ativa para o próprio autor ────────────────
+    # ── ausente / afk [motivo]  -  só ativa para o próprio autor ────────────────
     elif cmd in ("ausente", "afk"):
         # Ignora se "afk" aparece só no meio de uma frase (ex: "fez o afk")
         texto_limpo = re.sub(r'<@!?\d+>\s*', '', conteudo).strip()
@@ -2899,9 +2905,9 @@ async def processar_ordem(message: discord.Message) -> bool:
         ausencia[message.author.id] = {"ate": ate, "motivo": motivo}
 
         if motivo and minutos:
-            confirmacao = f"Modo ausente ativado — {motivo}, por {minutos} minuto{'s' if minutos != 1 else ''}."
+            confirmacao = f"Modo ausente ativado  -  {motivo}, por {minutos} minuto{'s' if minutos != 1 else ''}."
         elif motivo:
-            confirmacao = f"Modo ausente ativado — {motivo}. Mande qualquer mensagem para desativar."
+            confirmacao = f"Modo ausente ativado  -  {motivo}. Mande qualquer mensagem para desativar."
         elif minutos:
             confirmacao = f"Modo ausente ativado por {minutos} minuto{'s' if minutos != 1 else ''}."
         else:
@@ -2931,12 +2937,12 @@ async def processar_ordem(message: discord.Message) -> bool:
                 bloco_atual += linha
         if bloco_atual:
             blocos.append(bloco_atual)
-        await message.channel.send(f"Membros humanos — {len(membros)} no total.")
+        await message.channel.send(f"Membros humanos  -  {len(membros)} no total.")
         for bloco in blocos:
             await message.channel.send(f"```\n{bloco}```")
 
     # ── envia mensagem em canal específico ─────────────────────────────────────
-    # Só dispara se houver menção de canal <#ID> — evita falsos positivos com
+    # Só dispara se houver menção de canal <#ID>  -  evita falsos positivos com
     # palavras comuns como "fala", "manda", "diz" em frases normais
     elif message.channel_mentions and re.search(
         r'\b(?:envi[aeo]|enviar|enviasse|enviou|mand[aeo]|mandar|mandasse|mandou'
@@ -2951,7 +2957,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         # Remove menções de canal e usuário
         texto_msg = re.sub(r'<#\d+>\s*', '', conteudo).strip()
         texto_msg = re.sub(r'<@!?\d+>\s*', '', texto_msg).strip()
-        # Remove tudo até o verbo inclusive — aceita qualquer conjugação do stem
+        # Remove tudo até o verbo inclusive  -  aceita qualquer conjugação do stem
         texto_msg = re.sub(
             r'^.*?\b(?:envi\w+|mand\w+|fal\w+|diz\w*|diga\w*|escrev\w+)\s+(?:uma?\s+mensagem\s+(?:de\s+)?)?',
             '', texto_msg, flags=re.IGNORECASE
@@ -2984,7 +2990,7 @@ async def processar_ordem(message: discord.Message) -> bool:
                     await canal_del.delete(reason=f"Ordem de {message.author.display_name}")
                     await message.channel.send(f"Canal #{nome} apagado.")
                 except Exception as e:
-                    await message.channel.send(f"Não foi possível apagar #{nome} — {e}")
+                    await message.channel.send(f"Não foi possível apagar #{nome}  -  {e}")
             else:
                 await message.channel.send("Menciona o canal a apagar.")
 
@@ -2998,7 +3004,7 @@ async def processar_ordem(message: discord.Message) -> bool:
                     await cargo_del.delete(reason=f"Ordem de {message.author.display_name}")
                     await message.channel.send(f"Cargo {nome} apagado.")
                 except Exception as e:
-                    await message.channel.send(f"Não foi possível apagar o cargo {nome} — {e}")
+                    await message.channel.send(f"Não foi possível apagar o cargo {nome}  -  {e}")
             else:
                 await message.channel.send("Menciona o cargo a apagar.")
 
@@ -3045,7 +3051,7 @@ async def processar_ordem(message: discord.Message) -> bool:
             "Para ativar ausência diga ausente ou afk com motivo opcional, e para voltar diga voltei."
         )
 
-    # ── punicoes [@user] — audit log de punições via REST ─────────────────────
+    # ── punicoes [@user]  -  audit log de punições via REST ─────────────────────
     elif cmd in ("punicoes", "punições", "punicao", "punição", "audit", "log"):
         alvo_audit = alvos[0] if alvos else None
         resultado = await api_historico_punicoes(guild, alvo_audit)
@@ -3053,14 +3059,14 @@ async def processar_ordem(message: discord.Message) -> bool:
         for bloco in blocos:
             await message.channel.send(f"```\n{bloco}\n```")
 
-    # ── banidos — lista de banimentos via REST ─────────────────────────────────
+    # ── banidos  -  lista de banimentos via REST ─────────────────────────────────
     elif cmd in ("banidos", "bans", "banimentos"):
         resultado = await api_banimentos_formatado(guild)
         blocos = [resultado[i:i+1900] for i in range(0, len(resultado), 1900)]
         for bloco in blocos:
             await message.channel.send(f"```\n{bloco}\n```")
 
-    # ── mensagens #canal [n] — últimas mensagens de um canal via REST ──────────
+    # ── mensagens #canal [n]  -  últimas mensagens de um canal via REST ──────────
     elif cmd in ("mensagens", "msgs") and message.channel_mentions:
         canal_alvo = message.channel_mentions[0]
         qtd = 20
@@ -3072,17 +3078,17 @@ async def processar_ordem(message: discord.Message) -> bool:
         for bloco in blocos:
             await message.channel.send(f"```\n{bloco}\n```")
 
-    # ── servidor / info servidor — resumo em tempo real via REST ───────────────
+    # ── servidor / info servidor  -  resumo em tempo real via REST ───────────────
     elif cmd in ("servidor", "server") and any(p in conteudo.lower() for p in ["info", "resumo", "stats", "status"]):
         resultado = await api_resumo_servidor(guild)
         await message.channel.send(resultado)
 
-    # ── info @membro — dados completos via REST ────────────────────────────────
+    # ── info @membro  -  dados completos via REST ────────────────────────────────
     elif cmd == "info" and alvos:
         texto = await api_info_membro_completa(guild, alvos[0])
         await message.channel.send(f"```\n{texto}\n```")
 
-    # ── tokens — exibe consumo de tokens Groq do dia ──────────────────────────
+    # ── tokens  -  exibe consumo de tokens Groq do dia ──────────────────────────
     elif cmd in ("tokens", "budget", "cota") or (cmd == "shell" and any(p in conteudo.lower() for p in ["tokens", "budget", "cota", "limite groq"])):
         _resetar_tokens_se_novo_dia()
         pct_70b = round(_tokens_70b_hoje / LIMITE_70B * 100)
@@ -3138,7 +3144,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         ganhadores = random.sample(pool, qtd)
         mencoes = " ".join(m.mention for m in ganhadores)
         sufixo = "o sorteado é" if qtd == 1 else f"os {qtd} sorteados são"
-        await message.channel.send(f"Sorteio encerrado — {sufixo}: {mencoes}")
+        await message.channel.send(f"Sorteio encerrado  -  {sufixo}: {mencoes}")
         log.info(f"[SORTEIO] {autor}: {[m.display_name for m in ganhadores]}")
 
     # ── pin / fixar mensagem ──────────────────────────────────────────────────
@@ -3200,7 +3206,7 @@ async def processar_ordem(message: discord.Message) -> bool:
     # Ou:  "Shell cria canal voz nome-do-canal"
     elif _addr and re.search(r'\b(cri[ae]r?\s+canal|cria\s+(?:um\s+)?canal)\b', conteudo.lower()):
         tipo_voz = bool(re.search(r'\b(voz|voice|áudio|audio)\b', conteudo.lower()))
-        # Extrai nome — tudo após "canal voz/texto/de/um"
+        # Extrai nome  -  tudo após "canal voz/texto/de/um"
         nome_canal = re.sub(
             r'(?i).*?\bcria[r]?\s+(?:um\s+)?canal\s+(?:de\s+)?(?:texto|voz|voice|áudio|audio)?\s*', '', conteudo
         ).strip()
@@ -3291,7 +3297,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         unidade = m_tempo.group(2)
         segundos = valor * 3600 if unidade.startswith('h') else valor * 60
         canal_lemb = message.channel_mentions[0] if message.channel_mentions else message.channel
-        # Extrai mensagem — tudo após "avisa/manda/diz" ou após ":"
+        # Extrai mensagem  -  tudo após "avisa/manda/diz" ou após ":"
         texto_lemb = re.sub(r'(?i).*?\bem\s+\d+\s*\w+\s+(?:\w+\s+)?(?:no\s+\w+\s+)?(?:<#\d+>\s*)?', '', conteudo).strip()
         if ':' in texto_lemb:
             texto_lemb = texto_lemb.split(':', 1)[1].strip()
@@ -3309,7 +3315,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         log.info(f"[LEMBRETE] {autor}: {texto_lemb!r} em {dur_txt} → {canal_lemb.name}")
 
     # ── debate ────────────────────────────────────────────────────────────────
-    # Uso: "Shell abre debate: tema aqui" — bot posta o tema e gerencia 10 minutos
+    # Uso: "Shell abre debate: tema aqui"  -  bot posta o tema e gerencia 10 minutos
     elif _addr and re.search(r'\b(debate|discussão|discussao|discutir)\b', conteudo.lower()):
         tema_db = re.sub(r'(?i).*?\b(?:debate|discussão|discussao|discutir)\b\s*:?\s*', '', conteudo).strip()
         if not tema_db:
@@ -3319,7 +3325,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         await canal_db.send(
             f"**Debate aberto: {tema_db}**\n"
             f"Galera, a discussão tá rolando por 10 minutos. "
-            f"Respeito nos argumentos — sem agressividade."
+            f"Respeito nos argumentos  -  sem agressividade."
         )
 
         debates_ativos[canal_db.id] = {"tema": tema_db, "fim": agora_utc() + timedelta(minutes=10), "msgs": 0}
@@ -3342,7 +3348,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         rel = await relatorio_membros(guild, dias_rel)
         tipo_txt = "mensal" if dias_rel == 30 else "semanal"
         blocos = [rel[i:i+1800] for i in range(0, len(rel), 1800)]
-        await canal_rel.send(f"**Relatório {tipo_txt} — {guild.name}**")
+        await canal_rel.send(f"**Relatório {tipo_txt}  -  {guild.name}**")
         for bloco in blocos:
             await canal_rel.send(f"```\n{bloco}\n```")
         if canal_rel.id != message.channel.id:
@@ -3456,7 +3462,7 @@ async def processar_ordem(message: discord.Message) -> bool:
             await message.channel.send("Nenhuma citação guardada ainda. Responde a uma mensagem e diz: Shell guarda isso")
             return True
         cit = random.choice(citacoes)
-        await message.channel.send(f'"{cit["texto"]}" — {cit["autor"]}, {cit.get("ts","?")}')
+        await message.channel.send(f'"{cit["texto"]}"  -  {cit["autor"]}, {cit.get("ts","?")}')
 
     # ── ranking de atividade ──────────────────────────────────────────────────
     elif _addr and re.search(r'\branking\b|\batividade\b|\bmais\s+ativo[s]?\b', conteudo.lower()):
@@ -3468,7 +3474,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         for i, (uid, cnt) in enumerate(top, 1):
             membro_r = guild.get_member(uid)
             nome_r = membro_r.display_name if membro_r else nomes_historico.get(uid, f"ID {uid}")
-            linhas.append(f"{i}. {nome_r} — {cnt} mensagem{'s' if cnt != 1 else ''}")
+            linhas.append(f"{i}. {nome_r}  -  {cnt} mensagem{'s' if cnt != 1 else ''}")
         await message.channel.send("**Ranking de atividade (sessão atual):**\n" + "\n".join(linhas))
 
     # ── monitorar / parar de monitorar canal ──────────────────────────────────
@@ -3507,7 +3513,7 @@ async def _gerar_aviso_afk_ia(membro: discord.Member, motivo: str, ate) -> str:
 
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         if motivo:
-            return f"Eae, {nome} está AFK no momento — {motivo}" + (f", {tempo_txt}." if tempo_txt else ".")
+            return f"Eae, {nome} está AFK no momento  -  {motivo}" + (f", {tempo_txt}." if tempo_txt else ".")
         return f"Eae, {nome} está AFK no momento." + (f" Volta em {tempo_txt}." if tempo_txt else "")
 
     partes = []
@@ -3534,12 +3540,12 @@ async def _gerar_aviso_afk_ia(membro: discord.Member, motivo: str, ate) -> str:
         )
         texto = resp.choices[0].message.content.strip().strip('"').strip("'")
         if nome not in texto:
-            texto = f"Eae, {nome} está AFK — {motivo or 'ausente no momento'}."
+            texto = f"Eae, {nome} está AFK  -  {motivo or 'ausente no momento'}."
         return texto
     except Exception as e:
         log.error(f"_gerar_aviso_afk_ia: {e}")
         if motivo:
-            return f"Eae, {nome} está AFK no momento — {motivo}" + (f", {tempo_txt}." if tempo_txt else ".")
+            return f"Eae, {nome} está AFK no momento  -  {motivo}" + (f", {tempo_txt}." if tempo_txt else ".")
         return f"Eae, {nome} está AFK no momento." + (f" Volta em {tempo_txt}." if tempo_txt else "")
 
 
@@ -3547,7 +3553,7 @@ async def processar_ordem_mod(message: discord.Message) -> bool:
     """
     Processa apenas comandos de moderação para o cargo de mod (1487859369008697556).
     Comandos disponíveis: silenciar, dessilenciar, banir, desbanir, expulsar, avisar, regras, listar.
-    Não executa ordens gerais (boas-vindas, histórias, etc.) — isso é privilégio dos superiores.
+    Não executa ordens gerais (boas-vindas, histórias, etc.)  -  isso é privilégio dos superiores.
     """
     conteudo = message.content.strip()
     cmd, resto = extrair_comando(conteudo)
@@ -3571,7 +3577,7 @@ async def processar_ordem_mod(message: discord.Message) -> bool:
     if cmd in CMDS_MOD:
         return await processar_ordem(message)
 
-    # Comando não reconhecido para mod — não executa ordens gerais
+    # Comando não reconhecido para mod  -  não executa ordens gerais
     return False
 
 
@@ -3758,7 +3764,7 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
         try:
             await alvo.timeout(agora_utc() + timedelta(minutes=minutos), reason=f"Ordem de {autor}")
             await canal.send(f"{alvo.mention} silenciado por {minutos} minuto{'s' if minutos != 1 else ''}.")
-            log.info(f"[IA] silenciar {alvo.display_name} {minutos}min — {autor}")
+            log.info(f"[IA] silenciar {alvo.display_name} {minutos}min  -  {autor}")
         except Exception as e:
             await canal.send(f"Não foi possível silenciar: {e}")
         return True
@@ -3772,7 +3778,7 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
         try:
             await guild.ban(alvo, reason=motivo)
             await canal.send(f"{alvo.display_name} banido. Motivo: {motivo}")
-            log.info(f"[IA] banir {alvo.display_name} — {autor}")
+            log.info(f"[IA] banir {alvo.display_name}  -  {autor}")
         except Exception as e:
             await canal.send(f"Não foi possível banir: {e}")
         return True
@@ -3790,7 +3796,7 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
         for i in range(len(opcoes)):
             try: await msg_e.add_reaction(emojis[i])
             except Exception: pass
-        log.info(f"[IA] enquete '{tema}' — {autor}")
+        log.info(f"[IA] enquete '{tema}'  -  {autor}")
         return True
 
     if acao == "aviso":
@@ -3827,11 +3833,11 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
         tipo = params.get("tipo", "texto")
         try:
             if tipo == "voz":
-                novo = await guild.create_voice_channel(nome, reason=f"IA — {autor}")
+                novo = await guild.create_voice_channel(nome, reason=f"IA  -  {autor}")
             else:
-                novo = await guild.create_text_channel(nome, reason=f"IA — {autor}")
+                novo = await guild.create_text_channel(nome, reason=f"IA  -  {autor}")
             await canal.send(f"Canal {novo.mention} criado.")
-            log.info(f"[IA] criar_canal #{nome} — {autor}")
+            log.info(f"[IA] criar_canal #{nome}  -  {autor}")
         except Exception as e:
             await canal.send(f"Não foi possível criar o canal: {e}")
         return True
@@ -3839,9 +3845,9 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
     if acao == "criar_cargo":
         nome = params.get("nome", "Novo Cargo")[:50]
         try:
-            novo = await guild.create_role(name=nome, reason=f"IA — {autor}")
+            novo = await guild.create_role(name=nome, reason=f"IA  -  {autor}")
             await canal.send(f"Cargo {novo.mention} criado.")
-            log.info(f"[IA] criar_cargo '{nome}' — {autor}")
+            log.info(f"[IA] criar_cargo '{nome}'  -  {autor}")
         except Exception as e:
             await canal.send(f"Não foi possível criar o cargo: {e}")
         return True
@@ -3863,7 +3869,7 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
             try: await dest.send(f"Debate encerrado: **{tema}**. Bom papo, galera.")
             except Exception: pass
         asyncio.ensure_future(_encerrar_debate_ia())
-        log.info(f"[IA] debate '{tema}' — {autor}")
+        log.info(f"[IA] debate '{tema}'  -  {autor}")
         return True
 
     if acao == "limpar":
@@ -3900,13 +3906,13 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
         ganhadores = random.sample(pool, qtd)
         mencoes = " ".join(m.mention for m in ganhadores)
         sufixo = "o sorteado é" if qtd == 1 else f"os {qtd} sorteados são"
-        await canal.send(f"Sorteio encerrado — {sufixo}: {mencoes}")
-        log.info(f"[IA] sorteio {qtd}x — {autor}")
+        await canal.send(f"Sorteio encerrado  -  {sufixo}: {mencoes}")
+        log.info(f"[IA] sorteio {qtd}x  -  {autor}")
         return True
 
     if acao == "gerar_pdf":
         if not FPDF_DISPONIVEL:
-            await canal.send("fpdf2 não instalado — PDF indisponível.")
+            await canal.send("fpdf2 não instalado  -  PDF indisponível.")
             return True
         tipo_pdf = params.get("tipo", "relatorio")
         try:
@@ -3929,7 +3935,7 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
                 pdf_bytes = await gerar_pdf_relatorio_servidor(guild, dias_pdf)
                 nome_arq = "relatorio.pdf"
             await canal.send("PDF gerado:", file=discord.File(io.BytesIO(pdf_bytes), filename=nome_arq))
-            log.info(f"[IA] gerar_pdf {tipo_pdf} — {autor}")
+            log.info(f"[IA] gerar_pdf {tipo_pdf}  -  {autor}")
         except Exception as e:
             await canal.send(f"Erro ao gerar PDF: {e}")
         return True
@@ -3973,7 +3979,7 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
             await canal.send("Nenhuma citação guardada ainda.")
         else:
             cit = random.choice(citacoes)
-            await canal.send(f'"{cit["texto"]}" — {cit["autor"]}, {cit.get("ts","?")}')
+            await canal.send(f'"{cit["texto"]}"  -  {cit["autor"]}, {cit.get("ts","?")}')
         return True
 
     if acao == "ranking":
@@ -3985,7 +3991,7 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
         for i, (uid, cnt) in enumerate(top, 1):
             mb = guild.get_member(uid)
             nome_mb = mb.display_name if mb else f"ID {uid}"
-            linhas_r.append(f"{i}. {nome_mb} — {cnt} msg{'s' if cnt != 1 else ''}")
+            linhas_r.append(f"{i}. {nome_mb}  -  {cnt} msg{'s' if cnt != 1 else ''}")
         await canal.send("**Ranking de atividade:**\n" + "\n".join(linhas_r))
         return True
 
@@ -4005,7 +4011,7 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
         await canal.send(f"Parei de monitorar {dest_mon.mention}.")
         return True
 
-    log.debug(f"[IA_EXEC] ação '{acao}' não reconhecida — passando adiante")
+    log.debug(f"[IA_EXEC] ação '{acao}' não reconhecida  -  passando adiante")
     return False
 
 
@@ -4174,7 +4180,7 @@ async def _task_relatorio_semanal():
             continue
         try:
             rel = await relatorio_membros(guild, 7)
-            await canal.send(f"**Relatório semanal automático — semana encerrada**\n```\n{rel[:1800]}\n```")
+            await canal.send(f"**Relatório semanal automático  -  semana encerrada**\n```\n{rel[:1800]}\n```")
             log.info("[SEMANAL] Relatório postado.")
         except Exception as e:
             log.error(f"[SEMANAL] Falha: {e}")
@@ -4330,7 +4336,7 @@ async def on_member_remove(member: discord.Member):
 
 
 # Palavras-chave ofensivas em nomes de emoji customizado do servidor
-# (emojis Unicode são ambíguos demais para filtrar — muitos usos legítimos)
+# (emojis Unicode são ambíguos demais para filtrar  -  muitos usos legítimos)
 NOMES_EMOJI_OFENSIVOS = [
     "nigger", "crioulo",
     "viado", "bicha",
@@ -4354,7 +4360,7 @@ async def on_reaction_add(reaction: discord.Reaction, user):
     if eh_autorizado(membro):
         return
 
-    # Só filtra emojis customizados — Unicode tem muitos usos legítimos
+    # Só filtra emojis customizados  -  Unicode tem muitos usos legítimos
     emoji = reaction.emoji
     if isinstance(emoji, str):
         return
@@ -4510,7 +4516,7 @@ async def _on_message_impl(message: discord.Message):
             if resposta:
                 await message.reply(resposta)
             else:
-                log.warning(f"[DONO] resposta vazia — enviando fallback")
+                log.warning(f"[DONO] resposta vazia  -  enviando fallback")
                 await message.reply("Entendido.")
         elif not tratado:
             await processar_links(message)
@@ -4592,7 +4598,7 @@ async def _on_message_impl(message: discord.Message):
         # Racismo/discriminação: silêncio imediato na 1ª infração
         if eh_discriminacao:
             if tem_permissao_moderacao(message.guild) and hasattr(message.author, 'timeout'):
-                await silenciar(message.author, message.channel, "discriminação — tolerância zero")
+                await silenciar(message.author, message.channel, "discriminação  -  tolerância zero")
             else:
                 await message.channel.send(
                     f"{message.author.mention}, mensagem removida por discriminação ou racismo. "
@@ -4682,11 +4688,11 @@ async def _on_message_impl(message: discord.Message):
                 await message.reply(resposta)
                 return
             else:
-                # Conversa expirou — limpa histórico do canal para evitar drift
+                # Conversa expirou  -  limpa histórico do canal para evitar drift
                 historico_groq.pop((user_id, estado_groq["canal"]), None)
                 del conversas_groq[user_id]
         else:
-            # Mudou de canal — limpa histórico do canal anterior
+            # Mudou de canal  -  limpa histórico do canal anterior
             historico_groq.pop((user_id, estado_groq["canal"]), None)
             del conversas_groq[user_id]
 
