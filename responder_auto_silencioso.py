@@ -4039,6 +4039,14 @@ async def processar_ordem(message: discord.Message) -> bool:
         try:
             await _canal_voz.connect()
             await message.channel.send(f"Entrei em {_canal_voz.mention}.")
+        except discord.errors.ConnectionClosed as _e:
+            if getattr(_e, 'code', None) == 4017 or "4017" in str(_e) or "E2EE" in str(_e):
+                await message.channel.send(
+                    f"Não consigo entrar em {_canal_voz.mention}: o canal usa criptografia E2EE (DAVE), "
+                    f"que não é suportada por bots. Desative o E2EE nas configurações do canal de voz e tente novamente."
+                )
+            else:
+                await message.channel.send(f"Nao consegui entrar: {_e}")
         except Exception as _e:
             await message.channel.send(f"Nao consegui entrar: {_e}")
         return True
@@ -4950,7 +4958,13 @@ async def _falar_em_voz(canal_voz: discord.VoiceChannel, texto: str) -> bool:
             vc = None
 
         if not vc:
-            vc = await canal_voz.connect()
+            try:
+                vc = await canal_voz.connect()
+            except discord.errors.ConnectionClosed as _e:
+                if getattr(_e, 'code', None) == 4017 or "4017" in str(_e) or "E2EE" in str(_e):
+                    log.warning(f"[VOZ] Canal {canal_voz.name} usa E2EE/DAVE — não suportado por bots.")
+                    return False
+                raise
 
         # Gera audio TTS em arquivo temporario
         tts = gTTS(text=texto, lang="pt", slow=False)
@@ -4986,6 +5000,28 @@ async def _entrar_canal_voz(guild: discord.Guild, nome_canal: str | None = None)
         # Canal com mais membros ou primeiro disponível
         canal = max(canais, key=lambda c: len(c.members)) if canais else None
     return canal
+
+
+async def _conectar_voz(canal: discord.VoiceChannel) -> tuple:
+    """
+    Tenta conectar ao canal de voz.
+    Retorna (VoiceClient, None) em sucesso ou (None, mensagem_erro) em falha.
+    Trata especificamente o erro E2EE/DAVE (código 4017).
+    """
+    try:
+        vc = await canal.connect()
+        return vc, None
+    except discord.errors.ConnectionClosed as e:
+        if getattr(e, 'code', None) == 4017 or "4017" in str(e) or "E2EE" in str(e):
+            msg = (
+                f"Não consigo entrar em {canal.mention}: o canal usa criptografia E2EE (DAVE), "
+                f"que não é suportada por bots. Desative o E2EE nas configurações do canal e tente novamente."
+            )
+            log.warning(f"[VOZ] E2EE/DAVE bloqueou conexão em #{canal.name} (código 4017).")
+            return None, msg
+        return None, f"Erro de conexão: {e}"
+    except Exception as e:
+        return None, f"Erro ao conectar: {e}"
 
 
 @client.event
