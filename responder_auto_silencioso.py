@@ -422,9 +422,9 @@ silenciamentos: dict[int, int] = defaultdict(int)
 ultimo_motivo: dict[int, str] = {}
 conversas: dict[int, dict] = {}
 ausencia: dict[int, dict] = {}
-historico_claude: dict[tuple[int, int], list] = {}  # chave: (user_id, canal_id)
-conversas_claude: dict[int, dict] = {}
-TIMEOUT_CONVERSA_CLAUDE = timedelta(minutes=5)
+historico_groq: dict[tuple[int, int], list] = {}  # chave: (user_id, canal_id)
+conversas_groq: dict[int, dict] = {}
+TIMEOUT_CONVERSA_GROQ = timedelta(minutes=5)
 
 # ── Rastreamento de entradas e saídas ─────────────────────────────────────────
 # registro_entradas: user_id -> lista de ISO timestamps de cada entrada
@@ -1198,33 +1198,74 @@ def _buscar_role_por_nome(guild: discord.Guild, trecho: str) -> discord.Role | N
     return None
 
 
+_SYSTEM_INTENT = """Você é um classificador de intenção para um bot de Discord.
+Dado o texto de uma mensagem, retorne APENAS um objeto JSON com a intenção detectada.
+Responda SOMENTE com JSON válido, sem texto antes ou depois, sem markdown.
+
+Intenções possíveis e seus campos:
+- {"intent": "uptime"}
+- {"intent": "cargo_quantidade"}
+- {"intent": "cargo_listagem"}
+- {"intent": "cargo_por_id", "id": "123456789"}
+- {"intent": "cargo_por_nome", "nome": "NomeDoCargo", "detalhado": false}
+- {"intent": "membro_info", "nome": "NomeDoMembro"}
+- {"intent": "canais_quantidade"}
+- {"intent": "canais_listagem"}
+- {"intent": "dono_servidor"}
+- {"intent": "data_criacao"}
+- {"intent": "boosts"}
+- {"intent": "membros_total"}
+- {"intent": "membros_online"}
+- {"intent": "membros_antigos"}
+- {"intent": "membros_recentes"}
+- {"intent": "membros_sem_cargo"}
+- {"intent": "membros_com_infracoes"}
+- {"intent": "membros_silenciados"}
+- {"intent": "membros_mais_cargos"}
+- {"intent": "membros_por_periodo", "periodo": "hoje|semana|mes"}
+- {"intent": "membros_bots"}
+- {"intent": "banimentos"}
+- {"intent": "distribuicao_cargos"}
+- {"intent": "media_tempo_servidor"}
+- {"intent": "media_idade_contas"}
+- {"intent": "nao_reconhecido"}
+
+Para "detalhado": true quando a pergunta pede detalhes como tempo, idade da conta, etc.
+Para "cargo_por_nome": extraia apenas o nome do cargo, sem aspas, sem artigos.
+Se a mensagem não for uma pergunta sobre o servidor, retorne {"intent": "nao_reconhecido"}.
+"""
+
+async def _detectar_intencao(conteudo: str) -> dict:
+    """Usa a Groq para classificar a intenção da mensagem. Retorna dict com intent."""
+    if not GROQ_DISPONIVEL or not GROQ_API_KEY:
+        return {"intent": "nao_reconhecido"}
+    try:
+        resp = await _groq_client().chat.completions.create(
+            model="llama-3.1-8b-instant",
+            max_tokens=80,
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": _SYSTEM_INTENT},
+                {"role": "user", "content": conteudo},
+            ],
+        )
+        texto = resp.choices[0].message.content.strip()
+        texto = re.sub(r"^```json|^```|```$", "", texto).strip()
+        return json.loads(texto)
+    except Exception as e:
+        log.warning(f"_detectar_intencao falhou: {e}")
+        return {"intent": "nao_reconhecido"}
+
+
 async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | None:
     """
-    Detecta perguntas factuais sobre o servidor e responde com dados reais.
-    Agora assíncrona — pode consultar a REST API para dados em tempo real.
+    Detecta a intenção da mensagem via IA (Groq) e responde com dados reais do servidor.
     Retorna string com a resposta, ou None se não for uma query reconhecida.
     """
-    c = conteudo.lower()
     agora = agora_utc()
     brasilia = timezone(timedelta(hours=-3))
 
-    # ── Uptime do bot ─────────────────────────────────────────────────────────
-    if re.search(r'\b(uptime|ativo\s+h[aá]|online\s+h[aá]|tempo\s+de\s+atividade|rodando\s+h[aá]|ligado\s+h[aá])\b', c):
-        delta = agora - _bot_inicio
-        return f"Estou online há {formatar_duracao(delta)}."
-
-    # ── Cargos: quantidade ────────────────────────────────────────────────────
-    if re.search(r'\bquantos\b.{0,25}\bcargos?\b', c):
-        n = len([r for r in guild.roles if r.name != "@everyone"])
-        return f"O servidor tem {n} cargos."
-
-    # ── Cargos: listagem ──────────────────────────────────────────────────────
-    if re.search(r'\b(quais|liste?|mostr[ae]|list[ae])\b.{0,25}\bcargos?\b', c):
-        cargos = sorted([r for r in guild.roles if r.name != "@everyone"], key=lambda r: -r.position)
-        partes = [f"{r.name} ({len(r.members)} membro{'s' if len(r.members) != 1 else ''})" for r in cargos]
-        return "Cargos do servidor: " + ", ".join(partes) + "."
-
-    # ── Cargo por ID numérico ─────────────────────────────────────────────────
+    # ID numérico do Discord: detecta direto sem chamar a IA
     m_id = re.search(r'(\d{17,19})', conteudo)
     if m_id:
         role_id = int(m_id.group(1))
@@ -1232,46 +1273,53 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
         if role:
             return _role_info(role)
 
-    # ── Moderadores / equipe mod ──────────────────────────────────────────────
-    if re.search(r'\b(mod(?:erador)?s?|equipe\s*mod|staff|tropa\s*(?:da\s*)?mod)\b', c):
-        role = guild.get_role(CARGO_EQUIPE_MOD_ID)
-        if role:
-            det = bool(re.search(r'\b(detalh|info|idad|conta|tempo|quando|quanto\s+tempo)\b', c))
-            return _role_info(role, detalhado=det)
+    intent_data = await _detectar_intencao(conteudo)
+    intent = intent_data.get("intent", "nao_reconhecido")
+
+    if intent == "nao_reconhecido":
+        return None
+
+    humanos_cache = [m for m in guild.members if not m.bot]
+
+    # ── Uptime ────────────────────────────────────────────────────────────────
+    if intent == "uptime":
+        return f"Estou online há {formatar_duracao(agora - _bot_inicio)}."
+
+    # ── Cargos: quantidade ────────────────────────────────────────────────────
+    if intent == "cargo_quantidade":
+        n = len([r for r in guild.roles if r.name != "@everyone"])
+        return f"O servidor tem {n} cargos."
+
+    # ── Cargos: listagem ──────────────────────────────────────────────────────
+    if intent == "cargo_listagem":
+        cargos = sorted([r for r in guild.roles if r.name != "@everyone"], key=lambda r: -r.position)
+        partes = [f"{r.name} ({len(r.members)} membro{'s' if len(r.members) != 1 else ''})" for r in cargos]
+        return "Cargos do servidor: " + ", ".join(partes) + "."
 
     # ── Cargo por nome ────────────────────────────────────────────────────────
-    m_nome = re.search(
-        r'\b(?:cargo|fun[çc][aã]o|tropa|membro[s]?\s+d[ao]|quem\s+(?:tem|é|são)\s+(?:o\s+cargo\s+)?)\s*'
-        r'["\']?([a-záéíóúãõâêôçüñ\w](?:[a-záéíóúãõâêôçüñ\w\s]{1,28})?)["\']?',
-        c
-    )
-    if m_nome:
-        role = _buscar_role_por_nome(guild, m_nome.group(1))
+    if intent == "cargo_por_nome":
+        nome = intent_data.get("nome", "")
+        role = _buscar_role_por_nome(guild, nome) if nome else None
         if role:
-            det = bool(re.search(r'\b(detalh|info|idad|conta|tempo|quando|quanto\s+tempo)\b', c))
-            return _role_info(role, detalhado=det)
+            return _role_info(role, detalhado=intent_data.get("detalhado", False))
+        return f"Não encontrei nenhum cargo com o nome '{nome}'."
 
-    # ── Membro por nome (sem @menção) ─────────────────────────────────────────
-    m_mb = re.search(
-        r'\b(?:info(?:rmações?)?|quem\s+é|fale?\s+sobre|detalhes?\s+(?:de|do|da)|'
-        r'quanto\s+tempo\s+(?:o|a|)\s*|quando\s+entrou\s+(?:o|a|)\s*|'
-        r'idad[e]?\s+(?:da\s+conta\s+)?(?:de|do|da)\s+)'
-        r'([A-Za-záéíóúãõâêôçüñ\w]{2,30})',
-        c
-    )
-    if m_mb:
-        mb = _buscar_membro_por_nome(guild, m_mb.group(1))
+    # ── Membro por nome ───────────────────────────────────────────────────────
+    if intent == "membro_info":
+        nome = intent_data.get("nome", "")
+        mb = _buscar_membro_por_nome(guild, nome) if nome else None
         if mb:
             return _info_membro_sync(mb)
+        return f"Não encontrei nenhum membro com o nome '{nome}'."
 
     # ── Canais: quantidade ────────────────────────────────────────────────────
-    if re.search(r'\bquantos\b.{0,25}\bcanais?\b', c):
+    if intent == "canais_quantidade":
         todos = [ch for ch in guild.channels if not isinstance(ch, discord.CategoryChannel)]
         voz = [ch for ch in todos if isinstance(ch, discord.VoiceChannel)]
         return f"O servidor tem {len(todos) - len(voz)} canais de texto e {len(voz)} de voz."
 
     # ── Canais: listagem ──────────────────────────────────────────────────────
-    if re.search(r'\b(quais|liste?|mostr[ae])\b.{0,25}\bcanais?\b', c):
+    if intent == "canais_listagem":
         cats: dict[str, list[str]] = {}
         for ch in sorted(guild.channels, key=lambda ch: ch.position):
             if isinstance(ch, discord.CategoryChannel):
@@ -1281,26 +1329,22 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
         partes = [f"[{cat}] {', '.join(nomes)}" for cat, nomes in cats.items()]
         return "Canais: " + " | ".join(partes) + "."
 
-    # ── Dono do servidor ─────────────────────────────────────────────────────
-    if re.search(r'\b(dono|criador|fundador)\b.{0,25}\bservidor\b', c) or \
-       re.search(r'\bservidor\b.{0,25}\b(dono|criador|fundador)\b', c):
-        if guild.owner:
-            return f"O dono do servidor é {guild.owner.display_name}."
+    # ── Dono ─────────────────────────────────────────────────────────────────
+    if intent == "dono_servidor":
+        return f"O dono do servidor é {guild.owner.display_name}." if guild.owner else "Não encontrei o dono."
 
     # ── Data de criação ───────────────────────────────────────────────────────
-    if re.search(r'\b(quando|data).{0,25}\b(cri(?:ou|ado)|fund(?:ou|ado)|inaugur\w+)\b', c) or \
-       re.search(r'\b(cri(?:ou|ado)|fund(?:ou|ado)).{0,25}\bservidor\b', c):
+    if intent == "data_criacao":
         dt = guild.created_at.astimezone(brasilia).strftime("%d/%m/%Y às %H:%M")
         return f"O servidor foi criado em {dt} (horário de Brasília)."
 
-    # ── Boosts ───────────────────────────────────────────────────────────────
-    if re.search(r'\bboost\w*\b', c):
-        n_boost = guild.premium_subscription_count
-        return (f"O servidor está no nível {guild.premium_tier} de boost "
-                f"com {n_boost} boost{'s' if n_boost != 1 else ''}.")
+    # ── Boosts ────────────────────────────────────────────────────────────────
+    if intent == "boosts":
+        n = guild.premium_subscription_count
+        return f"O servidor está no nível {guild.premium_tier} de boost com {n} boost{'s' if n != 1 else ''}."
 
-    # ── Membros: quantidade total ─────────────────────────────────────────────
-    if re.search(r'\bquantos\b.{0,25}\b(membros?|pessoas?|usuários?)\b', c):
+    # ── Membros: total ────────────────────────────────────────────────────────
+    if intent == "membros_total":
         dados = await api_guild_info(guild.id)
         if dados and dados.get("approximate_member_count"):
             total = dados["approximate_member_count"]
@@ -1308,152 +1352,41 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
             bots = sum(1 for mb in guild.members if mb.bot)
             return f"O servidor tem {total - bots} membros humanos ({online} online agora) e {bots} bots."
         bots = sum(1 for mb in guild.members if mb.bot)
-        humanos = guild.member_count - bots
-        return f"O servidor tem {humanos} membros humanos e {bots} bots."
+        return f"O servidor tem {guild.member_count - bots} membros humanos e {bots} bots."
 
-    # ── Membros mais antigos no servidor ─────────────────────────────────────
-    if re.search(r'\b(mais\s+antigo|primeiro[s]?\s+membro|fundador[es]?|veterano)\b', c):
-        humanos = sorted(
-            [m for m in guild.members if not m.bot and m.joined_at],
-            key=lambda m: m.joined_at
-        )[:5]
+    # ── Membros: online agora ─────────────────────────────────────────────────
+    if intent == "membros_online":
+        dados = await api_guild_info(guild.id)
+        if dados and dados.get("approximate_presence_count"):
+            return f"Aproximadamente {dados['approximate_presence_count']} membros online agora."
+        return "Não foi possível obter contagem de membros online no momento."
+
+    # ── Membros: mais antigos ─────────────────────────────────────────────────
+    if intent == "membros_antigos":
+        mais_antigos = sorted([m for m in humanos_cache if m.joined_at], key=lambda m: m.joined_at)[:5]
         linhas = ["Membros mais antigos no servidor:"]
-        for mb in humanos:
-            tempo = _fmt_duracao_curta(agora - mb.joined_at.replace(tzinfo=timezone.utc))
-            linhas.append(f"  {mb.display_name} — há {tempo}")
+        for mb in mais_antigos:
+            linhas.append(f"  {mb.display_name} — há {_fmt_duracao_curta(agora - mb.joined_at.replace(tzinfo=timezone.utc))}")
         return "\n".join(linhas)
 
-    # ── Membros mais recentes ─────────────────────────────────────────────────
-    if re.search(r'\b(mais\s+recente|último[s]?\s+(?:a\s+)?entrar|novato)\b', c):
-        humanos = sorted(
-            [m for m in guild.members if not m.bot and m.joined_at],
-            key=lambda m: m.joined_at, reverse=True
-        )[:5]
+    # ── Membros: mais recentes ────────────────────────────────────────────────
+    if intent == "membros_recentes":
+        mais_novos = sorted([m for m in humanos_cache if m.joined_at], key=lambda m: m.joined_at, reverse=True)[:5]
         linhas = ["Entradas mais recentes:"]
-        for mb in humanos:
-            tempo = _fmt_duracao_curta(agora - mb.joined_at.replace(tzinfo=timezone.utc))
-            linhas.append(f"  {mb.display_name} — há {tempo}")
+        for mb in mais_novos:
+            linhas.append(f"  {mb.display_name} — há {_fmt_duracao_curta(agora - mb.joined_at.replace(tzinfo=timezone.utc))}")
         return "\n".join(linhas)
 
-    # ── Contas mais novas (por data de criação) ───────────────────────────────
-    if re.search(r'\bconta[s]?\s+(?:mais\s+)?nova[s]?\b|\brecém[-\s]?cria\w+\b', c):
-        humanos = sorted(
-            [m for m in guild.members if not m.bot],
-            key=lambda m: m.created_at, reverse=True
-        )[:5]
-        linhas = ["Contas criadas mais recentemente:"]
-        for mb in humanos:
-            idade = _fmt_duracao_curta(agora - mb.created_at.replace(tzinfo=timezone.utc))
-            linhas.append(f"  {mb.display_name} — conta criada há {idade}")
-        return "\n".join(linhas)
+    # ── Membros: sem cargo ────────────────────────────────────────────────────
+    if intent == "membros_sem_cargo":
+        sem = [mb for mb in humanos_cache if all(r.name == "@everyone" for r in mb.roles)]
+        nomes = ", ".join(mb.display_name for mb in sem[:20])
+        sufixo = f" (e mais {len(sem)-20})" if len(sem) > 20 else ""
+        return f"{len(sem)} membro{'s' if len(sem)!=1 else ''} sem cargo: {nomes}{sufixo}."
 
-    # ── Lista completa de membros com detalhes ────────────────────────────────
-    if re.search(r'\b(todos\s+os\s+membros|lista\s+completa|lista\s+detalhada)\b', c):
-        humanos = sorted([m for m in guild.members if not m.bot], key=lambda m: m.display_name.lower())
-        linhas = [f"Membros humanos ({len(humanos)}):"]
-        for mb in humanos:
-            conta = _fmt_duracao_curta(agora - mb.created_at.replace(tzinfo=timezone.utc))
-            servidor = _fmt_duracao_curta(agora - mb.joined_at.replace(tzinfo=timezone.utc)) if mb.joined_at else "?"
-            cargos = [r.name for r in mb.roles if r.name != "@everyone"]
-            cargos_txt = ", ".join(cargos) if cargos else "sem cargo"
-            linhas.append(f"  {mb.display_name} | conta: {conta} | servidor: {servidor} | cargos: {cargos_txt}")
-        resultado = "\n".join(linhas)
-        if len(resultado) > 1800:
-            resultado = resultado[:1800] + "\n  (...)"
-        return resultado
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # QUERIES ANALÍTICAS — calculadas em tempo real sobre todos os membros
-    # ══════════════════════════════════════════════════════════════════════════
-
-    humanos_cache = [m for m in guild.members if not m.bot]
-
-    # ── Membros com idade de conta em intervalo (ex: "entre 5 e 10 dias") ─────
-    m_intervalo_conta = re.search(
-        r'(?:idade\s+(?:da\s+)?conta|conta\s+(?:com\s+)?(?:entre|de)|conta.{0,15})\s*'
-        r'(?:entre\s+)?(\d+)\s*(?:e|a|até|-)\s*(\d+)\s*(dia|semana|mes|mês|ano)\w*',
-        c
-    )
-    if m_intervalo_conta:
-        v1, v2 = int(m_intervalo_conta.group(1)), int(m_intervalo_conta.group(2))
-        unidade = m_intervalo_conta.group(3)
-        mult = {"dia": 1, "semana": 7, "mes": 30, "mês": 30, "ano": 365}.get(unidade[:3], 1)
-        dias_min, dias_max = v1 * mult, v2 * mult
-        resultado = [
-            mb for mb in humanos_cache
-            if dias_min <= (agora - mb.created_at.replace(tzinfo=timezone.utc)).days <= dias_max
-        ]
-        if not resultado:
-            return f"Nenhum membro com conta entre {v1} e {v2} {unidade}s."
-        nomes = ", ".join(mb.display_name for mb in resultado[:20])
-        sufixo = f" (e mais {len(resultado)-20})" if len(resultado) > 20 else ""
-        return f"{len(resultado)} membro{'s' if len(resultado)!=1 else ''} com conta entre {v1} e {v2} {unidade}s: {nomes}{sufixo}."
-
-    # ── Membros com conta mais antiga que X dias ──────────────────────────────
-    m_conta_maior = re.search(
-        r'conta\s+(?:com\s+)?(?:mais\s+de|acima\s+de|maior\s+que)\s+(\d+)\s*(dia|semana|mes|mês|ano)\w*',
-        c
-    )
-    if m_conta_maior:
-        v = int(m_conta_maior.group(1))
-        unidade = m_conta_maior.group(2)
-        mult = {"dia": 1, "semana": 7, "mes": 30, "mês": 30, "ano": 365}.get(unidade[:3], 1)
-        dias = v * mult
-        resultado = [mb for mb in humanos_cache if (agora - mb.created_at.replace(tzinfo=timezone.utc)).days > dias]
-        nomes = ", ".join(mb.display_name for mb in resultado[:20])
-        sufixo = f" (e mais {len(resultado)-20})" if len(resultado) > 20 else ""
-        return f"{len(resultado)} membro{'s' if len(resultado)!=1 else ''} com conta há mais de {v} {unidade}s: {nomes}{sufixo}."
-
-    # ── Membros com conta mais nova que X dias ────────────────────────────────
-    m_conta_menor = re.search(
-        r'conta\s+(?:com\s+)?(?:menos\s+de|abaixo\s+de|menor\s+que|nova[s]?\s+(?:de|com))\s+(\d+)\s*(dia|semana|mes|mês|ano)\w*',
-        c
-    )
-    if m_conta_menor:
-        v = int(m_conta_menor.group(1))
-        unidade = m_conta_menor.group(2)
-        mult = {"dia": 1, "semana": 7, "mes": 30, "mês": 30, "ano": 365}.get(unidade[:3], 1)
-        dias = v * mult
-        resultado = [mb for mb in humanos_cache if (agora - mb.created_at.replace(tzinfo=timezone.utc)).days < dias]
-        nomes = ", ".join(mb.display_name for mb in resultado[:20])
-        sufixo = f" (e mais {len(resultado)-20})" if len(resultado) > 20 else ""
-        return f"{len(resultado)} membro{'s' if len(resultado)!=1 else ''} com conta há menos de {v} {unidade}s: {nomes}{sufixo}."
-
-    # ── Membros no servidor há X tempo (intervalo) ────────────────────────────
-    m_intervalo_srv = re.search(
-        r'(?:no\s+servidor|tempo\s+de\s+servidor|servidor.{0,10})\s*'
-        r'(?:entre\s+)?(\d+)\s*(?:e|a|até|-)\s*(\d+)\s*(dia|semana|mes|mês|ano)\w*',
-        c
-    )
-    if m_intervalo_srv:
-        v1, v2 = int(m_intervalo_srv.group(1)), int(m_intervalo_srv.group(2))
-        unidade = m_intervalo_srv.group(3)
-        mult = {"dia": 1, "semana": 7, "mes": 30, "mês": 30, "ano": 365}.get(unidade[:3], 1)
-        dias_min, dias_max = v1 * mult, v2 * mult
-        resultado = [
-            mb for mb in humanos_cache
-            if mb.joined_at and dias_min <= (agora - mb.joined_at.replace(tzinfo=timezone.utc)).days <= dias_max
-        ]
-        if not resultado:
-            return f"Nenhum membro no servidor entre {v1} e {v2} {unidade}s."
-        nomes = ", ".join(mb.display_name for mb in resultado[:20])
-        sufixo = f" (e mais {len(resultado)-20})" if len(resultado) > 20 else ""
-        return f"{len(resultado)} membro{'s' if len(resultado)!=1 else ''} no servidor entre {v1} e {v2} {unidade}s: {nomes}{sufixo}."
-
-    # ── Quantos membros sem cargo ─────────────────────────────────────────────
-    if re.search(r'\b(sem\s+cargo|sem\s+fun[çc][aã]o|sem\s+role)\b', c):
-        sem_cargo = [
-            mb for mb in humanos_cache
-            if all(r.name == "@everyone" for r in mb.roles)
-        ]
-        nomes = ", ".join(mb.display_name for mb in sem_cargo[:20])
-        sufixo = f" (e mais {len(sem_cargo)-20})" if len(sem_cargo) > 20 else ""
-        return f"{len(sem_cargo)} membro{'s' if len(sem_cargo)!=1 else ''} sem cargo: {nomes}{sufixo}."
-
-    # ── Membros com infrações ─────────────────────────────────────────────────
-    if re.search(r'\b(infra[çc][oõ]es?|infrat\w+|com\s+punic[aã]o|punidos)\b', c):
-        com_infr = [(mb, infracoes[mb.id]) for mb in humanos_cache if infracoes.get(mb.id, 0) > 0]
-        com_infr.sort(key=lambda x: -x[1])
+    # ── Membros: com infrações ────────────────────────────────────────────────
+    if intent == "membros_com_infracoes":
+        com_infr = sorted([(mb, infracoes[mb.id]) for mb in humanos_cache if infracoes.get(mb.id, 0) > 0], key=lambda x: -x[1])
         if not com_infr:
             return "Nenhum membro com infrações registradas."
         linhas = [f"Membros com infrações ({len(com_infr)}):"]
@@ -1461,8 +1394,8 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
             linhas.append(f"  {mb.display_name} — {n} infração{'ões' if n > 1 else ''}")
         return "\n".join(linhas)
 
-    # ── Membros silenciados atualmente (verificado via REST) ──────────────────
-    if re.search(r'\b(silenciados?|mutados?|em\s+timeout)\b', c):
+    # ── Membros: silenciados ──────────────────────────────────────────────────
+    if intent == "membros_silenciados":
         silenciados = []
         for mb in humanos_cache:
             dados = await api_membro(guild.id, mb.id)
@@ -1483,8 +1416,8 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
             linhas.append(f"  {nome} — {mins} min restantes")
         return "\n".join(linhas)
 
-    # ── Membros com mais cargos ───────────────────────────────────────────────
-    if re.search(r'\b(mais\s+cargos?|mais\s+roles?|maior\s+hierarquia)\b', c):
+    # ── Membros: mais cargos ──────────────────────────────────────────────────
+    if intent == "membros_mais_cargos":
         ranking = sorted(humanos_cache, key=lambda mb: len(mb.roles), reverse=True)[:5]
         linhas = ["Membros com mais cargos:"]
         for mb in ranking:
@@ -1493,35 +1426,32 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
             linhas.append(f"  {mb.display_name} — {n} cargo{'s' if n!=1 else ''}: {cargos}")
         return "\n".join(linhas)
 
-    # ── Membros que entraram hoje ou esta semana ──────────────────────────────
-    if re.search(r'\b(entr(?:aram|ou)\s+(?:hoje|essa?\s+semana|esse?\s+mes|esse?\s+mês))\b', c):
-        if "hoje" in c:
+    # ── Membros: por período ──────────────────────────────────────────────────
+    if intent == "membros_por_periodo":
+        periodo = intent_data.get("periodo", "semana")
+        if periodo == "hoje":
             corte = agora.replace(hour=0, minute=0, second=0, microsecond=0)
-            periodo = "hoje"
-        elif "semana" in c:
-            corte = agora - timedelta(days=7)
-            periodo = "essa semana"
-        else:
+            periodo_txt = "hoje"
+        elif periodo == "mes":
             corte = agora - timedelta(days=30)
-            periodo = "esse mês"
-        recentes = [
-            mb for mb in humanos_cache
-            if mb.joined_at and mb.joined_at.replace(tzinfo=timezone.utc) >= corte
-        ]
+            periodo_txt = "esse mês"
+        else:
+            corte = agora - timedelta(days=7)
+            periodo_txt = "essa semana"
+        recentes = [mb for mb in humanos_cache if mb.joined_at and mb.joined_at.replace(tzinfo=timezone.utc) >= corte]
         if not recentes:
-            return f"Nenhum membro entrou {periodo}."
+            return f"Nenhum membro entrou {periodo_txt}."
         nomes = ", ".join(mb.display_name for mb in recentes)
-        return f"{len(recentes)} membro{'s' if len(recentes)!=1 else ''} entrou{'ram' if len(recentes)>1 else ''} {periodo}: {nomes}."
+        return f"{len(recentes)} membro{'s' if len(recentes)!=1 else ''} entrou{'ram' if len(recentes)>1 else ''} {periodo_txt}: {nomes}."
 
-    # ── Quantos bots há no servidor ───────────────────────────────────────────
-    if re.search(r'\bquantos\b.{0,20}\bbots?\b|\bbots?\b.{0,20}\bquantos\b', c):
+    # ── Bots ──────────────────────────────────────────────────────────────────
+    if intent == "membros_bots":
         bots = [m for m in guild.members if m.bot]
         nomes = ", ".join(b.display_name for b in bots)
         return f"O servidor tem {len(bots)} bot{'s' if len(bots)!=1 else ''}: {nomes}."
 
-    # ── Banimentos via REST ───────────────────────────────────────────────────
-    if re.search(r'\b(banido[s]?|ban[s]?|banimento[s]?)\b', c) and \
-       re.search(r'\b(quantos?|lista|listar|ver|quais)\b', c):
+    # ── Banimentos ────────────────────────────────────────────────────────────
+    if intent == "banimentos":
         bans = await api_banimentos(guild.id, 50)
         if not bans:
             return "Nenhum banimento ativo no servidor."
@@ -1529,15 +1459,8 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
         sufixo = f" (e mais {len(bans)-15})" if len(bans) > 15 else ""
         return f"{len(bans)} banimento{'s' if len(bans)!=1 else ''} ativo{'s' if len(bans)!=1 else ''}: {nomes}{sufixo}."
 
-    # ── Membros online agora (via REST presence_count) ────────────────────────
-    if re.search(r'\b(online\s+agora|quantos?\s+online|membros?\s+ativos?\s+agora)\b', c):
-        dados = await api_guild_info(guild.id)
-        if dados and dados.get("approximate_presence_count"):
-            return f"Aproximadamente {dados['approximate_presence_count']} membros online agora."
-        return "Não foi possível obter contagem de membros online no momento."
-
-    # ── Distribuição de cargos (quantos membros por cargo) ───────────────────
-    if re.search(r'\bdistribui[çc][aã]o\b.{0,25}\bcargos?\b|\bcargos?\b.{0,25}\bdistribui[çc][aã]o\b', c):
+    # ── Distribuição de cargos ────────────────────────────────────────────────
+    if intent == "distribuicao_cargos":
         cargos = sorted([r for r in guild.roles if r.name != "@everyone"], key=lambda r: -r.position)
         linhas = ["Distribuição de membros por cargo:"]
         for r in cargos:
@@ -1547,18 +1470,15 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
         return "\n".join(linhas)
 
     # ── Média de tempo no servidor ────────────────────────────────────────────
-    if re.search(r'\b(média|media|tempo\s+médio|médio).{0,25}\b(servidor|membros?)\b', c):
-        tempos = [
-            (agora - mb.joined_at.replace(tzinfo=timezone.utc)).days
-            for mb in humanos_cache if mb.joined_at
-        ]
+    if intent == "media_tempo_servidor":
+        tempos = [(agora - mb.joined_at.replace(tzinfo=timezone.utc)).days for mb in humanos_cache if mb.joined_at]
         if not tempos:
-            return "Não há dados de entrada suficientes."
+            return "Não há dados suficientes."
         media = sum(tempos) // len(tempos)
         return f"Tempo médio dos membros no servidor: {_fmt_duracao_curta(timedelta(days=media))} ({len(tempos)} membros)."
 
     # ── Média de idade das contas ─────────────────────────────────────────────
-    if re.search(r'\b(média|media|tempo\s+médio|médio).{0,25}\b(conta|discord)\b', c):
+    if intent == "media_idade_contas":
         idades = [(agora - mb.created_at.replace(tzinfo=timezone.utc)).days for mb in humanos_cache]
         if not idades:
             return "Sem dados suficientes."
@@ -1566,11 +1486,6 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
         return f"Idade média das contas dos membros: {_fmt_duracao_curta(timedelta(days=media))} ({len(idades)} membros)."
 
     return None
-
-
-# ── Conhecimento dinâmico do servidor ────────────────────────────────────────
-_contexto_servidor: str = ""  # preenchido no on_ready
-
 
 def build_server_context(guild: discord.Guild) -> str:
     """
@@ -1748,9 +1663,9 @@ async def confirmar_acao(descricao: str, fallback: str) -> str:
         return fallback
 
 
-async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=None, canal_id: int = None) -> str:
+async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None, canal_id: int = None) -> str:
     if canal_id:
-        conversas_claude[user_id] = {"canal": canal_id, "ultima": agora_utc()}
+        conversas_groq[user_id] = {"canal": canal_id, "ultima": agora_utc()}
 
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return random.choice([
@@ -1759,7 +1674,7 @@ async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=No
         ])
 
     chave_hist = (user_id, canal_id or 0)
-    hist = historico_claude.setdefault(chave_hist, [])
+    hist = historico_groq.setdefault(chave_hist, [])
     hist.append({"role": "user", "content": f"{autor}: {pergunta}"})
     # Mantém apenas as últimas 16 trocas para evitar drift de contexto
     if len(hist) > 16:
@@ -1939,10 +1854,10 @@ async def continuar_conversa(user_id: int, msg: str, autor: str, guild=None) -> 
         del conversas[user_id]
         if any(p in msg_l for p in ["regra", "norma", "proibido", "pode", "posso", "permitido"]):
             return REGRAS
-        return await responder_com_claude(msg, autor, user_id, guild)
+        return await responder_com_groq(msg, autor, user_id, guild)
 
     del conversas[user_id]
-    return await responder_com_claude(msg, autor, user_id, guild)
+    return await responder_com_groq(msg, autor, user_id, guild)
 
 
 async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, membro=None, canal_id: int = None) -> str:
@@ -2000,7 +1915,7 @@ async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, 
             f"Sim?",
         ])
 
-    return await responder_com_claude(conteudo, autor, user_id, guild, canal_id)
+    return await responder_com_groq(conteudo, autor, user_id, guild, canal_id)
 
 
 def parsear_ausencia(texto: str) -> tuple[int, str]:
@@ -3376,29 +3291,29 @@ async def on_message(message: discord.Message):
             del conversas[user_id]
 
     # ── Continuar conversa Claude ativa ──────────────────────────────────────
-    estado_claude = conversas_claude.get(user_id)
-    if estado_claude and client.user not in message.mentions and not GATILHOS_NOME.search(conteudo):
-        if estado_claude["canal"] == message.channel.id:
-            tempo_ocioso = agora_utc() - estado_claude["ultima"]
-            if tempo_ocioso <= TIMEOUT_CONVERSA_CLAUDE:
+    estado_groq = conversas_groq.get(user_id)
+    if estado_groq and client.user not in message.mentions and not GATILHOS_NOME.search(conteudo):
+        if estado_groq["canal"] == message.channel.id:
+            tempo_ocioso = agora_utc() - estado_groq["ultima"]
+            if tempo_ocioso <= TIMEOUT_CONVERSA_GROQ:
                 # Queries factuais respondem direto sem IA
                 if message.guild:
                     resp_direta = await query_servidor_direto(message.guild, message.content)
                     if resp_direta:
                         await message.reply(resp_direta)
                         return
-                resposta = await responder_com_claude(conteudo, autor, user_id, message.guild, message.channel.id)
+                resposta = await responder_com_groq(conteudo, autor, user_id, message.guild, message.channel.id)
                 log.info(f"Claude cont: {autor}: {conteudo}")
                 await message.reply(resposta)
                 return
             else:
                 # Conversa expirou — limpa histórico do canal para evitar drift
-                historico_claude.pop((user_id, estado_claude["canal"]), None)
-                del conversas_claude[user_id]
+                historico_groq.pop((user_id, estado_groq["canal"]), None)
+                del conversas_groq[user_id]
         else:
             # Mudou de canal — limpa histórico do canal anterior
-            historico_claude.pop((user_id, estado_claude["canal"]), None)
-            del conversas_claude[user_id]
+            historico_groq.pop((user_id, estado_groq["canal"]), None)
+            del conversas_groq[user_id]
 
     # ── Responder menção/gatilho de membros comuns ────────────────────────────
     if mencionado:
