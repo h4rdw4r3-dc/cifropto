@@ -1790,6 +1790,8 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         {"role": "system", "content": membro_info},
     ] + hist
 
+    ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
+    log.info(f"[GROQ] chamando API | user={autor} | msgs={len(mensagens)} | chars_total={ctx_chars}")
     try:
         resp = await _groq_client().chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -1799,10 +1801,11 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
             messages=mensagens,
         )
         texto = resp.choices[0].message.content.strip()
+        log.info(f"[GROQ] resposta OK ({len(texto)} chars)")
         hist.append({"role": "assistant", "content": texto})
         return texto
     except Exception as e:
-        log.error(f"Groq responder: {e}")
+        log.error(f"[GROQ] erro na API: {e}", exc_info=True)
         return random.choice(["Não sei disso.", "Sem informação.", "Tenta a moderação."])
 
 
@@ -3210,10 +3213,12 @@ async def _on_message_impl(message: discord.Message):
 
     # ── Donos: isentos de punição, comandos + ordens gerais sempre ativos ────────
     if _eh_dono:
+        log.info(f"[DONO] {autor} | mencionado={mencionado} | conteudo={conteudo[:80]!r}")
         if message.author.id in ausencia:
             del ausencia[message.author.id]
             await message.channel.send(f"{message.author.mention}, modo ausente desativado.")
         tratado = await processar_ordem(message)
+        log.info(f"[DONO] processar_ordem retornou {tratado}")
         if not tratado and mencionado:
             # Continua conversa ativa antes de cair em resposta_inicial_superior
             estado_conv = conversas.get(user_id)
@@ -3222,8 +3227,14 @@ async def _on_message_impl(message: discord.Message):
                 if resp_conv:
                     await message.reply(resp_conv)
                     return
+            log.info(f"[DONO] chamando resposta_inicial_superior para {autor}")
             resposta = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
-            await message.reply(resposta)
+            log.info(f"[DONO] resposta obtida ({len(resposta)} chars): {resposta[:60]!r}")
+            if resposta:
+                await message.reply(resposta)
+            else:
+                log.warning(f"[DONO] resposta vazia — enviando fallback")
+                await message.reply("Entendido.")
         elif not tratado:
             await processar_links(message)
         return
