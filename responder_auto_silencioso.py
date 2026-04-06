@@ -2398,12 +2398,20 @@ def _hora_contexto() -> str:
 
 
 def _contexto_usuario(user_id: int) -> str:
-    """Retorna resumo do perfil do usuário se disponível."""
+    """Retorna resumo e episódios do perfil do usuário se disponível."""
     perfil = perfis_usuarios.get(user_id)
-    if not perfil or not perfil.get("resumo"):
+    if not perfil:
         return ""
     n = perfil.get("n", 0)
-    return f"[Historico com esse usuario ({n} interacoes): {perfil['resumo']}]"
+    partes = []
+    if perfil.get("resumo"):
+        partes.append(f"[Historico com esse usuario ({n} interacoes): {perfil['resumo']}]")
+    episodios = perfil.get("episodios", [])
+    if episodios:
+        # Injeta os últimos 5 episódios como memória episódica
+        eps_txt = " | ".join(episodios[-5:])
+        partes.append(f"[Memória episódica: {eps_txt}]")
+    return "\n".join(partes)
 
 
 def _contexto_servidor_comprimido(guild, mencoes_nomes: list[str] = None) -> str:
@@ -2443,10 +2451,11 @@ def _contexto_servidor_comprimido(guild, mencoes_nomes: list[str] = None) -> str
 def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> str:
     """Retorna o system prompt completo com o contexto do servidor injetado."""
     hora_ctx = _hora_contexto()
+    humor_txt = f"\nHumor da sessão: {_humor_sessao}." if _humor_sessao else ""
     base = (
         "Você é o shell_engenheiro, presença central de um servidor Discord brasileiro.\n"
         "Personalidade: adulto, direto, inteligente, sarcástico quando necessário, nunca grosseiro sem motivo.\n"
-        f"Hora atual: {hora_ctx}. Calibre o tom: mais contido de madrugada, mais presente nos picos de atividade.\n"
+        f"Hora atual: {hora_ctx}. Calibre o tom: mais contido de madrugada, mais presente nos picos de atividade.{humor_txt}\n"
         "Fala como brasileiro jovem e culto  -  gírias naturais, sem forçar.\n"
         "Sem emojis, sem listas, sem markdown, sem asteriscos.\n"
         "Tamanho da resposta: máximo 3-4 frases. Discord não é aula nem wikipedia. Seja denso, não extenso.\n\n"
@@ -5275,9 +5284,40 @@ async def _atualizar_perfil_usuario(user_id: int, autor: str, mensagem: str, res
     """
     Atualiza o perfil do usuário após cada interação.
     A cada 5 interações gera um resumo via 8b para persistir.
+    Também extrai episódios memoráveis (eventos específicos) para memória de longo prazo.
     """
-    perfil = perfis_usuarios.setdefault(user_id, {"resumo": "", "n": 0, "atualizado": ""})
+    perfil = perfis_usuarios.setdefault(user_id, {"resumo": "", "n": 0, "atualizado": "", "episodios": []})
+    perfil.setdefault("episodios", [])
     perfil["n"] = perfil.get("n", 0) + 1
+
+    # Extrai episódio memorável a cada interação (só se a mensagem tiver substância)
+    if GROQ_API_KEY and len(mensagem.split()) >= 6:
+        try:
+            ep_r = await _groq_client().chat.completions.create(
+                model="llama-3.1-8b-instant",
+                max_tokens=40,
+                temperature=0.2,
+                messages=[
+                    {"role": "system", "content":
+                     "Extraia UM fato ou evento específico e memorável desta conversa em 1 frase curta. "
+                     "Exemplo: 'Travou no Dark Souls 3 na fase do dragão.' "
+                     "Se não há nada memorável, responda exatamente: NENHUM"},
+                    {"role": "user", "content": f"{autor}: {mensagem[:300]}\nBot: {resposta[:200]}"},
+                ],
+            )
+            _registrar_tokens("8b", ep_r.usage.total_tokens if ep_r.usage else 40)
+            ep_txt = ep_r.choices[0].message.content.strip()
+            if ep_txt and ep_txt.upper() != "NENHUM" and len(ep_txt) > 5:
+                episodios = perfil["episodios"]
+                # Evita duplicatas próximas
+                if not episodios or ep_txt.lower() not in episodios[-1].lower():
+                    episodios.append(ep_txt)
+                    if len(episodios) > 20:  # mantém os 20 mais recentes
+                        episodios.pop(0)
+                    salvar_dados()
+                    log.debug(f"[EPISÓDIO] {autor}: {ep_txt}")
+        except Exception as e:
+            log.debug(f"[EPISÓDIO] falha: {e}")
 
     # Só gera resumo a cada 5 interações (evita chamadas desnecessárias)
     if perfil["n"] % 5 != 0 or not GROQ_API_KEY:
@@ -5511,6 +5551,83 @@ async def _task_relatorio_semanal():
             log.error(f"[SEMANAL] Falha: {e}")
 
 
+async def _task_iniciativa_proativa():
+    """
+    Task em background: retoma threads abertas de forma orgânica.
+    A cada 30 minutos, verifica se há algum usuário com conversa recente incompleta
+    e, com critério estrito, posta uma continuação natural no canal.
+    """
+    await client.wait_until_ready()
+    await asyncio.sleep(300)  # espera 5min após iniciar antes de começar
+    while not client.is_closed():
+        await asyncio.sleep(1800)  # verifica a cada 30 minutos
+        if not GROQ_API_KEY:
+            continue
+        try:
+            guild = client.get_guild(SERVIDOR_ID)
+            if not guild:
+                continue
+
+            agora = agora_utc()
+            for user_id, estado in list(conversas_groq.items()):
+                canal_id = estado.get("canal")
+                ultima = estado.get("ultima")
+                if not canal_id or not ultima:
+                    continue
+
+                # Só retoma conversas entre 20min e 4h atrás (janela de retomada natural)
+                delta = agora - ultima
+                if not (timedelta(minutes=20) <= delta <= timedelta(hours=4)):
+                    continue
+
+                # Verifica cooldown por canal (max 1 iniciativa por canal a cada 2h)
+                ultimo_post = _ultima_iniciativa.get(canal_id)
+                if ultimo_post and (agora - ultimo_post) < timedelta(hours=2):
+                    continue
+
+                # Pega histórico recente
+                historico = list(historico_groq.get((user_id, canal_id), []))
+                if not historico or len(historico) < 2:
+                    continue
+
+                # Monta resumo das últimas trocas
+                ultimas = historico[-4:]
+                resumo = "\n".join(
+                    f"{'Usuário' if m['role'] == 'user' else 'Bot'}: {m['content'][:150]}"
+                    for m in ultimas
+                )
+
+                # Pede à IA se há algo genuinamente novo a dizer
+                r = await _groq_client().chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    max_tokens=60,
+                    temperature=0.85,
+                    messages=[
+                        {"role": "system", "content":
+                         "Você é um bot de Discord. Às vezes volta a uma conversa com algo genuinamente útil ou interessante. "
+                         "CRITÉRIO RÍGIDO: só continue se tiver algo NOVO e CONCRETO a acrescentar — um link, uma informação relevante, "
+                         "uma reflexão que muda algo. Não repita o que já foi dito. Não force. "
+                         "Se não há nada novo, responda exatamente: SILÊNCIO. "
+                         "Se há algo novo, responda diretamente (1-2 frases), sem saudação nem 'aliás' ou 'a propósito'."},
+                        {"role": "user", "content":
+                         f"Conversa de {delta.seconds // 60} minutos atrás:\n{resumo}\n\n"
+                         "Há algo genuinamente novo a acrescentar?"},
+                    ],
+                )
+                txt = r.choices[0].message.content.strip()
+                _registrar_tokens("8b", r.usage.total_tokens if r.usage else 60)
+
+                if txt and txt.upper() != "SILÊNCIO" and "SILÊNCIO" not in txt.upper():
+                    canal = guild.get_channel(canal_id)
+                    if canal:
+                        await canal.send(txt)
+                        _ultima_iniciativa[canal_id] = agora
+                        log.info(f"[INICIATIVA] postou em #{canal.name}: {txt[:60]}")
+
+        except Exception as e:
+            log.debug(f"[INICIATIVA] erro: {e}")
+
+
 # ── Suporte a canais de voz ───────────────────────────────────────────────────
 
 async def _entrar_canal_voz(guild: discord.Guild, nome_canal: str | None = None) -> discord.VoiceChannel | None:
@@ -5578,6 +5695,7 @@ async def _conectar_voz(canal: discord.VoiceChannel) -> tuple:
 
 @client.event
 async def on_ready():
+    global _humor_sessao
     carregar_config()
     carregar_dados()
     print(f"Conectado como {client.user}")
@@ -5589,7 +5707,32 @@ async def on_ready():
         log.info(f"Contexto mapeado: {len(guild.channels)} canais, {len(guild.roles)} cargos, {guild.member_count} membros.")
     else:
         log.error(f"Servidor {SERVIDOR_ID} não encontrado.")
+
+    # Gera humor da sessão via IA (persiste até próximo reinício)
+    if GROQ_API_KEY:
+        try:
+            hora = datetime.now().hour
+            periodo = "madrugada" if hora < 6 else "manhã" if hora < 12 else "tarde" if hora < 18 else "noite"
+            r = await _groq_client().chat.completions.create(
+                model="llama-3.1-8b-instant",
+                max_tokens=20,
+                temperature=1.1,
+                messages=[
+                    {"role": "system", "content":
+                     "Você define o humor de um bot de Discord para a sessão. "
+                     "Responda com UMA expressão curta e informal (3-6 palavras) que descreva o estado de espírito. "
+                     "Exemplos: 'levemente impaciente com tudo', 'animado e curioso', 'calmo e direto', "
+                     "'com vontade de debater', 'entediado mas prestativo'. Sem explicações."},
+                    {"role": "user", "content": f"É {periodo}, gere o humor da sessão de hoje."},
+                ],
+            )
+            _humor_sessao = r.choices[0].message.content.strip().strip('"').strip("'")
+            log.info(f"[HUMOR] Sessão: {_humor_sessao}")
+        except Exception as e:
+            log.debug(f"[HUMOR] falha ao gerar: {e}")
+
     asyncio.ensure_future(_task_relatorio_semanal())
+    asyncio.ensure_future(_task_iniciativa_proativa())
 
 
 @client.event
@@ -5661,6 +5804,34 @@ async def on_member_join(member: discord.Member):
         except Exception:
             pass
 
+        # Comentário orgânico espontâneo após boas-vindas (simula membro notando a entrada)
+        if GROQ_API_KEY and not conta_nova and random.random() < 0.35:
+            try:
+                contexto_entrada = (
+                    f"reentrada número {vezes}" if vezes > 1
+                    else f"primeira entrada, conta com {idade_conta.days} dias"
+                )
+                r = await _groq_client().chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    max_tokens=25,
+                    temperature=0.95,
+                    messages=[
+                        {"role": "system", "content":
+                         "Você é um membro veterano de um servidor Discord brasileiro. "
+                         "Faça UM comentário curto e casual sobre a entrada de alguém (1 frase). "
+                         "Pode ser irônico, receptivo ou neutro — como um membro real faria. "
+                         "Sem emojis. Sem 'bem-vindo' repetido. Sem clichê."},
+                        {"role": "user", "content":
+                         f"{member.display_name} entrou no servidor ({contexto_entrada})."},
+                    ],
+                )
+                txt = r.choices[0].message.content.strip()
+                if txt:
+                    await asyncio.sleep(random.uniform(8, 25))
+                    await canal_geral.send(txt)
+            except Exception:
+                pass
+
     # Atualiza contexto do servidor
     _atualizar_contexto(member.guild)
     log.info(f"Entrada: {member.display_name} ({member.id}) | conta: {formatar_duracao(idade_conta)}{' | CONTA NOVA' if conta_nova else ''}")
@@ -5724,6 +5895,33 @@ async def on_member_remove(member: discord.Member):
 
     _atualizar_contexto(member.guild)
     log.info(f"Saída: {member.display_name} ({member.id}) | ficou: {ficou_txt}")
+
+    # Reação orgânica à saída (comentário espontâneo no canal geral)
+    if GROQ_API_KEY and ficou_segundos and ficou_segundos > 3600:  # só se ficou mais de 1h
+        try:
+            canal_geral = discord.utils.get(member.guild.text_channels, name="geral") \
+                       or discord.utils.get(member.guild.text_channels, name="chat") \
+                       or member.guild.system_channel
+            if canal_geral and random.random() < 0.25:  # 25% de chance — não toda saída
+                r = await _groq_client().chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    max_tokens=30,
+                    temperature=0.9,
+                    messages=[
+                        {"role": "system", "content":
+                         "Você é um bot de Discord. Um membro acabou de sair do servidor. "
+                         "Faça UM comentário curto e casual (max 1 frase), como se fosse um membro do servidor notando. "
+                         "Pode ser neutro, levemente irônico ou simplesmente observar. Sem emojis. Sem 'tchau' ou despedidas formais."},
+                        {"role": "user", "content":
+                         f"{member.display_name} saiu do servidor depois de {ficou_txt}."},
+                    ],
+                )
+                txt = r.choices[0].message.content.strip()
+                if txt:
+                    await asyncio.sleep(random.uniform(5, 30))  # delay orgânico
+                    await canal_geral.send(txt)
+        except Exception:
+            pass
 
 
 # Palavras-chave ofensivas em nomes de emoji customizado do servidor
