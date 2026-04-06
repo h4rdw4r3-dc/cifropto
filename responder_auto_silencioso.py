@@ -32,6 +32,15 @@ except ImportError:
     FPDF_DISPONIVEL = False
     log.warning("fpdf2 não instalado  -  geração de PDF indisponível.")
 
+try:
+    from google.oauth2 import service_account as _gsa
+    from googleapiclient.discovery import build as _gbuild
+    from googleapiclient.errors import HttpError as _GHttpError
+    GOOGLE_DISPONIVEL = True
+except ImportError:
+    GOOGLE_DISPONIVEL = False
+    log.warning("google-api-python-client não instalado  -  Google Docs/Sheets indisponível.")
+
 def agora_utc():
     return datetime.now(timezone.utc)
 
@@ -55,6 +64,86 @@ CARGO_EQUIPE_MOD_ID = 1487859369008697556  # equipe de moderação com acesso a 
 
 # ── Canal de auditoria ───────────────────────────────────────────────────────
 CANAL_AUDITORIA_ID = 1490180079899115591
+
+# ── Google Workspace ─────────────────────────────────────────────────────────
+# Configure via Railway:
+#   GOOGLE_CREDENTIALS_JSON  = conteúdo do JSON da service account (uma linha)
+#   GDRIVE_FOLDER_ID         = ID da pasta do Drive onde salvar (opcional)
+GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+GDRIVE_FOLDER_ID        = os.environ.get("GDRIVE_FOLDER_ID", "")
+
+_GSCOPES = [
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+_g_creds_cache = None
+_g_docs_cache  = None
+_g_sheets_cache = None
+_g_drive_cache  = None
+
+def _google_creds():
+    global _g_creds_cache
+    if not GOOGLE_DISPONIVEL or not GOOGLE_CREDENTIALS_JSON:
+        return None
+    if _g_creds_cache is None:
+        try:
+            info = json.loads(GOOGLE_CREDENTIALS_JSON)
+            _g_creds_cache = _gsa.Credentials.from_service_account_info(info, scopes=_GSCOPES)
+        except Exception as e:
+            log.error(f"[GOOGLE] credenciais inválidas: {e}")
+            return None
+    return _g_creds_cache
+
+def _svc_docs():
+    global _g_docs_cache
+    if _g_docs_cache is None:
+        c = _google_creds()
+        if c:
+            _g_docs_cache = _gbuild("docs", "v1", credentials=c, cache_discovery=False)
+    return _g_docs_cache
+
+def _svc_sheets():
+    global _g_sheets_cache
+    if _g_sheets_cache is None:
+        c = _google_creds()
+        if c:
+            _g_sheets_cache = _gbuild("sheets", "v4", credentials=c, cache_discovery=False)
+    return _g_sheets_cache
+
+def _svc_drive():
+    global _g_drive_cache
+    if _g_drive_cache is None:
+        c = _google_creds()
+        if c:
+            _g_drive_cache = _gbuild("drive", "v3", credentials=c, cache_discovery=False)
+    return _g_drive_cache
+
+def _google_ok() -> bool:
+    return GOOGLE_DISPONIVEL and bool(GOOGLE_CREDENTIALS_JSON) and _google_creds() is not None
+
+def _mover_para_pasta(drive, file_id: str):
+    """Move arquivo para GDRIVE_FOLDER_ID se definido."""
+    if not GDRIVE_FOLDER_ID:
+        return
+    try:
+        f = drive.files().get(fileId=file_id, fields="parents").execute()
+        prev = ",".join(f.get("parents", []))
+        drive.files().update(
+            fileId=file_id, addParents=GDRIVE_FOLDER_ID,
+            removeParents=prev, fields="id,parents"
+        ).execute()
+    except Exception as e:
+        log.warning(f"[GOOGLE] mover pasta: {e}")
+
+def _tornar_publico(drive, file_id: str):
+    """Concede leitura pública ao arquivo."""
+    try:
+        drive.permissions().create(
+            fileId=file_id, body={"type": "anyone", "role": "reader"}
+        ).execute()
+    except Exception as e:
+        log.warning(f"[GOOGLE] permissão pública: {e}")
 
 # ── Chave da API VirusTotal ──────────────────────────────────────────────────
 # Coloque sua chave aqui: https://www.virustotal.com/gui/my-apikey
@@ -799,6 +888,152 @@ def gerar_pdf_citacoes() -> bytes:
                   for c in citacoes[-100:]]
         secoes = [(f"Citações registradas ({len(citacoes)})", linhas)]
     return _criar_pdf("Citacoes do Servidor", secoes)
+
+
+# ── Google Docs / Sheets ──────────────────────────────────────────────────────
+
+def _doc_criar_e_preencher(titulo: str, texto: str) -> str:
+    """
+    Cria Google Doc com título e texto, move para pasta e torna público.
+    Retorna URL de edição. Síncrono - rodar via asyncio.to_thread.
+    """
+    docs  = _svc_docs()
+    drive = _svc_drive()
+    if not docs or not drive:
+        raise RuntimeError("Google API não configurada. Defina GOOGLE_CREDENTIALS_JSON no Railway.")
+    doc = docs.documents().create(body={"title": titulo}).execute()
+    did = doc["documentId"]
+    if texto:
+        docs.documents().batchUpdate(
+            documentId=did,
+            body={"requests": [{"insertText": {"location": {"index": 1}, "text": texto[:1_000_000]}}]}
+        ).execute()
+    _mover_para_pasta(drive, did)
+    _tornar_publico(drive, did)
+    return f"https://docs.google.com/document/d/{did}/edit"
+
+
+def _sheet_criar_e_preencher(titulo: str, linhas: list[list]) -> str:
+    """
+    Cria Google Sheet com título e linhas de dados.
+    Retorna URL de edição. Síncrono - rodar via asyncio.to_thread.
+    """
+    sheets = _svc_sheets()
+    drive  = _svc_drive()
+    if not sheets or not drive:
+        raise RuntimeError("Google API não configurada. Defina GOOGLE_CREDENTIALS_JSON no Railway.")
+    sp = sheets.spreadsheets().create(body={"properties": {"title": titulo}}).execute()
+    sid = sp["spreadsheetId"]
+    if linhas:
+        sheets.spreadsheets().values().update(
+            spreadsheetId=sid, range="A1",
+            valueInputOption="RAW",
+            body={"values": linhas[:10_000]}
+        ).execute()
+        # Formatar cabeçalho (primeira linha em negrito)
+        sheets.spreadsheets().batchUpdate(
+            spreadsheetId=sid,
+            body={"requests": [{
+                "repeatCell": {
+                    "range": {"sheetId": 0, "startRowIndex": 0, "endRowIndex": 1},
+                    "cell": {"userEnteredFormat": {"textFormat": {"bold": True},
+                                                   "backgroundColor": {"red": 0.85, "green": 0.85, "blue": 0.85}}},
+                    "fields": "userEnteredFormat(textFormat,backgroundColor)"
+                }
+            }]}
+        ).execute()
+    _mover_para_pasta(drive, sid)
+    _tornar_publico(drive, sid)
+    return f"https://docs.google.com/spreadsheets/d/{sid}/edit"
+
+
+# Funções de alto nível para cada tipo de conteúdo
+
+async def gdoc_relatorio(guild: discord.Guild, dias: int = 7) -> str:
+    rel = await relatorio_membros(guild, dias)
+    brasilia = timezone(timedelta(hours=-3))
+    titulo = f"Relatorio {guild.name} - {datetime.now(brasilia).strftime('%d/%m/%Y')}"
+    texto = (
+        f"Servidor: {guild.name}\n"
+        f"Membros: {guild.member_count}\n"
+        f"Data: {datetime.now(brasilia).strftime('%d/%m/%Y %H:%M')} (Brasilia)\n\n"
+        + rel
+    )
+    return await asyncio.to_thread(_doc_criar_e_preencher, titulo, texto)
+
+
+async def gdoc_historico_canal(canal: discord.TextChannel, limite: int = 200) -> str:
+    brasilia = timezone(timedelta(hours=-3))
+    linhas_txt = [f"Historico de #{canal.name}\n"
+                  f"Exportado em {datetime.now(brasilia).strftime('%d/%m/%Y %H:%M')}\n\n"]
+    async for msg in canal.history(limit=limite, oldest_first=True):
+        ts = msg.created_at.astimezone(brasilia).strftime('%d/%m %H:%M')
+        corpo = msg.content or "[sem texto]"
+        if msg.attachments:
+            corpo += f" [anexo: {msg.attachments[0].filename}]"
+        linhas_txt.append(f"[{ts}] {msg.author.display_name}: {corpo[:400]}\n")
+    titulo = f"Historico #{canal.name} - {datetime.now(brasilia).strftime('%d/%m/%Y')}"
+    return await asyncio.to_thread(_doc_criar_e_preencher, titulo, "".join(linhas_txt))
+
+
+async def gdoc_regras() -> str:
+    return await asyncio.to_thread(_doc_criar_e_preencher, "Regras do Servidor", REGRAS)
+
+
+async def gsheet_membros(guild: discord.Guild) -> str:
+    brasilia = timezone(timedelta(hours=-3))
+    cabecalho = ["#", "Nome", "Apelido", "Entrou em", "Conta criada em", "Cargos", "Bot"]
+    linhas = [cabecalho]
+    membros = sorted(guild.members, key=lambda m: m.display_name.lower())
+    for i, m in enumerate(membros, 1):
+        joined = m.joined_at.astimezone(brasilia).strftime('%d/%m/%Y') if m.joined_at else "?"
+        created = m.created_at.astimezone(brasilia).strftime('%d/%m/%Y')
+        cargos = ", ".join(r.name for r in m.roles[1:])
+        linhas.append([i, m.name, m.display_name, joined, created, cargos, "Sim" if m.bot else "Nao"])
+    titulo = f"Membros - {guild.name} - {datetime.now(brasilia).strftime('%d/%m/%Y')}"
+    return await asyncio.to_thread(_sheet_criar_e_preencher, titulo, linhas)
+
+
+async def gsheet_infracoes(guild: discord.Guild) -> str:
+    brasilia = timezone(timedelta(hours=-3))
+    cabecalho = ["Usuario", "ID", "Infracoes", "Silenciamentos", "Ultimo motivo"]
+    linhas = [cabecalho]
+    todos = set(infracoes.keys()) | set(silenciamentos.keys())
+    for uid in sorted(todos, key=lambda u: -infracoes.get(u, 0)):
+        m = guild.get_member(uid)
+        nome = m.display_name if m else nomes_historico.get(uid, f"ID {uid}")
+        linhas.append([
+            nome, str(uid),
+            infracoes.get(uid, 0),
+            silenciamentos.get(uid, 0),
+            ultimo_motivo.get(uid, ""),
+        ])
+    titulo = f"Infracoes - {guild.name} - {datetime.now(brasilia).strftime('%d/%m/%Y')}"
+    return await asyncio.to_thread(_sheet_criar_e_preencher, titulo, linhas)
+
+
+async def gsheet_atividade(guild: discord.Guild) -> str:
+    cabecalho = ["#", "Usuario", "ID", "Mensagens (sessao)"]
+    top = sorted(atividade_mensagens.items(), key=lambda x: -x[1])
+    linhas = [cabecalho]
+    for i, (uid, cnt) in enumerate(top, 1):
+        m = guild.get_member(uid)
+        nome = m.display_name if m else nomes_historico.get(uid, f"ID {uid}")
+        linhas.append([i, nome, str(uid), cnt])
+    brasilia = timezone(timedelta(hours=-3))
+    titulo = f"Atividade - {guild.name} - {datetime.now(brasilia).strftime('%d/%m/%Y')}"
+    return await asyncio.to_thread(_sheet_criar_e_preencher, titulo, linhas)
+
+
+async def gsheet_citacoes() -> str:
+    cabecalho = ["#", "Autor", "Canal", "Data", "Texto"]
+    linhas = [cabecalho] + [
+        [i, c.get("autor",""), c.get("canal",""), c.get("ts",""), c.get("texto","")]
+        for i, c in enumerate(citacoes, 1)
+    ]
+    brasilia = timezone(timedelta(hours=-3))
+    titulo = f"Citacoes - {datetime.now(brasilia).strftime('%d/%m/%Y')}"
+    return await asyncio.to_thread(_sheet_criar_e_preencher, titulo, linhas)
 
 
 async def historico_membro(uid: int, nome_display: str) -> str:
@@ -3354,6 +3589,62 @@ async def processar_ordem(message: discord.Message) -> bool:
         if canal_rel.id != message.channel.id:
             await message.channel.send(f"Relatório {tipo_txt} postado em {canal_rel.mention}.")
 
+    # ── Google Docs ────────────────────────────────────────────────────────────
+    # Uso: "Shell cria doc com o relatório", "Shell cria doc com histórico do #canal"
+    #      "Shell cria doc com as regras"
+    elif _addr and re.search(r'\b(doc|documento|google\s*doc)\b', conteudo.lower()) and re.search(r'\b(cria[r]?|gera[r]?|abre[r]?|manda[r]?|faz)\b', conteudo.lower()):
+        if not _google_ok():
+            await message.channel.send(
+                "Google API não configurada. Configure `GOOGLE_CREDENTIALS_JSON` no Railway "
+                "com o JSON da service account e, opcionalmente, `GDRIVE_FOLDER_ID`."
+            )
+            return True
+        msg_l = conteudo.lower()
+        try:
+            await message.channel.send("Criando documento no Google Docs, aguarde...")
+            if re.search(r'\bhist[oó]rico\b|\bcanal\b|\bmensagens?\b', msg_l):
+                canal_exp = message.channel_mentions[0] if message.channel_mentions else message.channel
+                url = await gdoc_historico_canal(canal_exp, 200)
+                await message.channel.send(f"Historico de {canal_exp.mention} no Google Docs: {url}")
+            elif re.search(r'\bregra[s]?\b', msg_l):
+                url = await gdoc_regras()
+                await message.channel.send(f"Regras no Google Docs: {url}")
+            else:
+                dias_doc = 30 if re.search(r'\bmensal\b|\bmes\b', msg_l) else 7
+                url = await gdoc_relatorio(guild, dias_doc)
+                await message.channel.send(f"Relatorio no Google Docs: {url}")
+            log.info(f"[GDOC] {autor} criou documento")
+        except Exception as e:
+            await message.channel.send(f"Erro ao criar documento: {e}")
+
+    # ── Google Sheets ──────────────────────────────────────────────────────────
+    # Uso: "Shell cria planilha de membros", "Shell planilha de infrações"
+    #      "Shell cria sheet de atividade", "Shell planilha de citações"
+    elif _addr and re.search(r'\b(planilha|sheet|google\s*sheet[s]?|calc|spreadsheet)\b', conteudo.lower()) and re.search(r'\b(cria[r]?|gera[r]?|abre[r]?|manda[r]?|faz)\b', conteudo.lower()):
+        if not _google_ok():
+            await message.channel.send(
+                "Google API não configurada. Configure `GOOGLE_CREDENTIALS_JSON` no Railway."
+            )
+            return True
+        msg_l = conteudo.lower()
+        try:
+            await message.channel.send("Criando planilha no Google Sheets, aguarde...")
+            if re.search(r'\binfra[cç][aã]o|infracoes|punicao|punicoes\b', msg_l):
+                url = await gsheet_infracoes(guild)
+                await message.channel.send(f"Planilha de infracoes: {url}")
+            elif re.search(r'\batividade\b|\branking\b', msg_l):
+                url = await gsheet_atividade(guild)
+                await message.channel.send(f"Planilha de atividade: {url}")
+            elif re.search(r'\bcita[cç][aã]o|citacoes\b', msg_l):
+                url = await gsheet_citacoes()
+                await message.channel.send(f"Planilha de citacoes: {url}")
+            else:
+                url = await gsheet_membros(guild)
+                await message.channel.send(f"Planilha de membros: {url}")
+            log.info(f"[GSHEET] {autor} criou planilha")
+        except Exception as e:
+            await message.channel.send(f"Erro ao criar planilha: {e}")
+
     # ── gerar PDF ─────────────────────────────────────────────────────────────
     # Uso: "Shell gera PDF do relatório [semanal/mensal]"
     #      "Shell exporta histórico do #canal para PDF"
@@ -3712,7 +4003,9 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
         "gerar_pdf(tipo=relatorio|historico|membros|regras|citacoes,canal=null,dias=7), "
         "traduzir(texto,idioma=ingles), ticket(usuario,motivo=null), "
         "dm(usuario,texto), citacao_aleatoria(), ranking(), "
-        "monitorar(canal=null), parar_monitorar(canal=null). "
+        "monitorar(canal=null), parar_monitorar(canal=null), "
+        "gdoc(tipo=relatorio|historico|regras,canal=null,dias=7), "
+        "gsheet(tipo=membros|infracoes|atividade|citacoes). "
         "Se for pergunta ou conversa, retorne {\"acao\":\"conversa\"}. "
         f"Membros do servidor: {membros_txt}."
     )
@@ -4009,6 +4302,51 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
         canais_monitorados.discard(dest_mon.id)
         salvar_dados()
         await canal.send(f"Parei de monitorar {dest_mon.mention}.")
+        return True
+
+    if acao == "gdoc":
+        if not _google_ok():
+            await canal.send("Google API não configurada. Defina GOOGLE_CREDENTIALS_JSON no Railway.")
+            return True
+        tipo_d = params.get("tipo", "relatorio")
+        try:
+            await canal.send("Criando documento no Google Docs, aguarde...")
+            if tipo_d == "historico":
+                canal_nome = params.get("canal")
+                dest = discord.utils.get(guild.text_channels, name=canal_nome) if canal_nome else canal
+                url = await gdoc_historico_canal(dest, 200)
+                await canal.send(f"Historico de {dest.mention} no Google Docs: {url}")
+            elif tipo_d == "regras":
+                url = await gdoc_regras()
+                await canal.send(f"Regras no Google Docs: {url}")
+            else:
+                dias_d = int(params.get("dias", 7))
+                url = await gdoc_relatorio(guild, dias_d)
+                await canal.send(f"Relatorio no Google Docs: {url}")
+            log.info(f"[IA] gdoc {tipo_d}  -  {autor}")
+        except Exception as e:
+            await canal.send(f"Erro ao criar documento: {e}")
+        return True
+
+    if acao == "gsheet":
+        if not _google_ok():
+            await canal.send("Google API não configurada. Defina GOOGLE_CREDENTIALS_JSON no Railway.")
+            return True
+        tipo_s = params.get("tipo", "membros")
+        try:
+            await canal.send("Criando planilha no Google Sheets, aguarde...")
+            if tipo_s == "infracoes":
+                url = await gsheet_infracoes(guild)
+            elif tipo_s == "atividade":
+                url = await gsheet_atividade(guild)
+            elif tipo_s == "citacoes":
+                url = await gsheet_citacoes()
+            else:
+                url = await gsheet_membros(guild)
+            await canal.send(f"Planilha ({tipo_s}) no Google Sheets: {url}")
+            log.info(f"[IA] gsheet {tipo_s}  -  {autor}")
+        except Exception as e:
+            await canal.send(f"Erro ao criar planilha: {e}")
         return True
 
     log.debug(f"[IA_EXEC] ação '{acao}' não reconhecida  -  passando adiante")
