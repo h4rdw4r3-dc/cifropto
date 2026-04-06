@@ -7,7 +7,7 @@ import io
 import xml.etree.ElementTree as ET
 import random
 import logging
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 
 logging.basicConfig(
@@ -438,13 +438,22 @@ registro_saidas: dict[int, list[dict]] = {}
 # nomes_historico: último nome conhecido de cada user_id (inclui quem já saiu)
 nomes_historico: dict[int, str] = {}
 
+# ── Memória de conversas por canal ───────────────────────────────────────────
+# Armazena as últimas mensagens de cada canal para dar contexto ao bot
+# O bot "aprende" o que está sendo discutido sem intervenção manual
+canal_memoria: dict[int, deque] = defaultdict(lambda: deque(maxlen=40))
+
 # ── Raid detection ────────────────────────────────────────────────────────────
 _joins_recentes: list[datetime] = []          # timestamps dos últimos joins
 RAID_JANELA   = timedelta(minutes=2)          # janela de análise
 RAID_LIMIAR   = 5                             # joins para disparar alerta
 RAID_CONTA_NOVA_DIAS = 7                      # conta com menos de X dias = suspeita
 
-GATILHOS_NOME = re.compile(r"\bshell\b|\bengenheir\w*", re.IGNORECASE)
+# Responde quando alguém chama pelo nome, com ou sem pontuação
+GATILHOS_NOME = re.compile(
+    r"(?<!\w)(?:shell|engenheir\w*)(?!\w)",
+    re.IGNORECASE
+)
 
 CANAL_REGRAS_ID = 1487599083869704326
 CANAL_REGRAS = f"<#{CANAL_REGRAS_ID}>"
@@ -1768,10 +1777,20 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
             partes.append(f"{role}: {msg['content'][:80]}")
         resumo_conv = " | Conversa até agora: " + " → ".join(partes)
 
-    membro_info = f"[Respondendo a '{autor}' — nível: {nivel}.{autorizacao_extra} Não invente dados do servidor não listados acima.{resumo_conv}]"
+    # Contexto das últimas mensagens do canal (autoaprendizado do servidor)
+    mem = list(canal_memoria.get(canal_id or 0, []))
+    ctx_canal = ""
+    if mem:
+        linhas_ctx = [f"{m['autor']}: {m['conteudo'][:120]}" for m in mem[-20:]]
+        ctx_canal = "\n=== CONVERSAS RECENTES NESTE CANAL ===\n" + "\n".join(linhas_ctx) + "\n"
+
+    membro_info = (
+        f"[Respondendo a '{autor}' — nível: {nivel}.{autorizacao_extra} "
+        f"Não invente dados do servidor não listados acima.{resumo_conv}]"
+    )
 
     mensagens = [
-        {"role": "system", "content": system_com_contexto()},
+        {"role": "system", "content": system_com_contexto() + ctx_canal},
         {"role": "system", "content": membro_info},
     ] + hist
 
@@ -3132,6 +3151,14 @@ async def _on_message_impl(message: discord.Message):
     conteudo_raw = message.content
     if re.match(r'^\s*\S+[!/]\S', conteudo_raw) and client.user not in message.mentions:
         return
+
+    # ── Memória do canal: registra toda mensagem humana ──────────────────────
+    # Permite ao bot entender o contexto da conversa sem intervenção manual
+    if not message.author.bot and message.content.strip():
+        canal_memoria[message.channel.id].append({
+            "autor": message.author.display_name,
+            "conteudo": message.content[:300],
+        })
 
     autor = message.author.display_name
     user_id = message.author.id
