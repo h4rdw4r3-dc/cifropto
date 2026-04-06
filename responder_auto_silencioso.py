@@ -3280,6 +3280,9 @@ async def processar_ordem(message: discord.Message) -> bool:
         or (bool(GATILHOS_NOME.search(conteudo)) and not _GATILHO_EXCLUIDO.search(conteudo))
     )
 
+    # Palavra-chave unificada para detecção de canais de voz
+    _VOZ_KW = r'(?:call|chamada|canal\s+de\s+voz|voz)'
+
     # ── silenciar @user [minutos] ──────────────────────────────────────────────
     if cmd in ("silenciar", "mute", "mutar", "calar"):
         minutos = 10
@@ -4017,17 +4020,18 @@ async def processar_ordem(message: discord.Message) -> bool:
 
     # ── comandos de voz ───────────────────────────────────────────────────────
     elif _addr and re.search(
-        r'\b(entr[ae][r]?\s+(?:n[ao]\s+)?(?:call|canal\s+de\s+voz|voz)|'
-        r'vai?\s+(?:para?\s+)?(?:call|voz)|'
-        r'se\s+junt[ae]\s+(?:n[ao]\s+)?(?:call|voz))\b',
+        rf'\b(?:entr[ae][r]?|v(?:ai|em)|se\s+junt[ae][r]?)\b.{{0,30}}\b{_VOZ_KW}',
         conteudo.lower()
     ):
         if not guild:
             return False
         _nome_voz = re.search(
-            r'\b(?:call|canal|voz)\s+(?:de\s+voz\s+)?([A-Za-z0-9_\-\s]+)', conteudo, re.IGNORECASE
+            r'\b(?:call|chamada|canal|voz)\s+(?:de\s+voz\s+)?([A-Za-z0-9_\-\s]+)', conteudo, re.IGNORECASE
         )
         _nome_str = _nome_voz.group(1).strip() if _nome_voz else None
+        # "qualquer" nao e nome de canal
+        if _nome_str and _nome_str.lower() in ("qualquer", "uma", "alguma", "disponivel"):
+            _nome_str = None
         _canal_voz = await _entrar_canal_voz(guild, _nome_str)
         if not _canal_voz:
             await message.channel.send("Nao encontrei nenhum canal de voz no servidor.")
@@ -4040,9 +4044,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         return True
 
     elif _addr and re.search(
-        r'\b(sa[ií][r]?\s+(?:d[ao]\s+)?(?:call|voz|canal)|'
-        r'desconect[ae][r]?\s+(?:d[ao]\s+)?(?:voz|call)|'
-        r'larg[ae][r]?\s+(?:a\s+)?(?:call|voz))\b',
+        rf'\b(?:sa[ií][r]?|desconect[ae][r]?|larg[ae][r]?)\b.{{0,30}}\b{_VOZ_KW}',
         conteudo.lower()
     ):
         if guild and guild.voice_client:
@@ -4053,9 +4055,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         return True
 
     elif _addr and re.search(
-        r'\b(fal[ae][r]?\s+(?:n[ao]\s+)?(?:call|voz|canal)|'
-        r'diz[er]?\s+(?:n[ao]\s+)?(?:call|voz)|'
-        r'mand[ae][r]?\s+(?:audio|voz)\s+(?:n[ao]|falando))\b',
+        rf'\b(?:fal[ae][r]?|diz(?:er)?|mand[ae][r]?\s+(?:audio|voz))\b.{{0,30}}\b{_VOZ_KW}',
         conteudo.lower()
     ):
         if not guild:
