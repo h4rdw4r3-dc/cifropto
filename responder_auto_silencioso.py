@@ -482,6 +482,8 @@ def eh_mod_exclusivo(member: discord.Member) -> bool:
 DADOS_PATH = "dados.json"
 CONFIG_PATH = "config.json"
 
+CANAL_REGRAS_ID = 1487599083869704326
+
 # ── Configuração dinâmica ─────────────────────────────────────────────────────
 # Valores iniciais = defaults hardcoded; sobrescritos pelo config.json em disco.
 _cfg: dict = {}
@@ -765,7 +767,6 @@ _GATILHO_NEGATIVO = re.compile(
     re.IGNORECASE
 )
 
-CANAL_REGRAS_ID = 1487599083869704326
 def _canal_regras_mention() -> str:
     return f"<#{_canal_regras_id()}>"
 
