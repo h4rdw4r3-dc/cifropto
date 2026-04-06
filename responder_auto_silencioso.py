@@ -133,17 +133,27 @@ def carregar_dados():
         print(f"[DADOS] Erro ao carregar: {e}")
 
 def salvar_dados():
+    """Escrita atômica: grava em arquivo temporário e renomeia, evitando corrupção."""
+    import tempfile
+    payload = {
+        "infracoes": {str(k): v for k, v in infracoes.items()},
+        "ultimo_motivo": {str(k): v for k, v in ultimo_motivo.items()},
+        "silenciamentos": {str(k): v for k, v in silenciamentos.items()},
+        "palavras_custom": palavras_custom,
+        "registro_entradas": {str(k): v for k, v in registro_entradas.items()},
+        "registro_saidas": {str(k): v for k, v in registro_saidas.items()},
+        "nomes_historico": {str(k): v for k, v in nomes_historico.items()},
+    }
     try:
-        with open(DADOS_PATH, "w") as f:
-            json.dump({
-                "infracoes": {str(k): v for k, v in infracoes.items()},
-                "ultimo_motivo": {str(k): v for k, v in ultimo_motivo.items()},
-                "silenciamentos": {str(k): v for k, v in silenciamentos.items()},
-                "palavras_custom": palavras_custom,
-                "registro_entradas": {str(k): v for k, v in registro_entradas.items()},
-                "registro_saidas": {str(k): v for k, v in registro_saidas.items()},
-                "nomes_historico": {str(k): v for k, v in nomes_historico.items()},
-            }, f, ensure_ascii=False, indent=2)
+        dir_ = os.path.dirname(os.path.abspath(DADOS_PATH)) or "."
+        fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, DADOS_PATH)
+        except Exception:
+            os.unlink(tmp)
+            raise
     except Exception as e:
         print(f"[DADOS] Erro ao salvar: {e}")
 
@@ -155,7 +165,7 @@ silenciamentos: dict[int, int] = defaultdict(int)
 ultimo_motivo: dict[int, str] = {}
 conversas: dict[int, dict] = {}
 ausencia: dict[int, dict] = {}
-historico_claude: dict[int, list] = {}
+historico_claude: dict[tuple[int, int], list] = {}  # chave: (user_id, canal_id)
 conversas_claude: dict[int, dict] = {}
 TIMEOUT_CONVERSA_CLAUDE = timedelta(minutes=5)
 
@@ -952,8 +962,13 @@ def system_com_contexto() -> str:
         base += f"=== REGRAS DO SERVIDOR ===\n{REGRAS}\n"
     return base
 
-def _groq_client():
-    return AsyncOpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+_groq: AsyncOpenAI | None = None
+
+def _groq_client() -> AsyncOpenAI:
+    global _groq
+    if _groq is None:
+        _groq = AsyncOpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+    return _groq
 
 
 async def confirmar_acao(descricao: str, fallback: str) -> str:
@@ -984,7 +999,8 @@ async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=No
             "Diz.", "Sim?", "O que quer?", "Tô ouvindo.",
         ])
 
-    hist = historico_claude.setdefault(user_id, [])
+    chave_hist = (user_id, canal_id or 0)
+    hist = historico_claude.setdefault(chave_hist, [])
     hist.append({"role": "user", "content": f"{autor}: {pergunta}"})
     # Mantém apenas as últimas 8 trocas para evitar drift de contexto
     if len(hist) > 8:
@@ -2436,8 +2452,12 @@ async def on_message(message: discord.Message):
                 await message.reply(resposta)
                 return
             else:
+                # Conversa expirou — limpa histórico do canal para evitar drift
+                historico_claude.pop((user_id, estado_claude["canal"]), None)
                 del conversas_claude[user_id]
         else:
+            # Mudou de canal — limpa histórico do canal anterior
+            historico_claude.pop((user_id, estado_claude["canal"]), None)
             del conversas_claude[user_id]
 
     # ── Responder menção/gatilho de membros comuns ────────────────────────────
