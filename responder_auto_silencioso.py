@@ -586,12 +586,37 @@ confirmacoes_pendentes: dict[int, dict] = {}
 #            conteudo_original, ts}}
 wizard_geracao: dict[int, dict] = {}
 
-WIZARD_PASSOS = [
-    ("formato",  "Qual formato?\n**1** PDF   **2** Documento .txt   **3** Planilha .csv\nResponde o número ou o nome."),
-    ("titulo",   "Quer um **título personalizado** no arquivo? Se sim, escreve o título. Se não, responde `não`."),
-    ("logo",     "Quer adicionar um **logo/imagem** no cabeçalho? Manda a imagem (anexo) ou um link direto. Se não, responde `não`."),
-    ("extras",   "Tem algum **incremento ou observação** extra para incluir? (ex: 'adiciona nota de rodapé', 'inclui seção de avisos'). Se não, responde `não`."),
-]
+WIZARD_PERGUNTAS = {
+    "formato": [
+        "Antes de gerar, como quer receber? **1** PDF, **2** arquivo de texto (.txt) ou **3** planilha (.csv)?",
+        "Formato: manda **1** pra PDF, **2** pra .txt ou **3** pra .csv.",
+        "Como prefere o arquivo? PDF, texto ou planilha? Fala o número ou o nome.",
+        "Exporto em qual formato? **PDF**, **TXT** ou **CSV** — escolhe.",
+        "Quer em PDF pra leitura, texto puro ou planilha pra editar? Manda **1**, **2** ou **3**.",
+    ],
+    "titulo": [
+        "Tem um título pra colocar no arquivo, ou deixo o padrão?",
+        "Quer nomear o documento? Se sim, manda o título. Se não, só fala.",
+        "Coloco algum título personalizado no cabeçalho? Se não quiser, é só dizer.",
+        "Tem algum nome específico que quer dar a esse arquivo?",
+        "Título personalizado — quer colocar algum? Manda ou responde `não`.",
+    ],
+    "logo": [
+        "Quer uma imagem ou logo no topo? Manda o arquivo ou o link direto. Se não, tudo bem.",
+        "Coloco alguma logo no cabeçalho? Manda a imagem ou um link. Se não quiser, fala.",
+        "Tem alguma imagem pra colocar no início do documento? Pode mandar anexo ou URL.",
+        "Quer personalizar com uma logo? Manda ou responde `não`.",
+        "Alguma imagem pra cabeçalho? Se sim, manda agora. Se não, passa.",
+    ],
+    "extras": [
+        "Tem mais alguma coisa pra incluir? Uma observação, nota de rodapé, seção extra?",
+        "Algum incremento antes de gerar? Nota, aviso, seção adicional — manda ou fala `não`.",
+        "Quer adicionar algo além do conteúdo padrão? Fala o que é.",
+        "Mais alguma coisa? Observação, rodapé, campo extra — ou pode gerar já?",
+        "Algum detalhe a mais pra constar no arquivo? Se não, gero agora.",
+    ],
+}
+WIZARD_CAMPOS = ["formato", "titulo", "logo", "extras"]
 
 # ── Rastreamento de entradas e saídas ─────────────────────────────────────────
 # registro_entradas: user_id -> lista de ISO timestamps de cada entrada
@@ -2979,11 +3004,12 @@ async def _verificar_confirmacao_pendente(message: discord.Message) -> bool:
 
 # ── Wizard de geração ─────────────────────────────────────────────────────────
 
+def _wizard_pergunta(campo: str) -> str:
+    return random.choice(WIZARD_PERGUNTAS[campo])
+
+
 async def _iniciar_wizard(message: discord.Message, tipo_conteudo: str):
-    """
-    Inicia o wizard de personalização antes de gerar PDF/doc/planilha.
-    tipo_conteudo: ex. 'relatorio semanal', 'membros', 'historico de canal', etc.
-    """
+    """Inicia o wizard de personalização antes de gerar PDF/doc/planilha."""
     wizard_geracao[message.author.id] = {
         "step": 0,
         "tipo": tipo_conteudo,
@@ -2993,39 +3019,35 @@ async def _iniciar_wizard(message: discord.Message, tipo_conteudo: str):
         "extras": None,
         "canal_id": message.channel.id,
         "guild_id": message.guild.id if message.guild else None,
-        "conteudo_original": message.content,
         "canal_mentions": [c.id for c in message.channel_mentions],
         "ts": agora_utc(),
     }
-    _, pergunta = WIZARD_PASSOS[0]
-    await message.channel.send(
-        f"Vou preparar **{tipo_conteudo}**. Algumas perguntas rápidas antes:\n\n"
-        f"**1/4** {pergunta}"
-    )
+    abertura = random.choice([
+        f"Certo, vou montar **{tipo_conteudo}**.",
+        f"Beleza, preparando **{tipo_conteudo}**.",
+        f"Ok, vou gerar **{tipo_conteudo}**.",
+        f"Entendido. Antes de gerar **{tipo_conteudo}**, preciso de algumas informações.",
+    ])
+    await message.channel.send(f"{abertura}\n\n{_wizard_pergunta('formato')}")
     return True
 
 
 async def _processar_wizard(message: discord.Message) -> bool:
-    """
-    Processa respostas do wizard passo a passo.
-    Retorna True se consumiu a mensagem.
-    """
+    """Processa respostas do wizard passo a passo. Retorna True se consumiu a mensagem."""
     user_id = message.author.id
     estado = wizard_geracao.get(user_id)
     if not estado:
         return False
     if estado["canal_id"] != message.channel.id:
         return False
-    # Expira em 5 minutos
     if (agora_utc() - estado["ts"]).total_seconds() > 300:
         del wizard_geracao[user_id]
         return False
 
     resp = message.content.strip()
-    step = estado["step"]
-    campo, _ = WIZARD_PASSOS[step]
+    campo = WIZARD_CAMPOS[estado["step"]]
 
-    # ── Passo 0: formato ──────────────────────────────────────────────────────
+    # ── formato ───────────────────────────────────────────────────────────────
     if campo == "formato":
         r = resp.lower()
         if r in ("1", "pdf"):
@@ -3035,41 +3057,47 @@ async def _processar_wizard(message: discord.Message) -> bool:
         elif r in ("3", "csv", "planilha", "calc", "tabela"):
             estado["formato"] = "csv"
         else:
-            await message.channel.send("Não entendi. Responde **1** (PDF), **2** (TXT) ou **3** (CSV).")
+            await message.channel.send(random.choice([
+                "Não peguei. É **1** pra PDF, **2** pra texto ou **3** pra planilha.",
+                "Manda **1**, **2** ou **3** — PDF, TXT ou CSV.",
+                "PDF, texto ou planilha? Só o número ou o nome mesmo.",
+            ]))
             return True
 
-    # ── Passo 1: título ───────────────────────────────────────────────────────
+    # ── título ────────────────────────────────────────────────────────────────
     elif campo == "titulo":
-        if resp.lower() not in ("não", "nao", "n", "no", "-"):
+        if resp.lower() not in ("não", "nao", "n", "no", "-", "pode", "padrao", "padrão"):
             estado["titulo"] = resp[:120]
 
-    # ── Passo 2: logo ─────────────────────────────────────────────────────────
+    # ── logo ──────────────────────────────────────────────────────────────────
     elif campo == "logo":
         if resp.lower() not in ("não", "nao", "n", "no", "-"):
-            # Aceita anexo de imagem ou URL
             if message.attachments:
                 estado["logo_url"] = message.attachments[0].url
             elif resp.startswith("http"):
                 estado["logo_url"] = resp.split()[0]
             else:
-                await message.channel.send("Manda a imagem como anexo ou um link direto (http...). Ou responde `não` para pular.")
+                await message.channel.send(random.choice([
+                    "Manda a imagem como anexo ou cola o link direto. Ou responde `não` pra pular.",
+                    "Precisa ser um anexo ou um link começando com http. Se não tiver, fala `não`.",
+                ]))
                 return True
 
-    # ── Passo 3: extras ───────────────────────────────────────────────────────
+    # ── extras ────────────────────────────────────────────────────────────────
     elif campo == "extras":
-        if resp.lower() not in ("não", "nao", "n", "no", "-"):
+        if resp.lower() not in ("não", "nao", "n", "no", "-", "pode", "gera", "gerar"):
             estado["extras"] = resp[:300]
 
-    # Avança para próximo passo
+    # Avança
     estado["step"] += 1
     estado["ts"] = agora_utc()
 
-    if estado["step"] < len(WIZARD_PASSOS):
-        n, pergunta = WIZARD_PASSOS[estado["step"]]
-        await message.channel.send(f"**{estado['step']+1}/4** {pergunta}")
+    if estado["step"] < len(WIZARD_CAMPOS):
+        proximo = WIZARD_CAMPOS[estado["step"]]
+        await message.channel.send(_wizard_pergunta(proximo))
         return True
 
-    # Todos os passos respondidos — gerar
+    # Concluído
     del wizard_geracao[user_id]
     await _executar_geracao(message, estado)
     return True
