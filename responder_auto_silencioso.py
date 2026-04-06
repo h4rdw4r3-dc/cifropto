@@ -440,7 +440,8 @@ nomes_historico: dict[int, str] = {}
 canal_memoria: dict[int, deque] = defaultdict(lambda: deque(maxlen=40))
 
 # ── Contexto do servidor (atualizado pelos event handlers) ───────────────────
-_contexto_servidor: str = ""
+_contexto_servidor: str = ""        # contexto completo (para query_servidor_direto)
+_contexto_compacto: str = ""        # versão curta injetada no Groq (economiza tokens)
 categorias_vistas: set = set()
 
 # ── Raid detection ────────────────────────────────────────────────────────────
@@ -1649,6 +1650,48 @@ def build_server_context(guild: discord.Guild) -> str:
     return "\n".join(linhas)
 
 
+def build_server_context_compact(guild: discord.Guild) -> str:
+    """
+    Versão compacta do contexto — injetada no Groq para economizar tokens.
+    Contém apenas o essencial: stats, nomes de cargos e lista de membros (só nomes).
+    Consultas factuais detalhadas são tratadas por query_servidor_direto() sem IA.
+    """
+    agora = agora_utc()
+    humanos = [m for m in guild.members if not m.bot]
+    bots_count = sum(1 for m in guild.members if m.bot)
+    linhas: list[str] = []
+
+    linhas.append(f"Servidor: {guild.name} | {len(humanos)} membros humanos, {bots_count} bots")
+
+    # Estatísticas rápidas
+    if humanos:
+        idades = [(agora - m.created_at.replace(tzinfo=timezone.utc)).days for m in humanos]
+        media = sum(idades) // len(idades)
+        novas = sum(1 for d in idades if d < 30)
+        linhas.append(f"Idade média das contas: {_fmt_duracao_curta(timedelta(days=media))} | Contas novas (<30d): {novas}")
+
+    # Cargos (só nomes e contagem)
+    cargos = [r for r in guild.roles if r.name != "@everyone"]
+    nomes_cargos = ", ".join(
+        f"{r.name}({sum(1 for m in r.members if not m.bot)})"
+        for r in sorted(cargos, key=lambda r: -r.position)
+    )
+    linhas.append(f"Cargos: {nomes_cargos}")
+
+    # Membros — só nomes e cargo principal
+    linhas.append("Membros:")
+    for m in sorted(humanos, key=lambda m: m.display_name.lower()):
+        cargo_principal = next(
+            (r.name for r in sorted(m.roles, key=lambda r: -r.position) if r.name != "@everyone"),
+            "sem cargo"
+        )
+        infr = infracoes.get(m.id, 0)
+        extra = f" [inf:{infr}]" if infr else ""
+        linhas.append(f"  {m.display_name} (ID {m.id}) — {cargo_principal}{extra}")
+
+    return "\n".join(linhas)
+
+
 def system_com_contexto() -> str:
     """Retorna o system prompt completo com o contexto do servidor injetado."""
     base = (
@@ -1694,13 +1737,14 @@ def system_com_contexto() -> str:
         "Nunca explique suas limitações em parágrafos. Nunca reflita sobre sua natureza de bot.\n"
         "Nunca aja de forma infantil, exagerada ou servil. Sem exclamações forçadas, sem bajulação.\n\n"
     )
-    if _contexto_servidor:
+    if _contexto_compacto:
         base += (
             "=== CONTEXTO DO SERVIDOR ===\n"
-            "Abaixo estão os dados REAIS e ATUAIS do servidor. Use-os para responder perguntas sobre o servidor.\n"
-            "NUNCA diga que não tem informações do servidor quando elas estão listadas aqui.\n\n"
+            "Abaixo estão os dados REAIS e ATUAIS do servidor.\n"
+            "NUNCA diga que não tem informações do servidor quando elas estão listadas aqui.\n"
+            "Para perguntas factuais detalhadas (cargos completos, idades exatas, etc.) informe que pode buscar via comando direto.\n\n"
         )
-        base += _contexto_servidor + "\n\n"
+        base += _contexto_compacto + "\n\n"
         base += f"=== REGRAS DO SERVIDOR ===\n{REGRAS}\n"
     return base
 
@@ -2942,16 +2986,21 @@ async def silenciar(membro: discord.Member, canal, motivo: str):
         await canal.send(f"{membro.mention} atingiu o limite de infrações. {mod}, tomem providências.")
 
 
+def _atualizar_contexto(guild: discord.Guild):
+    global _contexto_servidor, _contexto_compacto
+    _contexto_servidor = build_server_context(guild)
+    _contexto_compacto = build_server_context_compact(guild)
+
+
 @client.event
 async def on_ready():
-    global _contexto_servidor
     carregar_dados()
     print(f"Conectado como {client.user}")
     guild = client.get_guild(SERVIDOR_ID)
     if guild:
         pode = tem_permissao_moderacao(guild)
         log.info(f"Servidor: {guild.name} | moderação: {'sim' if pode else 'apenas avisos'}")
-        _contexto_servidor = build_server_context(guild)
+        _atualizar_contexto(guild)
         log.info(f"Contexto mapeado: {len(guild.channels)} canais, {len(guild.roles)} cargos, {guild.member_count} membros.")
     else:
         log.error(f"Servidor {SERVIDOR_ID} não encontrado.")
@@ -2959,34 +3008,26 @@ async def on_ready():
 
 @client.event
 async def on_guild_channel_create(channel):
-    """Atualiza o contexto quando um canal é criado."""
-    global _contexto_servidor
     if channel.guild.id == SERVIDOR_ID:
-        _contexto_servidor = build_server_context(channel.guild)
+        _atualizar_contexto(channel.guild)
 
 
 @client.event
 async def on_guild_channel_delete(channel):
-    """Atualiza o contexto quando um canal é deletado."""
-    global _contexto_servidor
     if channel.guild.id == SERVIDOR_ID:
-        _contexto_servidor = build_server_context(channel.guild)
+        _atualizar_contexto(channel.guild)
 
 
 @client.event
 async def on_guild_role_create(role):
-    """Atualiza o contexto quando um cargo é criado."""
-    global _contexto_servidor
     if role.guild.id == SERVIDOR_ID:
-        _contexto_servidor = build_server_context(role.guild)
+        _atualizar_contexto(role.guild)
 
 
 @client.event
 async def on_guild_role_delete(role):
-    """Atualiza o contexto quando um cargo é deletado."""
-    global _contexto_servidor
     if role.guild.id == SERVIDOR_ID:
-        _contexto_servidor = build_server_context(role.guild)
+        _atualizar_contexto(role.guild)
 
 
 @client.event
@@ -3018,8 +3059,7 @@ async def on_member_join(member: discord.Member):
         )
 
     # Atualiza contexto do servidor
-    global _contexto_servidor
-    _contexto_servidor = build_server_context(member.guild)
+    _atualizar_contexto(member.guild)
     log.info(f"Entrada: {member.display_name} ({member.id}) | conta: {formatar_duracao(idade_conta)}{' | CONTA NOVA' if conta_nova else ''}")
 
     # ── Raid detection ────────────────────────────────────────────────────────
@@ -3079,8 +3119,7 @@ async def on_member_remove(member: discord.Member):
             f"Ficou por {ficou_txt}."
         )
 
-    global _contexto_servidor
-    _contexto_servidor = build_server_context(member.guild)
+    _atualizar_contexto(member.guild)
     log.info(f"Saída: {member.display_name} ({member.id}) | ficou: {ficou_txt}")
 
 
