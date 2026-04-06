@@ -6,15 +6,23 @@ import os
 import io
 import xml.etree.ElementTree as ET
 import random
+import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("shell")
 
 try:
     from openai import AsyncOpenAI
     GROQ_DISPONIVEL = True
 except ImportError:
     GROQ_DISPONIVEL = False
-    print("[AVISO] Pacote openai não encontrado. Respostas via IA desativadas.")
+    log.warning("Pacote openai não encontrado. Respostas via IA desativadas.")
 
 def agora_utc():
     return datetime.now(timezone.utc)
@@ -127,10 +135,10 @@ def carregar_dados():
         for k, v in dados.get("nomes_historico", {}).items():
             nomes_historico[int(k)] = v
         total = sum(len(v) for v in palavras_custom.values())
-        print(f"[DADOS] {len(infracoes)} usuários, {total} palavras customizadas, "
-              f"{len(registro_entradas)} históricos de entrada carregados.")
+        log.info(f"{len(infracoes)} usuários, {total} palavras customizadas, "
+                 f"{len(registro_entradas)} históricos de entrada carregados.")
     except Exception as e:
-        print(f"[DADOS] Erro ao carregar: {e}")
+        log.error(f"Erro ao carregar dados: {e}")
 
 def salvar_dados():
     """Escrita atômica: grava em arquivo temporário e renomeia, evitando corrupção."""
@@ -155,7 +163,7 @@ def salvar_dados():
             os.unlink(tmp)
             raise
     except Exception as e:
-        print(f"[DADOS] Erro ao salvar: {e}")
+        log.error(f"Erro ao salvar dados: {e}")
 
 # Histórico de flood, infrações e conversas por usuário
 historico_mensagens = defaultdict(list)
@@ -176,6 +184,12 @@ registro_entradas: dict[int, list[str]] = {}
 registro_saidas: dict[int, list[dict]] = {}
 # nomes_historico: último nome conhecido de cada user_id (inclui quem já saiu)
 nomes_historico: dict[int, str] = {}
+
+# ── Raid detection ────────────────────────────────────────────────────────────
+_joins_recentes: list[datetime] = []          # timestamps dos últimos joins
+RAID_JANELA   = timedelta(minutes=2)          # janela de análise
+RAID_LIMIAR   = 5                             # joins para disparar alerta
+RAID_CONTA_NOVA_DIAS = 7                      # conta com menos de X dias = suspeita
 
 GATILHOS_NOME = re.compile(r"\bshell\b|\bengenheir\w*", re.IGNORECASE)
 
@@ -740,7 +754,7 @@ async def verificar_url_virustotal(url: str) -> dict | None:
                 stats = result.get("data", {}).get("attributes", {}).get("stats", {})
                 return stats
     except Exception as e:
-        print(f"[VIRUSTOTAL ERRO] {e}")
+        log.error(f"VirusTotal: {e}")
         return None
 
 
@@ -773,7 +787,7 @@ async def processar_links(message: discord.Message):
                 f"O VirusTotal detectou **{maliciosos} ameaça(s) maliciosa(s)** e "
                 f"**{suspeitos} suspeita(s)**. Por segurança do servidor, ele foi removido."
             )
-            print(f"[VIRUSTOTAL] Link bloqueado de {message.author.display_name}: {url} | malic={maliciosos} susp={suspeitos}")
+            log.warning(f"Link bloqueado de {message.author.display_name}: {url} | malic={maliciosos} susp={suspeitos}")
             return  # Uma notificação por vez é suficiente
 
 
@@ -783,7 +797,7 @@ async def enviar_auditoria(guild: discord.Guild, membro: discord.Member, violaco
     """Envia log da ofensa apagada para o canal de auditoria como arquivo .txt."""
     canal_audit = guild.get_channel(CANAL_AUDITORIA_ID)
     if not canal_audit:
-        print(f"[AUDITORIA] Canal {CANAL_AUDITORIA_ID} não encontrado.")
+        log.error(f"Canal de auditoria {CANAL_AUDITORIA_ID} não encontrado.")
         return
 
     brasilia = timezone(timedelta(hours=-3))
@@ -1098,7 +1112,7 @@ async def confirmar_acao(descricao: str, fallback: str) -> str:
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
-        print(f"[Groq Ação] Erro: {e}")
+        log.error(f"Groq confirmar_acao: {e}")
         return fallback
 
 
@@ -1155,7 +1169,7 @@ async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=No
         hist.append({"role": "assistant", "content": texto})
         return texto
     except Exception as e:
-        print(f"[Groq API] Erro: {e}")
+        log.error(f"Groq responder: {e}")
         return random.choice(["Não sei disso.", "Sem informação.", "Tenta a moderação."])
 
 
@@ -1751,6 +1765,50 @@ async def processar_ordem(message: discord.Message) -> bool:
             except Exception as e:
                 await message.channel.send(f"Não foi possível expulsar {alvo.mention}: {e}")
 
+    # ── dar cargo @user cargo / tirar cargo @user cargo ───────────────────────
+    elif re.search(r'\b(dar|d[aã]|atribuir|adicionar|colocar)\b.{0,15}\bcargo\b', conteudo.lower()):
+        if not alvos:
+            await message.channel.send("Menciona quem deve receber o cargo.")
+            return True
+        roles_alvo = message.role_mentions
+        if not roles_alvo:
+            # Tenta encontrar cargo por nome no texto
+            nome_r = re.sub(r'(<@!?\d+>\s*|<@&\d+>\s*|\b(?:dar|atribuir|adicionar|cargo|colocar)\b\s*)', '', conteudo, flags=re.IGNORECASE).strip()
+            role_encontrado = _buscar_role_por_nome(guild, nome_r) if nome_r else None
+            roles_alvo = [role_encontrado] if role_encontrado else []
+        if not roles_alvo:
+            await message.channel.send("Menciona qual cargo devo atribuir (use @cargo ou escreva o nome).")
+            return True
+        for alvo in alvos:
+            for role in roles_alvo:
+                try:
+                    await alvo.add_roles(role, reason=f"Ordem de {message.author.display_name}")
+                    await message.channel.send(f"Cargo {role.name} atribuído a {alvo.mention}.")
+                    log.info(f"Cargo {role.name} atribuído a {alvo.display_name}")
+                except Exception as e:
+                    await message.channel.send(f"Não foi possível atribuir {role.name} a {alvo.mention}: {e}")
+
+    elif re.search(r'\b(tirar|remover|revogar|retirar)\b.{0,15}\bcargo\b', conteudo.lower()):
+        if not alvos:
+            await message.channel.send("Menciona de quem devo retirar o cargo.")
+            return True
+        roles_alvo = message.role_mentions
+        if not roles_alvo:
+            nome_r = re.sub(r'(<@!?\d+>\s*|<@&\d+>\s*|\b(?:tirar|remover|revogar|retirar|cargo)\b\s*)', '', conteudo, flags=re.IGNORECASE).strip()
+            role_encontrado = _buscar_role_por_nome(guild, nome_r) if nome_r else None
+            roles_alvo = [role_encontrado] if role_encontrado else []
+        if not roles_alvo:
+            await message.channel.send("Menciona qual cargo devo retirar (use @cargo ou escreva o nome).")
+            return True
+        for alvo in alvos:
+            for role in roles_alvo:
+                try:
+                    await alvo.remove_roles(role, reason=f"Ordem de {message.author.display_name}")
+                    await message.channel.send(f"Cargo {role.name} removido de {alvo.mention}.")
+                    log.info(f"Cargo {role.name} removido de {alvo.display_name}")
+                except Exception as e:
+                    await message.channel.send(f"Não foi possível remover {role.name} de {alvo.mention}: {e}")
+
     # ── avisar @user mensagem ──────────────────────────────────────────────────
     elif cmd in ("avisar", "aviso", "advertir"):
         texto = re.sub(r"(<@!?\d+>\s*)+", "", resto).strip()
@@ -2149,9 +2207,9 @@ async def silenciar(membro: discord.Member, canal, motivo: str):
             f"{membro.mention}, você foi silenciado por {descricao}. "
             f"Reincidências resultam em silêncios mais longos."
         )
-        print(f"[SILENCIADO] {membro.display_name} por {descricao} (vez {vez + 1})")
+        log.info(f"Silenciado: {membro.display_name} por {descricao} (vez {vez + 1})")
     except Exception as e:
-        print(f"[ERRO] Não foi possível silenciar {membro.display_name}: {e}")
+        log.error(f"Falha ao silenciar {membro.display_name}: {e}")
         await canal.send(f"{membro.mention} atingiu o limite de infrações. {mod}, tomem providências.")
 
 
@@ -2163,11 +2221,11 @@ async def on_ready():
     guild = client.get_guild(SERVIDOR_ID)
     if guild:
         pode = tem_permissao_moderacao(guild)
-        print(f"Servidor: {guild.name} | Permissao de moderacao: {'sim' if pode else 'não, apenas avisos'}")
+        log.info(f"Servidor: {guild.name} | moderação: {'sim' if pode else 'apenas avisos'}")
         _contexto_servidor = build_server_context(guild)
-        print(f"[CONTEXTO] Servidor mapeado: {len(guild.channels)} canais, {len(guild.roles)} cargos, {guild.member_count} membros.")
+        log.info(f"Contexto mapeado: {len(guild.channels)} canais, {len(guild.roles)} cargos, {guild.member_count} membros.")
     else:
-        print(f"Servidor {SERVIDOR_ID} nao encontrado. Verifique se esta no servidor.")
+        log.error(f"Servidor {SERVIDOR_ID} não encontrado.")
 
 
 @client.event
@@ -2233,7 +2291,30 @@ async def on_member_join(member: discord.Member):
     # Atualiza contexto do servidor
     global _contexto_servidor
     _contexto_servidor = build_server_context(member.guild)
-    print(f"[ENTRADA] {member.display_name} ({member.id}) | conta: {formatar_duracao(idade_conta)}{' | CONTA NOVA' if conta_nova else ''}")
+    log.info(f"Entrada: {member.display_name} ({member.id}) | conta: {formatar_duracao(idade_conta)}{' | CONTA NOVA' if conta_nova else ''}")
+
+    # ── Raid detection ────────────────────────────────────────────────────────
+    _joins_recentes.append(agora)
+    # Remove entradas fora da janela
+    corte = agora - RAID_JANELA
+    while _joins_recentes and _joins_recentes[0] < corte:
+        _joins_recentes.pop(0)
+
+    if len(_joins_recentes) >= RAID_LIMIAR:
+        novas = sum(
+            1 for m in member.guild.members
+            if not m.bot and (agora - m.created_at.replace(tzinfo=timezone.utc)).days < RAID_CONTA_NOVA_DIAS
+        )
+        canal_audit = member.guild.get_channel(CANAL_AUDITORIA_ID)
+        if canal_audit:
+            mod = mencao_mod(member.guild)
+            await canal_audit.send(
+                f"⚠️ POSSÍVEL RAID: {len(_joins_recentes)} entradas nos últimos 2 minutos "
+                f"({novas} contas com menos de {RAID_CONTA_NOVA_DIAS} dias). "
+                f"{mod}, verifiquem imediatamente."
+            )
+        log.warning(f"RAID detectado: {len(_joins_recentes)} joins em 2min, {novas} contas novas")
+        _joins_recentes.clear()  # Evita alertas duplicados
 
 
 @client.event
@@ -2271,7 +2352,7 @@ async def on_member_remove(member: discord.Member):
 
     global _contexto_servidor
     _contexto_servidor = build_server_context(member.guild)
-    print(f"[SAÍDA] {member.display_name} ({member.id}) | ficou: {ficou_txt}")
+    log.info(f"Saída: {member.display_name} ({member.id}) | ficou: {ficou_txt}")
 
 
 # Palavras-chave ofensivas em nomes de emoji customizado do servidor
@@ -2320,7 +2401,7 @@ async def on_reaction_add(reaction: discord.Reaction, user):
                 pass
             infracoes[membro.id] += 1
             salvar_dados()
-            print(f"[REAÇÃO REMOVIDA] {membro.display_name}: {emoji.name}")
+            log.info(f"Reação removida: {membro.display_name}: {emoji.name}")
             break
 
 
@@ -2447,7 +2528,7 @@ async def on_message(message: discord.Message):
         await message.channel.send(
             f"Ei {message.author.mention}, para com o spam! Regra número 1 dos canais em {CANAL_REGRAS}."
         )
-        print(f"[FLOOD] {autor}")
+        log.warning(f"Flood detectado: {autor}")
         return
 
     # ── Verificar links com VirusTotal ────────────────────────────────────────
@@ -2471,7 +2552,7 @@ async def on_message(message: discord.Message):
             for desc, _ in violacoes
         )
 
-        print(f"[INFRAÇÃO {count}/3] {autor}: {[(d, p) for d, p in violacoes]}")
+        log.warning(f"Infração {count}/3 de {autor}: {[(d, p) for d, p in violacoes]}")
 
         msg_id = message.id
         try:
@@ -2555,7 +2636,7 @@ async def on_message(message: discord.Message):
         if canal_conv is None or canal_conv == message.channel.id:
             resposta = await continuar_conversa(user_id, conteudo, autor, message.guild)
             if resposta:
-                print(f"[CONVERSA] {autor}: {conteudo}")
+                log.info(f"Conversa: {autor}: {conteudo}")
                 await message.reply(resposta)
                 return
         else:
@@ -2574,7 +2655,7 @@ async def on_message(message: discord.Message):
                         await message.reply(resp_direta)
                         return
                 resposta = await responder_com_claude(conteudo, autor, user_id, message.guild, message.channel.id)
-                print(f"[CLAUDE CONT] {autor}: {conteudo}")
+                log.info(f"Claude cont: {autor}: {conteudo}")
                 await message.reply(resposta)
                 return
             else:
@@ -2600,9 +2681,9 @@ async def on_message(message: discord.Message):
                     return
 
         resposta = await resposta_inicial(conteudo, autor, user_id, message.guild, message.author, message.channel.id)
-        print(f"[MENÇÃO] {autor}: {conteudo}")
+        log.info(f"Menção de {autor}: {conteudo[:80]}")
         await message.reply(resposta)
-        print(f"[RESPONDIDO] {autor}")
+        log.info(f"Respondido: {autor}")
 
 
 if not TOKEN:
