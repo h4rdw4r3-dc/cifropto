@@ -783,7 +783,7 @@ async def processar_links(message: discord.Message):
                 pass
 
             await message.channel.send(
-                f"⚠️ Ei, {message.author.mention}! O link que você enviou foi bloqueado. "
+                f"[ALERTA]Ei, {message.author.mention}! O link que você enviou foi bloqueado. "
                 f"O VirusTotal detectou **{maliciosos} ameaça(s) maliciosa(s)** e "
                 f"**{suspeitos} suspeita(s)**. Por segurança do servidor, ele foi removido."
             )
@@ -2281,7 +2281,7 @@ async def on_member_join(member: discord.Member):
 
     canal_audit = member.guild.get_channel(CANAL_AUDITORIA_ID)
     if canal_audit:
-        aviso = " ⚠️ CONTA NOVA" if conta_nova else ""
+        aviso = " | CONTA NOVA" if conta_nova else ""
         reentrada = f" | Reentrada n.{vezes}" if vezes > 1 else ""
         await canal_audit.send(
             f"[ENTRADA]{aviso}{reentrada} {member.display_name} ({member.id}) "
@@ -2309,7 +2309,7 @@ async def on_member_join(member: discord.Member):
         if canal_audit:
             mod = mencao_mod(member.guild)
             await canal_audit.send(
-                f"⚠️ POSSÍVEL RAID: {len(_joins_recentes)} entradas nos últimos 2 minutos "
+                f"[ALERTA]POSSÍVEL RAID: {len(_joins_recentes)} entradas nos últimos 2 minutos "
                 f"({novas} contas com menos de {RAID_CONTA_NOVA_DIAS} dias). "
                 f"{mod}, verifiquem imediatamente."
             )
