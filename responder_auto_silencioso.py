@@ -863,14 +863,78 @@ SYSTEM_ACAO = (
 
 # ── Queries factuais do servidor (respondidas direto do guild, sem IA) ────────
 
-def _role_info(role: discord.Role) -> str:
-    """Formata info de um cargo: nome, contagem e lista de membros humanos."""
-    humanos = [mb.display_name for mb in role.members if not mb.bot]
+def _fmt_duracao_curta(td: timedelta) -> str:
+    """Ex: '3 anos', '8 meses', '12 dias', '4 horas'."""
+    s = int(td.total_seconds())
+    if s < 0:
+        return "tempo desconhecido"
+    if s < 3600:
+        return f"{s // 60} min"
+    if s < 86400:
+        return f"{s // 3600}h"
+    d = s // 86400
+    if d < 30:
+        return f"{d} dia{'s' if d != 1 else ''}"
+    if d < 365:
+        m = d // 30
+        return f"{m} {'mês' if m == 1 else 'meses'}"
+    a = d // 365
+    return f"{a} ano{'s' if a != 1 else ''}"
+
+
+def _role_info(role: discord.Role, detalhado: bool = False) -> str:
+    """
+    Info de um cargo.
+    detalhado=True → inclui idade da conta e tempo no servidor de cada membro.
+    """
+    agora = agora_utc()
+    humanos = [mb for mb in role.members if not mb.bot]
     n = len(humanos)
-    base = f"Cargo {role.name}: {n} membro{'s' if n != 1 else ''}"
-    if humanos:
-        base += f" — {', '.join(humanos)}"
-    return base + "."
+    if not detalhado:
+        nomes = ", ".join(mb.display_name for mb in humanos)
+        base = f"Cargo {role.name}: {n} membro{'s' if n != 1 else ''}"
+        if nomes:
+            base += f" — {nomes}"
+        return base + "."
+    # Detalhado: uma linha por membro
+    linhas = [f"Cargo {role.name} — {n} membro{'s' if n != 1 else ''}:"]
+    for mb in sorted(humanos, key=lambda m: m.display_name.lower()):
+        conta = _fmt_duracao_curta(agora - mb.created_at.replace(tzinfo=timezone.utc))
+        servidor = _fmt_duracao_curta(agora - mb.joined_at.replace(tzinfo=timezone.utc)) if mb.joined_at else "?"
+        cargos = [r.name for r in mb.roles if r.name != "@everyone" and r != role]
+        outros = f" | outros cargos: {', '.join(cargos)}" if cargos else ""
+        linhas.append(f"  {mb.display_name} — conta: {conta} | no servidor: {servidor}{outros}")
+    return "\n".join(linhas)
+
+
+def _buscar_membro_por_nome(guild: discord.Guild, nome: str) -> discord.Member | None:
+    """Busca membro por display_name ou username (case-insensitive, parcial)."""
+    nome = nome.strip().lower()
+    for m in guild.members:
+        if m.display_name.lower() == nome or m.name.lower() == nome:
+            return m
+    for m in guild.members:
+        if nome in m.display_name.lower() or nome in m.name.lower():
+            return m
+    return None
+
+
+def _info_membro_sync(mb: discord.Member) -> str:
+    """Versão síncrona de info_membro para uso em query_servidor_direto."""
+    agora = agora_utc()
+    conta = _fmt_duracao_curta(agora - mb.created_at.replace(tzinfo=timezone.utc))
+    servidor = _fmt_duracao_curta(agora - mb.joined_at.replace(tzinfo=timezone.utc)) if mb.joined_at else "desconhecido"
+    cargos = [r.name for r in mb.roles if r.name != "@everyone"]
+    cargos_txt = ", ".join(cargos) if cargos else "nenhum"
+    n_ent = len(registro_entradas.get(mb.id, []))
+    n_sai = len(registro_saidas.get(mb.id, []))
+    rastreio = f" Entradas: {n_ent}, saídas: {n_sai}." if n_ent else ""
+    conta_nova = (agora - mb.created_at.replace(tzinfo=timezone.utc)).days < 30
+    alerta = " [conta recente]" if conta_nova else ""
+    return (
+        f"{mb.display_name}{alerta} — conta criada há {conta}, "
+        f"no servidor há {servidor}. Cargos: {cargos_txt}.{rastreio}"
+    )
 
 
 def _buscar_role_por_nome(guild: discord.Guild, trecho: str) -> discord.Role | None:
@@ -916,7 +980,8 @@ def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | None:
     if re.search(r'\b(mod(?:erador)?s?|equipe\s*mod|staff|tropa\s*(?:da\s*)?mod)\b', c):
         role = guild.get_role(CARGO_EQUIPE_MOD_ID)
         if role:
-            return _role_info(role)
+            det = bool(re.search(r'\b(detalh|info|idad|conta|tempo|quando|quanto\s+tempo)\b', c))
+            return _role_info(role, detalhado=det)
 
     # ── Cargo por nome (função / tropa / membros de X) ────────────────────────
     m_nome = re.search(
@@ -927,7 +992,21 @@ def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | None:
     if m_nome:
         role = _buscar_role_por_nome(guild, m_nome.group(1))
         if role:
-            return _role_info(role)
+            det = bool(re.search(r'\b(detalh|info|idad|conta|tempo|quando|quanto\s+tempo)\b', c))
+            return _role_info(role, detalhado=det)
+
+    # ── Membro por nome (sem @menção) ─────────────────────────────────────────
+    m_mb = re.search(
+        r'\b(?:info(?:rmações?)?|quem\s+é|fale?\s+sobre|detalhes?\s+(?:de|do|da)|'
+        r'quanto\s+tempo\s+(?:o|a|)\s*|quando\s+entrou\s+(?:o|a|)\s*|'
+        r'idad[e]?\s+(?:da\s+conta\s+)?(?:de|do|da)\s+)'
+        r'([A-Za-záéíóúãõâêôçüñ\w]{2,30})',
+        c
+    )
+    if m_mb:
+        mb = _buscar_membro_por_nome(guild, m_mb.group(1))
+        if mb:
+            return _info_membro_sync(mb)
 
     # ── Canais: quantidade ────────────────────────────────────────────────────
     if re.search(r'\bquantos\b.{0,25}\bcanais?\b', c):
@@ -969,6 +1048,62 @@ def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | None:
         bots = sum(1 for mb in guild.members if mb.bot)
         humanos = guild.member_count - bots
         return f"O servidor tem {humanos} membros humanos e {bots} bots."
+
+    # ── Membros mais antigos no servidor ─────────────────────────────────────
+    if re.search(r'\b(mais\s+antigo|primeiro[s]?\s+membro|fundador[es]?|veterano)\b', c):
+        agora = agora_utc()
+        humanos = sorted(
+            [m for m in guild.members if not m.bot and m.joined_at],
+            key=lambda m: m.joined_at
+        )[:5]
+        linhas = ["Membros mais antigos no servidor:"]
+        for mb in humanos:
+            tempo = _fmt_duracao_curta(agora - mb.joined_at.replace(tzinfo=timezone.utc))
+            linhas.append(f"  {mb.display_name} — há {tempo}")
+        return "\n".join(linhas)
+
+    # ── Membros mais recentes ─────────────────────────────────────────────────
+    if re.search(r'\b(mais\s+recente|último[s]?\s+(?:a\s+)?entrar|novato)\b', c):
+        agora = agora_utc()
+        humanos = sorted(
+            [m for m in guild.members if not m.bot and m.joined_at],
+            key=lambda m: m.joined_at, reverse=True
+        )[:5]
+        linhas = ["Entradas mais recentes:"]
+        for mb in humanos:
+            tempo = _fmt_duracao_curta(agora - mb.joined_at.replace(tzinfo=timezone.utc))
+            linhas.append(f"  {mb.display_name} — há {tempo}")
+        return "\n".join(linhas)
+
+    # ── Contas mais novas (por data de criação, não de entrada) ──────────────
+    if re.search(r'\bconta[s]?\s+(?:mais\s+)?nova[s]?\b|\brecém[-\s]?cria\w+\b', c):
+        agora = agora_utc()
+        humanos = sorted(
+            [m for m in guild.members if not m.bot],
+            key=lambda m: m.created_at, reverse=True
+        )[:5]
+        linhas = ["Contas criadas mais recentemente:"]
+        for mb in humanos:
+            idade = _fmt_duracao_curta(agora - mb.created_at.replace(tzinfo=timezone.utc))
+            linhas.append(f"  {mb.display_name} — conta criada há {idade}")
+        return "\n".join(linhas)
+
+    # ── Lista completa de membros com detalhes ────────────────────────────────
+    if re.search(r'\b(todos\s+os\s+membros|lista\s+completa|lista\s+detalhada)\b', c):
+        agora = agora_utc()
+        humanos = sorted([m for m in guild.members if not m.bot], key=lambda m: m.display_name.lower())
+        linhas = [f"Membros humanos ({len(humanos)}):"]
+        for mb in humanos:
+            conta = _fmt_duracao_curta(agora - mb.created_at.replace(tzinfo=timezone.utc))
+            servidor = _fmt_duracao_curta(agora - mb.joined_at.replace(tzinfo=timezone.utc)) if mb.joined_at else "?"
+            cargos = [r.name for r in mb.roles if r.name != "@everyone"]
+            cargos_txt = ", ".join(cargos) if cargos else "sem cargo"
+            linhas.append(f"  {mb.display_name} | conta: {conta} | servidor: {servidor} | cargos: {cargos_txt}")
+        # Discord limita mensagens a 2000 chars — trunca se necessário
+        resultado = "\n".join(linhas)
+        if len(resultado) > 1800:
+            resultado = resultado[:1800] + "\n  (...)"
+        return resultado
 
     return None
 
