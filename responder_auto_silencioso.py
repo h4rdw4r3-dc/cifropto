@@ -3047,6 +3047,28 @@ async def _processar_wizard(message: discord.Message) -> bool:
     resp = message.content.strip()
     campo = WIZARD_CAMPOS[estado["step"]]
 
+    # ── detecta cancelamento ou correção ──────────────────────────────────────
+    _r_low = resp.lower()
+    _cancela = (
+        re.search(
+            r'\b(cancela[r]?|esquece|para[r]?|desiste|desistir|n[aã]o\s+quero'
+            r'|n[aã]o\s+era\s+(isso|pra|para)|era\s+s[oó]|s[oó]\s+(pergunt|uma\s+pergunta)'
+            r'|abort[a]?|deixa\s+(pra\s+l[aá]|assim))\b',
+            _r_low,
+        )
+        # "Não, eu estou..." — negativa seguida de vírgula/ponto e mais texto
+        or re.match(r'^n[aã]o[,\.]\s+\w', _r_low)
+    )
+    if _cancela:
+        del wizard_geracao[user_id]
+        await message.channel.send(random.choice([
+            "Entendido, cancelado.",
+            "Ok, deixa pra la.",
+            "Certo, nao gero nada.",
+            "Beleza, arquivei.",
+        ]))
+        return True
+
     # ── formato ───────────────────────────────────────────────────────────────
     if campo == "formato":
         r = resp.lower()
@@ -3964,6 +3986,14 @@ async def processar_ordem(message: discord.Message) -> bool:
         conteudo.lower()
     ) and re.search(
         r'\b(cria[r]?|gera[r]?|manda[r]?|faz|exporta[r]?|preciso|quero|me\s+d[aá])\b',
+        conteudo.lower()
+    ) and not re.search(
+        # Exclui perguntas hipoteticas: "e se voce fosse", "se eu pudesse", "poderia gerar"
+        r'\b(e\s+se\s+|se\s+(?:voc[eê]|eu)\s+(?:fosse|pudesse|conseguisse|tivesse)'
+        r'|poderia[m]?\s+(?:gerar|criar|fazer|exportar)'
+        r'|seria\s+(?:capaz|poss[ií]vel)\s+(?:de\s+)?(?:gerar|criar|fazer)'
+        r'|falar\s+sobre|explicar|como\s+(?:voc[eê]\s+)?(?:gera|cria|faz)'
+        r'|o\s+que\s+(?:voc[eê]\s+)?(?:gera|cria))\b',
         conteudo.lower()
     ):
         msg_l = conteudo.lower()
