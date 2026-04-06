@@ -25,6 +25,13 @@ except ImportError:
     GROQ_DISPONIVEL = False
     log.warning("Pacote openai não encontrado. Respostas via IA desativadas.")
 
+try:
+    from fpdf import FPDF
+    FPDF_DISPONIVEL = True
+except ImportError:
+    FPDF_DISPONIVEL = False
+    log.warning("fpdf2 não instalado — geração de PDF indisponível.")
+
 def agora_utc():
     return datetime.now(timezone.utc)
 
@@ -364,7 +371,7 @@ def inferir_categoria(texto: str) -> str:
 
 def carregar_dados():
     global infracoes, ultimo_motivo, silenciamentos, palavras_custom
-    global registro_entradas, registro_saidas, nomes_historico
+    global registro_entradas, registro_saidas, nomes_historico, citacoes, canais_monitorados
     if not os.path.exists(DADOS_PATH):
         return
     try:
@@ -384,6 +391,8 @@ def carregar_dados():
             registro_saidas[int(k)] = v
         for k, v in dados.get("nomes_historico", {}).items():
             nomes_historico[int(k)] = v
+        citacoes[:] = dados.get("citacoes", [])
+        canais_monitorados.update(int(c) for c in dados.get("canais_monitorados", []))
         total = sum(len(v) for v in palavras_custom.values())
         log.info(f"{len(infracoes)} usuários, {total} palavras customizadas, "
                  f"{len(registro_entradas)} históricos de entrada carregados.")
@@ -401,6 +410,8 @@ def salvar_dados():
         "registro_entradas": {str(k): v for k, v in registro_entradas.items()},
         "registro_saidas": {str(k): v for k, v in registro_saidas.items()},
         "nomes_historico": {str(k): v for k, v in nomes_historico.items()},
+        "citacoes": citacoes[-200:],  # guarda as últimas 200
+        "canais_monitorados": list(canais_monitorados),
     }
     try:
         dir_ = os.path.dirname(os.path.abspath(DADOS_PATH)) or "."
@@ -426,6 +437,15 @@ ausencia: dict[int, dict] = {}
 historico_groq: dict[tuple[int, int], list] = {}  # chave: (user_id, canal_id)
 conversas_groq: dict[int, dict] = {}
 TIMEOUT_CONVERSA_GROQ = timedelta(minutes=5)
+
+# ── Participação ativa em canais ──────────────────────────────────────────────
+debates_ativos: dict[int, dict] = {}       # canal_id → {tema, fim, msgs}
+canais_monitorados: set[int] = set()       # canais onde o bot interage ativamente
+ultima_interjeccao: dict[int, datetime] = {}  # cooldown por canal
+
+# ── Atividade e citações ──────────────────────────────────────────────────────
+atividade_mensagens: dict[int, int] = defaultdict(int)  # user_id → contagem
+citacoes: list[dict] = []  # {texto, autor, canal, ts}
 
 # ── Rastreamento de entradas e saídas ─────────────────────────────────────────
 # registro_entradas: user_id -> lista de ISO timestamps de cada entrada
@@ -670,6 +690,109 @@ async def relatorio_membros(guild: discord.Guild, periodo_dias: int = 7) -> str:
         linhas.append(f"  {dt.strftime('%d/%m %H:%M')}  {nome}{ficou_txt}")
 
     return "\n".join(linhas)
+
+
+# ── PDF: helpers e geradores ──────────────────────────────────────────────────
+
+import unicodedata as _ud
+
+def _pdf_str(texto: str) -> str:
+    """Remove diacríticos para compatibilidade com fontes PDF padrão (Helvetica)."""
+    return ''.join(
+        c for c in _ud.normalize('NFD', str(texto))
+        if _ud.category(c) != 'Mn'
+    )
+
+def _criar_pdf(titulo: str, secoes: list[tuple[str, list[str]]]) -> bytes:
+    """
+    Gera PDF com título e seções. Cada seção é (cabecalho, linhas[]).
+    Retorna bytes do PDF ou lança RuntimeError se fpdf2 não disponível.
+    """
+    if not FPDF_DISPONIVEL:
+        raise RuntimeError("fpdf2 não instalado no ambiente.")
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    # Título
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, _pdf_str(titulo), new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.set_font("Helvetica", size=8)
+    brasilia = timezone(timedelta(hours=-3))
+    pdf.cell(0, 6, _pdf_str(f"Gerado em {datetime.now(brasilia).strftime('%d/%m/%Y %H:%M')} (Brasilia)"),
+             new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.ln(4)
+    for cab, linhas in secoes:
+        if cab:
+            pdf.set_font("Helvetica", "B", 11)
+            pdf.set_fill_color(220, 220, 220)
+            pdf.cell(0, 7, _pdf_str(cab), new_x="LMARGIN", new_y="NEXT", fill=True)
+            pdf.ln(1)
+        pdf.set_font("Helvetica", size=9)
+        for linha in linhas:
+            pdf.multi_cell(0, 5, _pdf_str(linha), new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+    return bytes(pdf.output())
+
+
+async def gerar_pdf_relatorio_servidor(guild: discord.Guild, dias: int = 7) -> bytes:
+    rel = await relatorio_membros(guild, dias)
+    tipo = "mensal" if dias >= 28 else ("semanal" if dias >= 7 else f"dos últimos {dias} dias")
+    secoes = [
+        ("Visão geral", [
+            f"Servidor: {guild.name}",
+            f"Membros totais: {guild.member_count}",
+            f"Membros humanos: {sum(1 for m in guild.members if not m.bot)}",
+            f"Canais: {len(guild.channels)}",
+            f"Cargos: {len(guild.roles)}",
+        ]),
+        (f"Relatório {tipo}", rel.split('\n')),
+    ]
+    return _criar_pdf(f"Relatorio do Servidor — {guild.name}", secoes)
+
+
+async def gerar_pdf_historico_canal(canal: discord.TextChannel, limite: int = 100) -> bytes:
+    brasilia = timezone(timedelta(hours=-3))
+    linhas = []
+    async for msg in canal.history(limit=limite, oldest_first=True):
+        ts = msg.created_at.astimezone(brasilia).strftime('%d/%m %H:%M')
+        conteudo_msg = msg.content or "[sem texto]"
+        if msg.attachments:
+            conteudo_msg += f" [anexo: {msg.attachments[0].filename}]"
+        linhas.append(f"[{ts}] {msg.author.display_name}: {conteudo_msg[:200]}")
+    secoes = [(f"#{canal.name} — últimas {len(linhas)} mensagens", linhas)]
+    return _criar_pdf(f"Historico — #{canal.name}", secoes)
+
+
+def gerar_pdf_membros(guild: discord.Guild) -> bytes:
+    brasilia = timezone(timedelta(hours=-3))
+    humanos = sorted([m for m in guild.members if not m.bot], key=lambda m: m.display_name.lower())
+    bots = [m for m in guild.members if m.bot]
+    linhas_h = []
+    for i, m in enumerate(humanos, 1):
+        cargos = ", ".join(r.name for r in m.roles[1:6]) or "—"
+        joined = m.joined_at.astimezone(brasilia).strftime('%d/%m/%Y') if m.joined_at else "?"
+        linhas_h.append(f"{i:3}. {m.display_name:<24} entrou {joined}   cargos: {cargos}")
+    linhas_b = [f"  {m.display_name}" for m in bots]
+    secoes = [
+        (f"Humanos ({len(humanos)})", linhas_h),
+        (f"Bots ({len(bots)})", linhas_b),
+    ]
+    return _criar_pdf(f"Lista de Membros — {guild.name}", secoes)
+
+
+def gerar_pdf_regras() -> bytes:
+    secoes = [("Regras do Servidor", REGRAS.split('\n'))]
+    return _criar_pdf("Regras do Servidor", secoes)
+
+
+def gerar_pdf_citacoes() -> bytes:
+    if not citacoes:
+        secoes = [("", ["Nenhuma citação registrada ainda."])]
+    else:
+        linhas = [f'[{c.get("ts","?")}] {c.get("autor","?")} em #{c.get("canal","?")}: "{c.get("texto","")}"'
+                  for c in citacoes[-100:]]
+        secoes = [(f"Citações registradas ({len(citacoes)})", linhas)]
+    return _criar_pdf("Citacoes do Servidor", secoes)
 
 
 async def historico_membro(uid: int, nome_display: str) -> str:
@@ -3199,8 +3322,10 @@ async def processar_ordem(message: discord.Message) -> bool:
             f"Respeito nos argumentos — sem agressividade."
         )
 
+        debates_ativos[canal_db.id] = {"tema": tema_db, "fim": agora_utc() + timedelta(minutes=10), "msgs": 0}
         async def _encerrar_debate():
             await asyncio.sleep(600)
+            debates_ativos.pop(canal_db.id, None)
             try:
                 await canal_db.send(f"Debate encerrado: **{tema_db}**. Bom papo, galera.")
             except Exception:
@@ -3222,6 +3347,143 @@ async def processar_ordem(message: discord.Message) -> bool:
             await canal_rel.send(f"```\n{bloco}\n```")
         if canal_rel.id != message.channel.id:
             await message.channel.send(f"Relatório {tipo_txt} postado em {canal_rel.mention}.")
+
+    # ── gerar PDF ─────────────────────────────────────────────────────────────
+    # Uso: "Shell gera PDF do relatório [semanal/mensal]"
+    #      "Shell exporta histórico do #canal para PDF"
+    #      "Shell PDF de membros", "Shell PDF das regras", "Shell PDF de citações"
+    elif _addr and re.search(r'\bpdf\b', conteudo.lower()):
+        if not FPDF_DISPONIVEL:
+            await message.channel.send("fpdf2 não está instalado no ambiente. Adicione ao requirements.txt e redeploy.")
+            return True
+        msg_l = conteudo.lower()
+        try:
+            nome_arquivo = "relatorio.pdf"
+            if re.search(r'\bhist[oó]rico\b|\bcanal\b|\bmensagens?\b', msg_l):
+                canal_exp = message.channel_mentions[0] if message.channel_mentions else message.channel
+                await message.channel.send(f"Exportando histórico de {canal_exp.mention}, aguarde…")
+                pdf_bytes = await gerar_pdf_historico_canal(canal_exp, limite=150)
+                nome_arquivo = f"historico-{canal_exp.name}.pdf"
+            elif re.search(r'\bmembro[s]?\b|\blista\b', msg_l):
+                pdf_bytes = gerar_pdf_membros(guild)
+                nome_arquivo = "membros.pdf"
+            elif re.search(r'\bregra[s]?\b', msg_l):
+                pdf_bytes = gerar_pdf_regras()
+                nome_arquivo = "regras.pdf"
+            elif re.search(r'\bcita[cç][aã]o|citacoes\b', msg_l):
+                pdf_bytes = gerar_pdf_citacoes()
+                nome_arquivo = "citacoes.pdf"
+            else:
+                dias_pdf = 30 if 'mensal' in msg_l or 'mes' in msg_l else 7
+                await message.channel.send("Gerando PDF do relatório, aguarde…")
+                pdf_bytes = await gerar_pdf_relatorio_servidor(guild, dias_pdf)
+                nome_arquivo = f"relatorio-{'mensal' if dias_pdf >= 28 else 'semanal'}.pdf"
+            arquivo = discord.File(io.BytesIO(pdf_bytes), filename=nome_arquivo)
+            await message.channel.send(f"PDF gerado:", file=arquivo)
+            log.info(f"[PDF] {autor} gerou {nome_arquivo}")
+        except Exception as e:
+            await message.channel.send(f"Erro ao gerar PDF: {e}")
+
+    # ── traduzir mensagem ─────────────────────────────────────────────────────
+    # Uso: "Shell traduz isso para inglês" (reply na mensagem), "Shell traduz: texto"
+    elif _addr and re.search(r'\btraduz[ir]?\b|\btranslat[e]?\b', conteudo.lower()):
+        m_idioma = re.search(r'\bpara\s+(\w+)', conteudo.lower())
+        idioma = m_idioma.group(1) if m_idioma else "ingles"
+        # Texto a traduzir: reply ou extrai da própria mensagem
+        if message.reference and isinstance(getattr(message.reference, "resolved", None), discord.Message):
+            texto_trad = message.reference.resolved.content
+        else:
+            texto_trad = re.sub(r'(?i).*?\btraduz[ir]?\s*(?:isso\s*)?(?:para\s+\w+\s*)?:?\s*', '', conteudo).strip()
+        if not texto_trad:
+            await message.channel.send("Responde à mensagem que quer traduzir, ou escreve: Shell traduz: texto")
+            return True
+        resultado = await traduzir_texto(texto_trad, idioma)
+        await message.channel.send(f"**Tradução ({idioma}):** {resultado}")
+
+    # ── ticket de suporte ─────────────────────────────────────────────────────
+    # Uso: "Shell cria ticket para @membro motivo aqui"
+    elif _addr and re.search(r'\bticket\b', conteudo.lower()):
+        if not alvos:
+            await message.channel.send("Menciona o membro para quem abrir o ticket.")
+            return True
+        alvo_ticket = alvos[0]
+        motivo_ticket = re.sub(r'(?i).*?\bticket\b\s*(?:para\s+\S+\s*)?', '', conteudo).strip() or "sem motivo"
+        canal_ticket = await criar_ticket_canal(guild, alvo_ticket, motivo_ticket, autor)
+        if canal_ticket:
+            await message.channel.send(f"Ticket criado: {canal_ticket.mention}")
+        else:
+            await message.channel.send("Não foi possível criar o ticket.")
+
+    # ── enviar DM a membro ────────────────────────────────────────────────────
+    # Uso: "Shell manda DM para @membro: mensagem"
+    elif _addr and re.search(r'\bdm\b|\bmanda\s+(?:mensagem|msg)\b', conteudo.lower()) and alvos:
+        alvo_dm = alvos[0]
+        m_dm = re.search(r'(?:dm|mensagem|msg)\s+(?:para\s+\S+\s*)?:?\s*(.+)$', conteudo, re.IGNORECASE)
+        texto_dm = m_dm.group(1).strip() if m_dm else ""
+        texto_dm = re.sub(r'<@!?\d+>', '', texto_dm).strip()
+        if not texto_dm:
+            await message.channel.send("Qual a mensagem a enviar? Formato: Shell manda DM para @membro: texto")
+            return True
+        try:
+            await alvo_dm.send(f"Mensagem de {autor} (via bot): {texto_dm}")
+            await message.channel.send(f"DM enviada para {alvo_dm.mention}.")
+            log.info(f"[DM] {autor} → {alvo_dm.display_name}: {texto_dm[:60]}")
+        except Exception as e:
+            await message.channel.send(f"Não foi possível enviar DM para {alvo_dm.display_name}: {e}")
+
+    # ── guardar citação ───────────────────────────────────────────────────────
+    # Uso: responder à mensagem + "Shell guarda isso" / "Shell salva essa frase"
+    elif _addr and re.search(r'\b(guarda|salva|cita[cç][aã]o|registra)\b.{0,20}\b(isso|essa|frase|mensagem)\b', conteudo.lower()):
+        msg_cit = None
+        if message.reference and isinstance(getattr(message.reference, "resolved", None), discord.Message):
+            msg_cit = message.reference.resolved
+        if not msg_cit:
+            await message.channel.send("Responde à mensagem que quer guardar como citação.")
+            return True
+        brasilia = timezone(timedelta(hours=-3))
+        citacoes.append({
+            "texto": msg_cit.content[:300],
+            "autor": msg_cit.author.display_name,
+            "canal": message.channel.name,
+            "ts": msg_cit.created_at.astimezone(brasilia).strftime('%d/%m/%Y %H:%M'),
+        })
+        salvar_dados()
+        await message.channel.send(f"Citação de {msg_cit.author.display_name} guardada. Total: {len(citacoes)}.")
+
+    # ── citação aleatória ─────────────────────────────────────────────────────
+    elif _addr and re.search(r'\bcita[cç][aã]o\s+aleat[oó]ria\b|\bcita[cç][aã]o\b', conteudo.lower()):
+        if not citacoes:
+            await message.channel.send("Nenhuma citação guardada ainda. Responde a uma mensagem e diz: Shell guarda isso")
+            return True
+        cit = random.choice(citacoes)
+        await message.channel.send(f'"{cit["texto"]}" — {cit["autor"]}, {cit.get("ts","?")}')
+
+    # ── ranking de atividade ──────────────────────────────────────────────────
+    elif _addr and re.search(r'\branking\b|\batividade\b|\bmais\s+ativo[s]?\b', conteudo.lower()):
+        if not atividade_mensagens:
+            await message.channel.send("Ainda não há dados de atividade desta sessão.")
+            return True
+        top = sorted(atividade_mensagens.items(), key=lambda x: x[1], reverse=True)[:10]
+        linhas = []
+        for i, (uid, cnt) in enumerate(top, 1):
+            membro_r = guild.get_member(uid)
+            nome_r = membro_r.display_name if membro_r else nomes_historico.get(uid, f"ID {uid}")
+            linhas.append(f"{i}. {nome_r} — {cnt} mensagem{'s' if cnt != 1 else ''}")
+        await message.channel.send("**Ranking de atividade (sessão atual):**\n" + "\n".join(linhas))
+
+    # ── monitorar / parar de monitorar canal ──────────────────────────────────
+    elif _addr and re.search(r'\bmonitor[a]?\b|\bfique\s+atento\b', conteudo.lower()):
+        canal_mon = message.channel_mentions[0] if message.channel_mentions else message.channel
+        canais_monitorados.add(canal_mon.id)
+        salvar_dados()
+        await message.channel.send(f"Vou participar ativamente das conversas em {canal_mon.mention}.")
+        log.info(f"[MONITOR] {autor} ativou monitoramento em #{canal_mon.name}")
+
+    elif _addr and re.search(r'\bpara\s+de\s+monitor[a]?r?\b|\bdesmonitor[a]?r?\b|\bpare\s+de\s+participar\b', conteudo.lower()):
+        canal_mon = message.channel_mentions[0] if message.channel_mentions else message.channel
+        canais_monitorados.discard(canal_mon.id)
+        salvar_dados()
+        await message.channel.send(f"Parei de monitorar {canal_mon.mention}.")
 
     else:
         return False
@@ -3440,7 +3702,11 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
         "enquete(tema,opcoes=[]), sorteio(quantidade,cargo=null), "
         "lembrete(texto,segundos,canal=null), aviso(texto,canal=null), "
         "criar_canal(nome,tipo=texto|voz), criar_cargo(nome), "
-        "debate(tema,canal=null), limpar(quantidade,canal=null). "
+        "debate(tema,canal=null), limpar(quantidade,canal=null), "
+        "gerar_pdf(tipo=relatorio|historico|membros|regras|citacoes,canal=null,dias=7), "
+        "traduzir(texto,idioma=ingles), ticket(usuario,motivo=null), "
+        "dm(usuario,texto), citacao_aleatoria(), ranking(), "
+        "monitorar(canal=null), parar_monitorar(canal=null). "
         "Se for pergunta ou conversa, retorne {\"acao\":\"conversa\"}. "
         f"Membros do servidor: {membros_txt}."
     )
@@ -3590,8 +3856,10 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
             f"**Debate aberto: {tema}**\n"
             "Galera, a discussão tá rolando por 10 minutos. Respeito nos argumentos."
         )
+        debates_ativos[dest.id] = {"tema": tema, "fim": agora_utc() + timedelta(minutes=10), "msgs": 0}
         async def _encerrar_debate_ia():
             await asyncio.sleep(600)
+            debates_ativos.pop(dest.id, None)
             try: await dest.send(f"Debate encerrado: **{tema}**. Bom papo, galera.")
             except Exception: pass
         asyncio.ensure_future(_encerrar_debate_ia())
@@ -3636,8 +3904,222 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
         log.info(f"[IA] sorteio {qtd}x — {autor}")
         return True
 
+    if acao == "gerar_pdf":
+        if not FPDF_DISPONIVEL:
+            await canal.send("fpdf2 não instalado — PDF indisponível.")
+            return True
+        tipo_pdf = params.get("tipo", "relatorio")
+        try:
+            if tipo_pdf == "historico":
+                canal_nome = params.get("canal")
+                dest_pdf = discord.utils.get(guild.text_channels, name=canal_nome) if canal_nome else canal
+                pdf_bytes = await gerar_pdf_historico_canal(dest_pdf, 150)
+                nome_arq = f"historico-{dest_pdf.name}.pdf"
+            elif tipo_pdf == "membros":
+                pdf_bytes = gerar_pdf_membros(guild)
+                nome_arq = "membros.pdf"
+            elif tipo_pdf == "regras":
+                pdf_bytes = gerar_pdf_regras()
+                nome_arq = "regras.pdf"
+            elif tipo_pdf == "citacoes":
+                pdf_bytes = gerar_pdf_citacoes()
+                nome_arq = "citacoes.pdf"
+            else:
+                dias_pdf = int(params.get("dias", 7))
+                pdf_bytes = await gerar_pdf_relatorio_servidor(guild, dias_pdf)
+                nome_arq = "relatorio.pdf"
+            await canal.send("PDF gerado:", file=discord.File(io.BytesIO(pdf_bytes), filename=nome_arq))
+            log.info(f"[IA] gerar_pdf {tipo_pdf} — {autor}")
+        except Exception as e:
+            await canal.send(f"Erro ao gerar PDF: {e}")
+        return True
+
+    if acao == "traduzir":
+        texto_t = params.get("texto", "")
+        if not texto_t:
+            return False
+        idioma_t = params.get("idioma", "ingles")
+        resultado_t = await traduzir_texto(texto_t, idioma_t)
+        await canal.send(f"**Tradução ({idioma_t}):** {resultado_t}")
+        return True
+
+    if acao == "ticket":
+        alvo_t = _resolver_membro(params.get("usuario", ""))
+        if not alvo_t:
+            await canal.send(f"Não encontrei '{params.get('usuario')}' para criar ticket.")
+            return True
+        motivo_t = params.get("motivo") or "sem motivo"
+        canal_t = await criar_ticket_canal(guild, alvo_t, motivo_t, autor)
+        if canal_t:
+            await canal.send(f"Ticket criado: {canal_t.mention}")
+        else:
+            await canal.send("Não foi possível criar o ticket.")
+        return True
+
+    if acao == "dm":
+        alvo_dm = _resolver_membro(params.get("usuario", ""))
+        texto_dm = params.get("texto", "")
+        if not alvo_dm or not texto_dm:
+            return False
+        try:
+            await alvo_dm.send(f"Mensagem de {autor} (via bot): {texto_dm}")
+            await canal.send(f"DM enviada para {alvo_dm.mention}.")
+        except Exception as e:
+            await canal.send(f"Não consegui enviar DM: {e}")
+        return True
+
+    if acao == "citacao_aleatoria":
+        if not citacoes:
+            await canal.send("Nenhuma citação guardada ainda.")
+        else:
+            cit = random.choice(citacoes)
+            await canal.send(f'"{cit["texto"]}" — {cit["autor"]}, {cit.get("ts","?")}')
+        return True
+
+    if acao == "ranking":
+        if not atividade_mensagens:
+            await canal.send("Sem dados de atividade nesta sessão.")
+            return True
+        top = sorted(atividade_mensagens.items(), key=lambda x: x[1], reverse=True)[:10]
+        linhas_r = []
+        for i, (uid, cnt) in enumerate(top, 1):
+            mb = guild.get_member(uid)
+            nome_mb = mb.display_name if mb else f"ID {uid}"
+            linhas_r.append(f"{i}. {nome_mb} — {cnt} msg{'s' if cnt != 1 else ''}")
+        await canal.send("**Ranking de atividade:**\n" + "\n".join(linhas_r))
+        return True
+
+    if acao == "monitorar":
+        canal_nome = params.get("canal")
+        dest_mon = discord.utils.get(guild.text_channels, name=canal_nome) if canal_nome else canal
+        canais_monitorados.add(dest_mon.id)
+        salvar_dados()
+        await canal.send(f"Vou participar ativamente das conversas em {dest_mon.mention}.")
+        return True
+
+    if acao == "parar_monitorar":
+        canal_nome = params.get("canal")
+        dest_mon = discord.utils.get(guild.text_channels, name=canal_nome) if canal_nome else canal
+        canais_monitorados.discard(dest_mon.id)
+        salvar_dados()
+        await canal.send(f"Parei de monitorar {dest_mon.mention}.")
+        return True
+
     log.debug(f"[IA_EXEC] ação '{acao}' não reconhecida — passando adiante")
     return False
+
+
+# ── Participação ativa: debate e monitoramento de canal ───────────────────────
+
+async def _participar_debate(message: discord.Message, tema: str):
+    """Responde a uma mensagem dentro de um debate ativo no canal."""
+    if not GROQ_DISPONIVEL or not GROQ_API_KEY:
+        return
+    system = (
+        f"Voce e um assistente direto de um servidor Discord brasileiro. "
+        f"Esta participando de um debate sobre '{tema}'. "
+        f"Comente a mensagem de forma curta (1-2 frases), direta e casual, como um membro ativo. "
+        f"Sem emojis, sem asteriscos, sem markdown. Seja opinativo e instigue reflexao."
+    )
+    try:
+        resp = await _groq_client().chat.completions.create(
+            model="llama-3.1-8b-instant",
+            max_tokens=80,
+            temperature=0.85,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": f"{message.author.display_name}: {message.content[:300]}"},
+            ],
+        )
+        _registrar_tokens("8b", resp.usage.total_tokens if resp.usage else 150)
+        texto = resp.choices[0].message.content.strip()
+        if texto:
+            await message.channel.send(texto)
+            log.info(f"[DEBATE] participou em #{message.channel.name}")
+    except Exception as e:
+        log.debug(f"[DEBATE] _participar_debate falhou: {e}")
+
+
+async def _interjetar_conversa(message: discord.Message):
+    """Interjeta ocasionalmente em canal monitorado quando a conversa é relevante."""
+    if not GROQ_DISPONIVEL or not GROQ_API_KEY:
+        return
+    system = (
+        "Voce e um assistente casual de servidor Discord brasileiro. "
+        "Leia a mensagem e, SE for sobre tecnologia, programacao, jogos, cultura ou topico relevante, "
+        "faca UM comentario curtissimo (1 frase). "
+        "Se nao tiver nada util a acrescentar, responda exatamente: PASS"
+    )
+    try:
+        resp = await _groq_client().chat.completions.create(
+            model="llama-3.1-8b-instant",
+            max_tokens=60,
+            temperature=0.75,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": f"{message.author.display_name}: {message.content[:200]}"},
+            ],
+        )
+        _registrar_tokens("8b", resp.usage.total_tokens if resp.usage else 100)
+        texto = resp.choices[0].message.content.strip()
+        if texto and texto.upper() != "PASS" and len(texto) > 5:
+            await message.channel.send(texto)
+            log.info(f"[MONITOR] interjeccao em #{message.channel.name}")
+    except Exception as e:
+        log.debug(f"[MONITOR] _interjetar falhou: {e}")
+
+
+async def traduzir_texto(texto: str, idioma: str = "ingles") -> str:
+    """Traduz texto via Groq 8b-instant."""
+    if not GROQ_DISPONIVEL or not GROQ_API_KEY:
+        return "Tradução indisponível no momento."
+    try:
+        resp = await _groq_client().chat.completions.create(
+            model="llama-3.1-8b-instant",
+            max_tokens=250,
+            temperature=0,
+            messages=[
+                {"role": "system", "content": f"Traduza para {idioma}. Responda APENAS com a traducao, sem explicacoes."},
+                {"role": "user", "content": texto},
+            ],
+        )
+        _registrar_tokens("8b", resp.usage.total_tokens if resp.usage else 180)
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Erro na tradução: {e}"
+
+
+async def criar_ticket_canal(guild: discord.Guild, membro: discord.Member, motivo: str, autor: str) -> discord.TextChannel | None:
+    """Cria canal privado de ticket para o membro + equipe de mod."""
+    nome_canal = f"ticket-{membro.name.lower()[:16]}"
+    # Verifica se já existe
+    existente = discord.utils.get(guild.text_channels, name=nome_canal)
+    if existente:
+        return existente
+    # Permissões: apenas o membro e quem tem permissão de gerenciar mensagens
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        membro: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+    }
+    for role in guild.roles:
+        if role.permissions.manage_messages:
+            overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+    try:
+        canal = await guild.create_text_channel(
+            nome_canal, overwrites=overwrites,
+            reason=f"Ticket aberto por {autor} para {membro.display_name}"
+        )
+        await canal.send(
+            f"Ticket aberto para {membro.mention}.\n"
+            f"Motivo: {motivo or 'não especificado'}\n"
+            f"Aberto por: {autor}\n"
+            f"Equipe de moderação será notificada em breve."
+        )
+        return canal
+    except Exception as e:
+        log.error(f"[TICKET] falhou: {e}")
+        return None
 
 
 ESCALA_SILENCIO = [
@@ -3925,6 +4407,26 @@ async def _on_message_impl(message: discord.Message):
             "autor": message.author.display_name,
             "conteudo": message.content[:300],
         })
+
+    # ── Rastrear atividade + participação ativa (debate / monitoramento) ──────
+    if not message.author.bot and message.content.strip():
+        atividade_mensagens[message.author.id] += 1
+        _canal_id = message.channel.id
+        _agora = agora_utc()
+        _debate = debates_ativos.get(_canal_id)
+        if _debate and _agora < _debate["fim"]:
+            _debate["msgs"] = _debate.get("msgs", 0) + 1
+            _ultima = ultima_interjeccao.get(_canal_id, datetime(1970, 1, 1, tzinfo=timezone.utc))
+            # Responde após ≥2 msgs no debate, cooldown de 90s entre respostas
+            if _debate["msgs"] >= 2 and (_agora - _ultima).total_seconds() > 90:
+                ultima_interjeccao[_canal_id] = _agora
+                asyncio.ensure_future(_participar_debate(message, _debate["tema"]))
+        elif _canal_id in canais_monitorados:
+            _ultima = ultima_interjeccao.get(_canal_id, datetime(1970, 1, 1, tzinfo=timezone.utc))
+            # Interjeta com 15% de chance, cooldown de 3min
+            if (_agora - _ultima).total_seconds() > 180 and random.random() < 0.15:
+                ultima_interjeccao[_canal_id] = _agora
+                asyncio.ensure_future(_interjetar_conversa(message))
 
     autor = message.author.display_name
     user_id = message.author.id
