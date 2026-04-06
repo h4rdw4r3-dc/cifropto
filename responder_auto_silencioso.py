@@ -4821,6 +4821,31 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
     return False
 
 
+# ── Simulação de digitação humana ────────────────────────────────────────────
+
+async def _digitar_e_enviar(
+    channel: discord.TextChannel,
+    texto: str,
+    reply_msg: discord.Message | None = None,
+) -> None:
+    """
+    Exibe o indicador 'digitando...' por um tempo proporcional ao texto
+    antes de enviar, simulando comportamento humano real.
+    """
+    palavras = max(len(texto.split()), 1)
+    # ~170 palavras/min digitação casual; adiciona leve variação aleatória
+    delay = min(0.6 + palavras * 0.22 + random.uniform(-0.15, 0.35), 6.0)
+    delay = max(delay, 0.5)
+
+    async with channel.typing():
+        await asyncio.sleep(delay)
+
+    if reply_msg is not None:
+        await reply_msg.reply(texto)
+    else:
+        await channel.send(texto)
+
+
 # ── Participação ativa: debate e monitoramento de canal ───────────────────────
 
 async def _participar_debate(message: discord.Message, tema: str):
@@ -4846,7 +4871,7 @@ async def _participar_debate(message: discord.Message, tema: str):
         _registrar_tokens("8b", resp.usage.total_tokens if resp.usage else 150)
         texto = resp.choices[0].message.content.strip()
         if texto:
-            await message.channel.send(texto)
+            await _digitar_e_enviar(message.channel, texto)
             log.info(f"[DEBATE] participou em #{message.channel.name}")
     except Exception as e:
         log.debug(f"[DEBATE] _participar_debate falhou: {e}")
@@ -4875,7 +4900,7 @@ async def _interjetar_conversa(message: discord.Message):
         _registrar_tokens("8b", resp.usage.total_tokens if resp.usage else 100)
         texto = resp.choices[0].message.content.strip()
         if texto and texto.upper() != "PASS" and len(texto) > 5:
-            await message.channel.send(texto)
+            await _digitar_e_enviar(message.channel, texto)
             log.info(f"[MONITOR] interjeccao em #{message.channel.name}")
     except Exception as e:
         log.debug(f"[MONITOR] _interjetar falhou: {e}")
@@ -5461,16 +5486,16 @@ async def _on_message_impl(message: discord.Message):
             if estado_conv and (estado_conv.get("canal") is None or estado_conv["canal"] == message.channel.id):
                 resp_conv = await continuar_conversa(user_id, conteudo, autor, message.guild)
                 if resp_conv:
-                    await message.reply(resp_conv)
+                    await _digitar_e_enviar(message.channel, resp_conv, message)
                     return
             log.info(f"[DONO] chamando resposta_inicial_superior para {autor}")
             resposta = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
             log.info(f"[DONO] resposta obtida ({len(resposta)} chars): {resposta[:60]!r}")
             if resposta:
-                await message.reply(resposta)
+                await _digitar_e_enviar(message.channel, resposta, message)
             else:
                 log.warning(f"[DONO] resposta vazia  -  enviando fallback")
-                await message.reply("Entendido.")
+                await _digitar_e_enviar(message.channel, "Entendido.", message)
         elif not tratado:
             await processar_links(message)
         return
@@ -5499,10 +5524,10 @@ async def _on_message_impl(message: discord.Message):
             if estado_conv and (estado_conv.get("canal") is None or estado_conv["canal"] == message.channel.id):
                 resp_conv = await continuar_conversa(user_id, conteudo, autor, message.guild)
                 if resp_conv:
-                    await message.reply(resp_conv)
+                    await _digitar_e_enviar(message.channel, resp_conv, message)
                     return
             resposta = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
-            await message.reply(resposta)
+            await _digitar_e_enviar(message.channel, resposta, message)
         elif not tratado:
             await processar_links(message)
         return
@@ -5512,7 +5537,7 @@ async def _on_message_impl(message: discord.Message):
         tratado = await processar_ordem_mod(message)
         if not tratado and mencionado:
             resposta = await resposta_inicial(conteudo, autor, user_id, message.guild, message.author, message.channel.id)
-            await message.reply(resposta)
+            await _digitar_e_enviar(message.channel, resposta, message)
         return  # mods nunca são punidos
 
     # ── Detectar flood (membros comuns) ───────────────────────────────────────
@@ -5606,14 +5631,14 @@ async def _on_message_impl(message: discord.Message):
         alvos_info = [m for m in message.mentions if m != client.user]
         if alvos_info and any(p in conteudo.lower() for p in ["info", "informação", "quem é", "tempo no", "quando entrou", "idade", "silenciado", "timeout", "punição", "punicao"]):
             texto = await api_info_membro_completa(message.guild, alvos_info[0])
-            await message.reply(texto)
+            await _digitar_e_enviar(message.channel, texto, message)
             return
 
     # ── Queries factuais do servidor (cargos, membros por cargo, etc.) ────────
     if mencionado and message.guild:
         resp_direta = await query_servidor_direto(message.guild, message.content)
         if resp_direta:
-            await message.reply(resp_direta)
+            await _digitar_e_enviar(message.channel, resp_direta, message)
             return
 
     # ── Continuar conversa em andamento (mesmo canal e sem @menção nova) ────────
@@ -5624,7 +5649,7 @@ async def _on_message_impl(message: discord.Message):
             resposta = await continuar_conversa(user_id, conteudo, autor, message.guild)
             if resposta:
                 log.info(f"Conversa: {autor}: {conteudo}")
-                await message.reply(resposta)
+                await _digitar_e_enviar(message.channel, resposta, message)
                 return
         else:
             del conversas[user_id]
@@ -5643,7 +5668,7 @@ async def _on_message_impl(message: discord.Message):
                         return
                 resposta = await responder_com_groq(conteudo, autor, user_id, message.guild, message.channel.id)
                 log.info(f"Claude cont: {autor}: {conteudo}")
-                await message.reply(resposta)
+                await _digitar_e_enviar(message.channel, resposta, message)
                 return
             else:
                 # Conversa expirou  -  limpa histórico do canal para evitar drift
@@ -5669,7 +5694,7 @@ async def _on_message_impl(message: discord.Message):
 
         resposta = await resposta_inicial(conteudo, autor, user_id, message.guild, message.author, message.channel.id)
         log.info(f"Menção de {autor}: {conteudo[:80]}")
-        await message.reply(resposta)
+        await _digitar_e_enviar(message.channel, resposta, message)
         log.info(f"Respondido: {autor}")
 
 
