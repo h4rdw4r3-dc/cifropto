@@ -2512,7 +2512,9 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> st
         "5. Tópicos sensíveis: decline em UMA frase seca. Sem explicação longa, sem listar alternativas.\n\n"
 
         "Nunca explique suas limitações em parágrafos. Nunca reflita sobre sua natureza de bot.\n"
-        "Nunca aja de forma infantil, exagerada ou servil. Sem exclamações forçadas, sem bajulação.\n\n"
+        "Nunca aja de forma infantil, exagerada ou servil. Sem exclamações forçadas, sem bajulação.\n"
+        "NUNCA encerre conversas com frases de assistente genérico: parece que a conversa terminou, não hesite em perguntar, estou aqui para ajudar, fico à disposição. Se não tem mais o que dizer: cale.\n"
+        "Se alguém pedir banir/silenciar/expulsar alguém pelo NOME (sem @), resolva pelo nome — não peça ID, não redirecione.\n\n"
     )
     ctx_srv = _contexto_servidor_comprimido(None, mencoes_nomes)
     if ctx_srv:
@@ -3056,8 +3058,11 @@ ID_PATTERN = re.compile(r'\b(\d{17,20})\b')
 
 
 async def resolver_alvos(message: discord.Message) -> list[discord.Member]:
-    """Resolve alvos a partir de @menções e IDs brutos no texto."""
-    alvos = list(message.mentions)
+    """
+    Resolve alvos a partir de @menções, IDs brutos e nomes em texto livre.
+    Ex: 'bane o Fulano por spam' resolve 'Fulano' como membro do servidor.
+    """
+    alvos = [m for m in message.mentions if m != client.user]
     ids_ja = {m.id for m in alvos}
 
     for match in ID_PATTERN.finditer(message.content):
@@ -3070,6 +3075,23 @@ async def resolver_alvos(message: discord.Message) -> list[discord.Member]:
             ids_ja.add(uid)
         except Exception:
             pass  # ID não pertence ao servidor
+
+    # Se ainda sem alvos, tenta resolver por nome em texto livre
+    if not alvos and message.guild:
+        texto_limpo = re.sub(r'<@!?\d+>', '', message.content)
+        texto_limpo = re.sub(
+            r'\b(?:silencia[r]?|muta[r]?|bani[r]?|expulsa[r]?|kick|ban|mute|'
+            r'avisa[r]?|pune[r]?|puni[r]?|o|a|os|as|ao|do|da|por|pra|de|que|'
+            r'shell|engenheiro|bot|motivo|raz[aã]o)\b',
+            ' ', texto_limpo, flags=re.IGNORECASE
+        ).strip()
+        candidatos = [w.strip('.,!?;:\"\'') for w in texto_limpo.split() if len(w.strip('.,!?;:\"\'')) >= 3]
+        for cand in candidatos:
+            mb = _buscar_membro_por_nome(message.guild, cand)
+            if mb and mb.id not in ids_ja and mb != client.user:
+                alvos.append(mb)
+                ids_ja.add(mb.id)
+                break  # só o primeiro para evitar falsos positivos
 
     return alvos
 
@@ -5208,9 +5230,19 @@ _RESPOSTAS_GENERICAS = re.compile(
     re.IGNORECASE,
 )
 
+# Padrões servis/assistente-genérico que o bot nunca deve usar
+_PADROES_SERVIS = re.compile(
+    r"(?:parece que a conversa terminou|não hesite em|estou aqui para ajudar"
+    r"|posso ajudar com mais alguma|se precisar de mais|fico à disposição"
+    r"|qualquer dúvida|estou disponível|conte comigo|estarei aqui"
+    r"|foi um prazer|até a próxima|se quiser saber mais)",
+    re.IGNORECASE,
+)
+
 def _e_resposta_generica(texto: str) -> bool:
-    """Retorna True se a resposta é um placeholder genérico sem valor real."""
-    return bool(_RESPOSTAS_GENERICAS.match(texto.strip()))
+    """Retorna True se a resposta é um placeholder genérico ou padrão servil."""
+    t = texto.strip()
+    return bool(_RESPOSTAS_GENERICAS.match(t)) or bool(_PADROES_SERVIS.search(t))
 
 
 async def _enviar_em_sequencia(
