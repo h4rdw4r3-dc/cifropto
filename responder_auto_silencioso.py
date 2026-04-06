@@ -878,7 +878,10 @@ def build_server_context(guild: discord.Guild) -> str:
 
     # Cargos
     cargos = [r for r in guild.roles if r.name != "@everyone"]
-    cargos_txt = ", ".join(f"{r.name} ({r.id})" for r in sorted(cargos, key=lambda r: -r.position))
+    cargos_txt = ", ".join(
+        f"{r.name} ({r.id}, {len(r.members)} membro{'s' if len(r.members) != 1 else ''})"
+        for r in sorted(cargos, key=lambda r: -r.position)
+    )
     linhas.append(f"Cargos: {cargos_txt}")
 
     # Contagem de membros
@@ -913,7 +916,7 @@ def system_com_contexto() -> str:
         "Personalidade: adulto, direto, inteligente, sarcástico quando necessário, nunca grosseiro sem motivo.\n"
         "Fala como brasileiro jovem e culto — gírias naturais, sem forçar.\n"
         "Sem emojis, sem listas, sem markdown, sem asteriscos.\n"
-        "Tamanho da resposta proporcional: pergunta simples = resposta curta; tema complexo = resposta completa.\n\n"
+        "Tamanho da resposta: máximo 3-4 frases. Discord não é aula nem wikipedia. Seja denso, não extenso.\n\n"
 
         "SOBRE O QUE PODE FALAR:\n"
         "Qualquer assunto legítimo — tecnologia, ciência, política, cultura, filosofia, jogos, "
@@ -929,15 +932,23 @@ def system_com_contexto() -> str:
 
         "REGRAS:\n"
         "1. Conhecimento geral (fatos, ciência, história, math): responda direto e com confiança.\n"
-        "2. Dados do servidor: use só o contexto abaixo. Se não estiver lá: 'Não tenho esse dado.'\n"
+        "2. Dados do servidor (membros, cargos, canais, datas): use só o contexto abaixo.\n"
+        "   Se a pergunta for sobre dado específico do servidor e não estiver no contexto: 'Não tenho esse dado.'\n"
+        "   ATENÇÃO: 'Não tenho esse dado' é EXCLUSIVO para perguntas sobre o servidor. Nunca usar para tópicos gerais.\n"
         "3. Nomes de membros são PESSOAS. 'Hardware' é um usuário, não hardware de computador.\n"
-        "4. Quando não souber: UMA frase curta — sem explicar por que, sem parágrafos de justificativa.\n\n"
+        "4. Quando não souber: UMA frase curta — sem explicar por que, sem parágrafos de justificativa.\n"
+        "5. Tópicos sensíveis (conteúdo adulto, ilegal): decline em UMA frase seca, sem explicação longa.\n\n"
 
         "Nunca explique suas limitações em parágrafos. Nunca reflita sobre sua natureza de bot.\n"
         "Nunca aja de forma infantil, exagerada ou servil. Sem exclamações forçadas, sem bajulação.\n\n"
     )
     if _contexto_servidor:
-        base += f"=== CONTEXTO DO SERVIDOR (fonte única de verdade sobre o servidor) ===\n{_contexto_servidor}\n\n"
+        base += (
+            "=== CONTEXTO DO SERVIDOR ===\n"
+            "Abaixo estão os dados REAIS e ATUAIS do servidor. Use-os para responder perguntas sobre o servidor.\n"
+            "NUNCA diga que não tem informações do servidor quando elas estão listadas aqui.\n\n"
+        )
+        base += _contexto_servidor + "\n\n"
         base += f"=== REGRAS DO SERVIDOR ===\n{REGRAS}\n"
     return base
 
@@ -1006,7 +1017,7 @@ async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=No
     try:
         resp = await _groq_client().chat.completions.create(
             model="llama-3.3-70b-versatile",
-            max_tokens=400,
+            max_tokens=200,
             temperature=0.5,   # menos aleatoriedade = menos alucinação
             top_p=0.9,
             messages=mensagens,
