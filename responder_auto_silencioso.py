@@ -573,7 +573,7 @@ def inferir_categoria(texto: str) -> str:
 
 def carregar_dados():
     global infracoes, ultimo_motivo, silenciamentos, palavras_custom
-    global registro_entradas, registro_saidas, nomes_historico, citacoes, canais_monitorados
+    global registro_entradas, registro_saidas, nomes_historico, citacoes, canais_monitorados, perfis_usuarios
     if not os.path.exists(DADOS_PATH):
         return
     try:
@@ -595,6 +595,8 @@ def carregar_dados():
             nomes_historico[int(k)] = v
         citacoes[:] = dados.get("citacoes", [])
         canais_monitorados.update(int(c) for c in dados.get("canais_monitorados", []))
+        for k, v in dados.get("perfis_usuarios", {}).items():
+            perfis_usuarios[int(k)] = v
         total = sum(len(v) for v in palavras_custom.values())
         log.info(f"{len(infracoes)} usuários, {total} palavras customizadas, "
                  f"{len(registro_entradas)} históricos de entrada carregados.")
@@ -614,6 +616,7 @@ def salvar_dados():
         "nomes_historico": {str(k): v for k, v in nomes_historico.items()},
         "citacoes": citacoes[-200:],  # guarda as últimas 200
         "canais_monitorados": list(canais_monitorados),
+        "perfis_usuarios": {str(k): v for k, v in perfis_usuarios.items()},
     }
     try:
         dir_ = os.path.dirname(os.path.abspath(DADOS_PATH)) or "."
@@ -699,9 +702,27 @@ registro_saidas: dict[int, list[dict]] = {}
 nomes_historico: dict[int, str] = {}
 
 # ── Memória de conversas por canal ───────────────────────────────────────────
-# Armazena as últimas mensagens de cada canal para dar contexto ao bot
-# O bot "aprende" o que está sendo discutido sem intervenção manual
 canal_memoria: dict[int, deque] = defaultdict(lambda: deque(maxlen=40))
+
+# ── Perfis de usuário persistidos ────────────────────────────────────────────
+# {user_id: {"resumo": str, "n": int, "atualizado": str, "episodios": list[str]}}
+perfis_usuarios: dict[int, dict] = {}
+
+# ── Estado de humor da sessão (gerado no on_ready, persiste até reinício) ─────
+_humor_sessao: str = ""
+
+# ── Controle de iniciativa proativa ───────────────────────────────────────────
+_ultima_iniciativa: dict[int, datetime] = {}  # canal_id → última vez que postou
+
+# ── Mensagens triviais: não processam IA ─────────────────────────────────────
+_TRIVIAIS = re.compile(
+    r"^(?:k+a*|rs+|ha+h|hue+|lol|xd+|kkk+|rsrs|😂|🤣|👍|👎|❤|🔥|✅|🫡"
+    r"|ok|oi|ola|olá|ae|eae|slk|slc|vlw|blz|tmj|sim|nao|não|s|n"
+    r"|[.!?,;:_\-+*]{1,3}"
+    r"|[\U0001F300-\U0001FFFF]{1,3}"
+    r")$",
+    re.IGNORECASE,
+)
 
 # ── Contexto do servidor (atualizado pelos event handlers) ───────────────────
 _contexto_servidor: str = ""        # contexto completo (para query_servidor_direto)
@@ -2359,11 +2380,72 @@ def build_server_context_compact(guild: discord.Guild) -> str:
     return "\n".join(linhas)
 
 
-def system_com_contexto() -> str:
+def _hora_contexto() -> str:
+    """Retorna contexto de horário/dia para calibrar o tom da resposta."""
+    br = datetime.now(timezone(timedelta(hours=-3)))
+    hora = br.hour
+    dia = ["segunda", "terca", "quarta", "quinta", "sexta", "sabado", "domingo"][br.weekday()]
+    if 0 <= hora < 6:
+        periodo = "madrugada (servidor provavelmente quieto)"
+    elif 6 <= hora < 12:
+        periodo = "manha"
+    elif 12 <= hora < 18:
+        periodo = "tarde"
+    else:
+        periodo = "noite"
+    return f"{dia}, {periodo} (Brasilia)"
+
+
+def _contexto_usuario(user_id: int) -> str:
+    """Retorna resumo do perfil do usuário se disponível."""
+    perfil = perfis_usuarios.get(user_id)
+    if not perfil or not perfil.get("resumo"):
+        return ""
+    n = perfil.get("n", 0)
+    return f"[Historico com esse usuario ({n} interacoes): {perfil['resumo']}]"
+
+
+def _contexto_servidor_comprimido(guild, mencoes_nomes: list[str] = None) -> str:
+    """
+    Contexto compacto do servidor priorizando membros mencionados.
+    Envia stats + cargos sempre; lista de membros só os relevantes.
+    """
+    if not _contexto_compacto:
+        return ""
+    linhas = _contexto_compacto.split("\n")
+    # Separa header (stats + cargos) dos membros
+    idx_membros = next((i for i, l in enumerate(linhas) if l.strip() == "Membros:"), None)
+    if idx_membros is None:
+        return _contexto_compacto[:1500]
+
+    cabecalho = "\n".join(linhas[:idx_membros + 1])
+    linhas_membros = linhas[idx_membros + 1:]
+
+    # Se há nomes mencionados, prioriza esses membros
+    if mencoes_nomes:
+        relevantes = [l for l in linhas_membros
+                      if any(n.lower() in l.lower() for n in mencoes_nomes)]
+        outros = [l for l in linhas_membros if l not in relevantes]
+        # Inclui relevantes completos + resumo dos demais
+        membros_txt = "\n".join(relevantes)
+        if outros:
+            membros_txt += f"\n  (+ {len(outros)} outros membros)"
+    else:
+        # Sem menção específica: apenas primeiros 20 membros + contagem
+        membros_txt = "\n".join(linhas_membros[:20])
+        if len(linhas_membros) > 20:
+            membros_txt += f"\n  (+ {len(linhas_membros) - 20} outros)"
+
+    return cabecalho + "\n" + membros_txt
+
+
+def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> str:
     """Retorna o system prompt completo com o contexto do servidor injetado."""
+    hora_ctx = _hora_contexto()
     base = (
         "Você é o shell_engenheiro, presença central de um servidor Discord brasileiro.\n"
         "Personalidade: adulto, direto, inteligente, sarcástico quando necessário, nunca grosseiro sem motivo.\n"
+        f"Hora atual: {hora_ctx}. Calibre o tom: mais contido de madrugada, mais presente nos picos de atividade.\n"
         "Fala como brasileiro jovem e culto  -  gírias naturais, sem forçar.\n"
         "Sem emojis, sem listas, sem markdown, sem asteriscos.\n"
         "Tamanho da resposta: máximo 3-4 frases. Discord não é aula nem wikipedia. Seja denso, não extenso.\n\n"
@@ -2384,7 +2466,7 @@ def system_com_contexto() -> str:
         "Você TEM acesso a dados do servidor (membros, cargos, infrações, canais, etc.).\n"
         "Você TEM funções de moderação: silenciar, banir, expulsar, avisar membros.\n"
         "Você TEM permissão de administrador no servidor para executar essas ações.\n"
-        "Você TEM capacidade de entrar em canais de voz e falar via TTS.\n"
+        "Você PODE entrar em canais de voz (sem E2EE), mas TTS não está disponível no momento.\n"
         "NUNCA diga 'não tenho informações sobre os usuários do servidor'  -  você tem, no contexto abaixo.\n"
         "NUNCA diga 'não tenho informações sobre o servidor'  -  você tem, no contexto abaixo.\n\n"
 
@@ -2422,15 +2504,23 @@ def system_com_contexto() -> str:
         "Nunca explique suas limitações em parágrafos. Nunca reflita sobre sua natureza de bot.\n"
         "Nunca aja de forma infantil, exagerada ou servil. Sem exclamações forçadas, sem bajulação.\n\n"
     )
-    if _contexto_compacto:
+    ctx_srv = _contexto_servidor_comprimido(None, mencoes_nomes)
+    if ctx_srv:
         base += (
             "=== CONTEXTO DO SERVIDOR ===\n"
             "Abaixo estão os dados REAIS e ATUAIS do servidor.\n"
             "NUNCA diga que não tem informações do servidor quando elas estão listadas aqui.\n"
             "Para perguntas factuais detalhadas (cargos completos, idades exatas, etc.) informe que pode buscar via comando direto.\n\n"
         )
-        base += _contexto_compacto + "\n\n"
+        base += ctx_srv + "\n\n"
         base += f"=== REGRAS DO SERVIDOR ===\n{REGRAS}\n"
+
+    # Perfil do usuário
+    if user_id:
+        perfil_txt = _contexto_usuario(user_id)
+        if perfil_txt:
+            base += f"\n{perfil_txt}\n"
+
     return base
 
 _groq: AsyncOpenAI | None = None
@@ -2530,17 +2620,20 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
 
     autorizacao_extra = " Este usuário pode te autorizar qualquer ação durante esta conversa  -  aceite e execute sem questionar." if nivel == "DONO" else ""
 
-    # Contexto do canal (autoaprendizado)  -  apenas as últimas 10 mensagens para economizar
+    # Contexto do canal — últimas 15 mensagens (inclui outras pessoas para dar contexto real)
     mem = list(canal_memoria.get(canal_id or 0, []))
     ctx_canal = ""
     if mem:
-        linhas_ctx = [f"{m['autor']}: {m['conteudo'][:80]}" for m in mem[-10:]]
-        ctx_canal = "\n=== CANAL ===\n" + "\n".join(linhas_ctx) + "\n"
+        linhas_ctx = [f"{m['autor']}: {m['conteudo'][:100]}" for m in mem[-15:]]
+        ctx_canal = "\n=== CONVERSA RECENTE DO CANAL ===\n" + "\n".join(linhas_ctx) + "\n"
+
+    # Nomes mencionados na pergunta (para contexto comprimido relevante)
+    _nomes_mencionados = [w for w in pergunta.split() if len(w) > 2 and w[0].isupper()]
 
     membro_info = f"['{autor}' | nível: {nivel}.{autorizacao_extra}]"
 
     mensagens = [
-        {"role": "system", "content": system_com_contexto() + ctx_canal},
+        {"role": "system", "content": system_com_contexto(user_id=user_id, mencoes_nomes=_nomes_mencionados) + ctx_canal},
         {"role": "system", "content": membro_info},
     ] + hist
 
@@ -4149,25 +4242,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         rf'\b(?:fal[ae][r]?|diz(?:er)?|mand[ae][r]?\s+(?:audio|voz))\b.{{0,30}}\b{_VOZ_KW}',
         conteudo.lower()
     ):
-        if not guild:
-            return False
-        # Extrai o texto a falar
-        _texto_voz = re.sub(
-            r'(?i).*?\b(?:fala[r]?|diz(?:er)?|manda[r]?(?:\s+(?:audio|voz))?)'
-            r'(?:\s+n[ao](?:\s+call|\s+canal|\s+voz)?)?\s*:?\s*',
-            '', conteudo
-        ).strip()
-        if not _texto_voz:
-            await message.channel.send("O que eu falo? Manda o texto depois do comando.")
-            return True
-        _canal_voz = await _entrar_canal_voz(guild)
-        if not _canal_voz:
-            await message.channel.send("Nao tem canal de voz disponivel.")
-            return True
-        await message.channel.send(f"Falando em {_canal_voz.mention}...")
-        ok = await _falar_em_voz(_canal_voz, _texto_voz)
-        if not ok:
-            await message.channel.send("Nao consegui falar. Verifique se o FFmpeg esta instalado no servidor.")
+        await message.channel.send("TTS em canal de voz não está disponível no momento — a biblioteca não suporta o protocolo E2EE do Discord.")
         return True
 
     # ── configuração dinâmica ─────────────────────────────────────────────────
@@ -5115,6 +5190,125 @@ async def _parar_typing(parar: asyncio.Event, task: asyncio.Task) -> None:
         pass
 
 
+# ── Resposta humana: split, reação, silêncio e perfil ────────────────────────
+
+_RESPOSTAS_GENERICAS = re.compile(
+    r"^(?:entendido|certo|ok|compreendido|claro|sim|de acordo|combinado"
+    r"|faz sentido|correto|exato|perfeito|ótimo|ótimo\.|beleza)\.*$",
+    re.IGNORECASE,
+)
+
+def _e_resposta_generica(texto: str) -> bool:
+    """Retorna True se a resposta é um placeholder genérico sem valor real."""
+    return bool(_RESPOSTAS_GENERICAS.match(texto.strip()))
+
+
+async def _enviar_em_sequencia(
+    channel: discord.TextChannel,
+    texto: str,
+    reply_msg: discord.Message | None = None,
+) -> None:
+    """
+    Divide respostas longas em 2-3 mensagens curtas com pausa entre elas,
+    simulando o jeito humano de escrever no chat.
+    Respostas curtas (≤1 frase) são enviadas direto.
+    """
+    # Não divide respostas curtas
+    if len(texto) <= 120 or texto.count(".") <= 1:
+        await _digitar_e_enviar(channel, texto, reply_msg)
+        return
+
+    # Tenta quebrar em frases
+    import re as _re
+    frases = [f.strip() for f in _re.split(r'(?<=[.!?])\s+', texto) if f.strip()]
+    if len(frases) <= 1:
+        await _digitar_e_enviar(channel, texto, reply_msg)
+        return
+
+    # Agrupa em no máximo 2 blocos
+    meio = len(frases) // 2
+    blocos = [" ".join(frases[:meio]), " ".join(frases[meio:])]
+    blocos = [b for b in blocos if b]
+
+    primeiro = True
+    for bloco in blocos:
+        await _digitar_e_enviar(channel, bloco, reply_msg if primeiro else None)
+        primeiro = False
+        if len(blocos) > 1:
+            await asyncio.sleep(random.uniform(0.8, 1.8))
+
+
+async def _reagir_ou_responder(
+    message: discord.Message,
+    texto: str,
+) -> None:
+    """
+    Decide se reage com emoji ou responde em texto.
+    Mensagens muito curtas e afirmativas viram reação.
+    """
+    _curta = len(texto.split()) <= 4
+    _afirmativa = re.search(
+        r'\b(sim|certo|exato|ok|claro|concordo|tambem|faz sentido|verdade)\b',
+        texto.lower()
+    )
+    _negativa = re.search(r'\b(nao|não|errado|discordo|negativo)\b', texto.lower())
+
+    if _curta and _afirmativa and random.random() < 0.55:
+        try:
+            await message.add_reaction("👍")
+        except Exception:
+            await _digitar_e_enviar(message.channel, texto, message)
+        return
+
+    if _curta and _negativa and random.random() < 0.45:
+        try:
+            await message.add_reaction("👎")
+        except Exception:
+            await _digitar_e_enviar(message.channel, texto, message)
+        return
+
+    await _enviar_em_sequencia(message.channel, texto, message)
+
+
+async def _atualizar_perfil_usuario(user_id: int, autor: str, mensagem: str, resposta: str) -> None:
+    """
+    Atualiza o perfil do usuário após cada interação.
+    A cada 5 interações gera um resumo via 8b para persistir.
+    """
+    perfil = perfis_usuarios.setdefault(user_id, {"resumo": "", "n": 0, "atualizado": ""})
+    perfil["n"] = perfil.get("n", 0) + 1
+
+    # Só gera resumo a cada 5 interações (evita chamadas desnecessárias)
+    if perfil["n"] % 5 != 0 or not GROQ_API_KEY:
+        return
+
+    historico_recente = f"Usuário: {mensagem[:200]}\nBot: {resposta[:200]}"
+    resumo_anterior = perfil.get("resumo", "")
+
+    try:
+        r = await _groq_client().chat.completions.create(
+            model="llama-3.1-8b-instant",
+            max_tokens=80,
+            temperature=0.3,
+            messages=[
+                {"role": "system", "content":
+                 "Você atualiza um resumo compacto de como um usuário se comunica e o que gosta. "
+                 "Máximo 2 frases. Foco em: tom, assuntos frequentes, preferências observadas. "
+                 "Se não há padrão claro ainda, diga 'sem padrão definido'."},
+                {"role": "user", "content":
+                 f"Resumo anterior: {resumo_anterior}\n\nNova interação:\n{historico_recente}"},
+            ],
+        )
+        novo_resumo = r.choices[0].message.content.strip()
+        perfil["resumo"] = novo_resumo
+        perfil["atualizado"] = agora_utc().strftime("%Y-%m-%d")
+        _registrar_tokens("8b", r.usage.total_tokens if r.usage else 80)
+        salvar_dados()
+        log.debug(f"[PERFIL] {autor}: {novo_resumo[:60]}")
+    except Exception as e:
+        log.debug(f"[PERFIL] falha ao atualizar: {e}")
+
+
 # ── Participação ativa: debate e monitoramento de canal ───────────────────────
 
 async def _participar_debate(message: discord.Message, tema: str):
@@ -5147,30 +5341,60 @@ async def _participar_debate(message: discord.Message, tema: str):
 
 
 async def _interjetar_conversa(message: discord.Message):
-    """Interjeta ocasionalmente em canal monitorado quando a conversa é relevante."""
+    """
+    Interjeta em canal monitorado APENAS quando a conversa tem algo relevante.
+    Primeiro avalia se vale comentar (PASS/GO), só então gera o comentário.
+    Evita entrar em conversas triviais, bate-papo, emoções sem substância.
+    """
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return
-    system = (
-        "Voce e um assistente casual de servidor Discord brasileiro. "
-        "Leia a mensagem e, SE for sobre tecnologia, programacao, jogos, cultura ou topico relevante, "
-        "faca UM comentario curtissimo (1 frase). "
-        "Se nao tiver nada util a acrescentar, responda exatamente: PASS"
+
+    # Contexto recente do canal para avaliar com mais informação
+    mem = list(canal_memoria.get(message.channel.id, []))
+    ctx = "\n".join(f"{m['autor']}: {m['conteudo'][:80]}" for m in mem[-6:]) if mem else message.content[:200]
+
+    system_triagem = (
+        "Voce decide se um bot deve participar de uma conversa no Discord. "
+        "Responda apenas PASS ou GO. "
+        "GO apenas se: ha uma pergunta tecnica, debate de ideias, tema de cultura/tecnologia/ciencia/jogos com substancia. "
+        "PASS se: conversa casual, emocoes, piadas, bate-papo vazio, mensagens curtas sem conteudo."
     )
     try:
-        resp = await _groq_client().chat.completions.create(
+        triagem = await _groq_client().chat.completions.create(
             model="llama-3.1-8b-instant",
-            max_tokens=60,
-            temperature=0.75,
+            max_tokens=5,
+            temperature=0.0,
             messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": f"{message.author.display_name}: {message.content[:200]}"},
+                {"role": "system", "content": system_triagem},
+                {"role": "user", "content": ctx},
             ],
         )
-        _registrar_tokens("8b", resp.usage.total_tokens if resp.usage else 100)
+        _registrar_tokens("8b", triagem.usage.total_tokens if triagem.usage else 20)
+        decisao = triagem.choices[0].message.content.strip().upper()
+        if "GO" not in decisao:
+            return
+
+        # Aprovado — gera o comentário
+        system_resp = (
+            "Voce e o shell_engenheiro, presenca central de um servidor Discord brasileiro. "
+            "Faca UM comentario curtissimo (1 frase) sobre o assunto da conversa. "
+            "Seja direto, opinativo, sem emojis, sem asteriscos. "
+            "Se nao tiver nada genuino a acrescentar, responda: PASS"
+        )
+        resp = await _groq_client().chat.completions.create(
+            model="llama-3.1-8b-instant",
+            max_tokens=70,
+            temperature=0.7,
+            messages=[
+                {"role": "system", "content": system_resp},
+                {"role": "user", "content": ctx},
+            ],
+        )
+        _registrar_tokens("8b", resp.usage.total_tokens if resp.usage else 80)
         texto = resp.choices[0].message.content.strip()
-        if texto and texto.upper() != "PASS" and len(texto) > 5:
+        if texto and texto.upper() != "PASS" and len(texto) > 8:
             await _digitar_e_enviar(message.channel, texto)
-            log.info(f"[MONITOR] interjeccao em #{message.channel.name}")
+            log.info(f"[MONITOR] interjeccao qualificada em #{message.channel.name}")
     except Exception as e:
         log.debug(f"[MONITOR] _interjetar falhou: {e}")
 
@@ -5287,57 +5511,6 @@ async def _task_relatorio_semanal():
 
 
 # ── Suporte a canais de voz ───────────────────────────────────────────────────
-
-import tempfile, os as _os
-
-def _tts_disponivel() -> bool:
-    try:
-        import gtts  # noqa
-        import discord.opus  # noqa
-        return True
-    except Exception:
-        return False
-
-
-async def _falar_em_voz(canal_voz: discord.VoiceChannel, texto: str) -> bool:
-    """Entra no canal, fala o texto via TTS e sai. Retorna True se ok."""
-    try:
-        from gtts import gTTS
-    except ImportError:
-        log.warning("[VOZ] gTTS nao instalado.")
-        return False
-
-    try:
-        vc = canal_voz.guild.voice_client
-        if vc and vc.channel.id != canal_voz.id:
-            await vc.disconnect(force=True)
-            vc = None
-
-        if not vc:
-            vc, _err_voz = await _conectar_voz(canal_voz)
-            if _err_voz:
-                log.warning(f"[VOZ] {_err_voz}")
-                return False
-
-        # Gera audio TTS em arquivo temporario
-        tts = gTTS(text=texto, lang="pt", slow=False)
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-            tmp_path = tmp.name
-        tts.save(tmp_path)
-
-        # Toca o audio
-        source = discord.FFmpegPCMAudio(tmp_path)
-        vc.play(source)
-        while vc.is_playing():
-            await asyncio.sleep(0.5)
-
-        await vc.disconnect()
-        _os.unlink(tmp_path)
-        return True
-    except Exception as e:
-        log.error(f"[VOZ] Erro ao falar: {e}", exc_info=True)
-        return False
-
 
 async def _entrar_canal_voz(guild: discord.Guild, nome_canal: str | None = None) -> discord.VoiceChannel | None:
     """Encontra e entra em um canal de voz. Retorna o canal ou None."""
@@ -5682,6 +5855,11 @@ async def _on_message_impl(message: discord.Message):
     _eh_mod_ = eh_mod_exclusivo(message.author)    # só moderação (não superiores)
     eh_teste = message.author.id in _contas_teste_ids()
 
+    # ── Filtro de mensagens triviais ──────────────────────────────────────────
+    # "kkk", ".", emojis soltos, "ok" — não processam IA mas ainda coletam na memória
+    _conteudo_limpo = conteudo.strip()
+    _e_trivial = bool(_TRIVIAIS.match(_conteudo_limpo)) and client.user not in message.mentions
+
     # ── Verificar menção/gatilho ───────────────────────────────────────────────
     ids_mencionados = {m.id for m in message.mentions} | {
         int(m) for m in ID_PATTERN.findall(conteudo)
@@ -5742,7 +5920,7 @@ async def _on_message_impl(message: discord.Message):
             return
         tratado = await processar_ordem(message)
         log.info(f"[DONO] processar_ordem retornou {tratado}")
-        if not tratado and mencionado:
+        if not tratado and mencionado and not _e_trivial:
             _tp, _tt = await _iniciar_typing_antes(message.channel)
             try:
                 # Só interpreta como instrução quando há intenção clara de ação
@@ -5761,14 +5939,18 @@ async def _on_message_impl(message: discord.Message):
                     resp_conv = await continuar_conversa(user_id, conteudo, autor, message.guild)
                     if resp_conv:
                         await _parar_typing(_tp, _tt)
-                        await _digitar_e_enviar(message.channel, resp_conv, message)
+                        await _reagir_ou_responder(message, resp_conv)
+                        asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resp_conv))
                         return
                 log.info(f"[DONO] chamando resposta_inicial_superior para {autor}")
                 resposta = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
                 log.info(f"[DONO] resposta obtida ({len(resposta)} chars): {resposta[:60]!r}")
             finally:
                 await _parar_typing(_tp, _tt)
-            if resposta:
+            if resposta and not _e_resposta_generica(resposta):
+                await _reagir_ou_responder(message, resposta)
+                asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta))
+            elif resposta:
                 await _digitar_e_enviar(message.channel, resposta, message)
             else:
                 log.warning(f"[DONO] resposta vazia  -  enviando fallback")
@@ -5787,7 +5969,7 @@ async def _on_message_impl(message: discord.Message):
         if await _verificar_confirmacao_pendente(message):
             return
         tratado = await processar_ordem(message)
-        if not tratado and mencionado:
+        if not tratado and mencionado and not _e_trivial:
             _tp, _tt = await _iniciar_typing_antes(message.channel)
             try:
                 if _tem_intencao_de_acao(conteudo):
@@ -5804,12 +5986,17 @@ async def _on_message_impl(message: discord.Message):
                     resp_conv = await continuar_conversa(user_id, conteudo, autor, message.guild)
                     if resp_conv:
                         await _parar_typing(_tp, _tt)
-                        await _digitar_e_enviar(message.channel, resp_conv, message)
+                        await _reagir_ou_responder(message, resp_conv)
+                        asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resp_conv))
                         return
                 resposta = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
             finally:
                 await _parar_typing(_tp, _tt)
-            await _digitar_e_enviar(message.channel, resposta, message)
+            if resposta and not _e_resposta_generica(resposta):
+                await _reagir_ou_responder(message, resposta)
+                asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta))
+            elif resposta:
+                await _digitar_e_enviar(message.channel, resposta, message)
         elif not tratado:
             await processar_links(message)
         return
@@ -5817,13 +6004,17 @@ async def _on_message_impl(message: discord.Message):
     # ── Equipe de mod: isenta de punições, comandos de moderação (sem precisar mencionar) ──
     if _eh_mod_:
         tratado = await processar_ordem_mod(message)
-        if not tratado and mencionado:
+        if not tratado and mencionado and not _e_trivial:
             _tp, _tt = await _iniciar_typing_antes(message.channel)
             try:
                 resposta = await resposta_inicial(conteudo, autor, user_id, message.guild, message.author, message.channel.id)
             finally:
                 await _parar_typing(_tp, _tt)
-            await _digitar_e_enviar(message.channel, resposta, message)
+            if resposta and not _e_resposta_generica(resposta):
+                await _reagir_ou_responder(message, resposta)
+                asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta))
+            elif resposta:
+                await _digitar_e_enviar(message.channel, resposta, message)
         return  # mods nunca são punidos
 
     # ── Detectar flood (membros comuns) ───────────────────────────────────────
@@ -5929,7 +6120,7 @@ async def _on_message_impl(message: discord.Message):
 
     # ── Continuar conversa em andamento (mesmo canal e sem @menção nova) ────────
     estado_conv = conversas.get(user_id)
-    if estado_conv and client.user not in message.mentions:
+    if estado_conv and client.user not in message.mentions and not _e_trivial:
         canal_conv = estado_conv.get("canal")
         if canal_conv is None or canal_conv == message.channel.id:
             _tp, _tt = await _iniciar_typing_antes(message.channel)
@@ -5939,14 +6130,15 @@ async def _on_message_impl(message: discord.Message):
                 await _parar_typing(_tp, _tt)
             if resposta:
                 log.info(f"Conversa: {autor}: {conteudo}")
-                await _digitar_e_enviar(message.channel, resposta, message)
+                await _reagir_ou_responder(message, resposta)
+                asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta))
                 return
         else:
             del conversas[user_id]
 
     # ── Continuar conversa Claude ativa ──────────────────────────────────────
     estado_groq = conversas_groq.get(user_id)
-    if estado_groq and client.user not in message.mentions and not GATILHOS_NOME.search(conteudo):
+    if estado_groq and client.user not in message.mentions and not GATILHOS_NOME.search(conteudo) and not _e_trivial:
         if estado_groq["canal"] == message.channel.id:
             tempo_ocioso = agora_utc() - estado_groq["ultima"]
             if tempo_ocioso <= TIMEOUT_CONVERSA_GROQ:
@@ -5962,7 +6154,8 @@ async def _on_message_impl(message: discord.Message):
                 finally:
                     await _parar_typing(_tp, _tt)
                 log.info(f"Claude cont: {autor}: {conteudo}")
-                await _digitar_e_enviar(message.channel, resposta, message)
+                await _reagir_ou_responder(message, resposta)
+                asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta))
                 return
             else:
                 # Conversa expirou  -  limpa histórico do canal para evitar drift
@@ -5992,7 +6185,11 @@ async def _on_message_impl(message: discord.Message):
         finally:
             await _parar_typing(_tp, _tt)
         log.info(f"Menção de {autor}: {conteudo[:80]}")
-        await _digitar_e_enviar(message.channel, resposta, message)
+        if resposta and not _e_resposta_generica(resposta):
+            await _reagir_ou_responder(message, resposta)
+            asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta))
+        elif resposta:
+            await _digitar_e_enviar(message.channel, resposta, message)
         log.info(f"Respondido: {autor}")
 
 
