@@ -51,7 +51,7 @@ CANAL_AUDITORIA_ID = 1490180079899115591
 
 # ── Chave da API VirusTotal ──────────────────────────────────────────────────
 # Coloque sua chave aqui: https://www.virustotal.com/gui/my-apikey
-VIRUSTOTAL_API_KEY = "SUA_CHAVE_AQUI"
+VIRUSTOTAL_API_KEY = "ad4086e01b7391c50d699bbc78dd7895d3a2d6a7509ad99187ff8cac6d2a8f26"
 
 client = discord.Client()
 
@@ -466,6 +466,14 @@ GATILHOS_NOME = re.compile(
     r"(?<!\w)(?:shell|engenheir\w*)(?!\w)",
     re.IGNORECASE
 )
+# Contextos que desambiguam "shell" (terminal/bash) ou "engenheiro" (profissão técnica).
+# Se presentes, GATILHOS_NOME não dispara — evita responder "shell bash", "engenheiro elétrico".
+_GATILHO_EXCLUIDO = re.compile(
+    r'\b(?:bash|zsh|fish|sh\b|script|linux|unix|terminal|comando'
+    r'|el[eé]tric[ao]|civil|mecânic[ao]|mecanico|quimic[ao]|nuclear'
+    r'|agrônom[ao]|agronomo|de\s+software|de\s+dados|de\s+sistemas)\b',
+    re.IGNORECASE
+)
 
 CANAL_REGRAS_ID = 1487599083869704326
 CANAL_REGRAS = f"<#{CANAL_REGRAS_ID}>"
@@ -716,15 +724,16 @@ COMPOSTOS_VULGARES = [
 
 # ── Sexual / +18 ─────────────────────────────────────────────────────────────
 CONTEUDO_SEXUAL = [
-    "buceta", "xoxota", "xana", "chota", "crica", "fenda",
-    "shereka", "xereca", "xerereca", "xoroca", "chereca",  # variantes vulgares
-    "pica", "picao", "piroca", "piroco", "piru", "rola",
+    "buceta", "xoxota", "xana", "chota", "crica",
+    "shereka", "xereca", "xerereca", "xoroca", "chereca",
+    "pica", "picao", "piroca", "piroco", "piru",
     "penis", "vagina", "clitoris", "glande",
     "boquete", "chupada", "felacao", "siririca",
-    "transar", "foder", "comer", "meter",
+    "transar", "foder", "meter",
     "porno", "pornografia", "putaria", "safadeza",
     "nude", "nudes", "pack", "xvideos", "pornhub",
-    "pau",  # ambíguo: madeira / pênis — detectado por contexto fuzzy
+    # Removidos (alto falso positivo — estão em AMBIGUAS e só disparam com reforço):
+    # "comer" — contexto alimentar comum; "pau" — madeira/material; "rola" — ave/série; "fenda" — geologia
 ]
 
 # ── Racismo e discriminação étnica ───────────────────────────────────────────
@@ -785,7 +794,18 @@ DISCORD_INVITE = re.compile(r"discord\.(gg|com\/invite)\/\w+", re.IGNORECASE)
 URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
 
 # Palavras ambíguas que só disparam com reforço de contexto
-AMBIGUAS = {"pau", "comer", "rola", "gala", "fenda"}
+AMBIGUAS = {"pau", "comer", "rola", "fenda"}
+# "gala" removido — sem conotação sexual real no PT-BR comum
+
+# Whitelist: se estas palavras aparecerem na mesma mensagem que uma AMBIGUA,
+# é contexto legítimo e a detecção é suprimida.
+_CONTEXTO_LEGIT = re.compile(
+    r'\b(?:madeira|vassoura|cabo|lenha|carpinteir|construc|almoco|jantar|caf[eé]'
+    r'|prato|fruta|pizza|comida|aliment|refeicao|pombo|ave|passaro|passarim'
+    r'|rocha|geolog|tector|mineral|cristal|f[ií]sic|mecanic|tecnic'
+    r'|serie|desenho|cartoon|infantil|jogo|game|rpg)\b',
+    re.IGNORECASE
+)
 
 def normalizar(texto: str) -> str:
     texto = re.sub(r'(?<=\w)[.\-_*#](?=\w)', '', texto)
@@ -947,6 +967,9 @@ def detectar_violacoes(mensagem: str) -> list[tuple[str, str]]:
             if termo in AMBIGUAS
             else contem_fuzzy(msg_norm, termo)
         )
+        # Suprime se contexto legítimo presente (ex: "comer pizza", "pau de vassoura")
+        if hit and termo in AMBIGUAS and _CONTEXTO_LEGIT.search(texto_limpo):
+            hit = False
         if hit:
             violacoes.append((f"conteúdo adulto ou explícito, regra número 2 dos canais em {CANAL_REGRAS}", termo))
             break
@@ -974,7 +997,7 @@ def detectar_flood(user_id: int, conteudo: str = "") -> bool:
         if agora - t < timedelta(seconds=10)
     ]
     historico_mensagens[user_id].append(agora)
-    if len(historico_mensagens[user_id]) >= 5:
+    if len(historico_mensagens[user_id]) >= 7:
         return True
 
     # Flood por repetição: mesma mensagem 3x em 30 segundos
@@ -2486,6 +2509,14 @@ async def processar_ordem(message: discord.Message) -> bool:
     ids_brutos = await resolver_ids_brutos(message)
     cmd, resto = extrair_comando(conteudo)
 
+    # Guard para comandos de padrão amplo: só disparam quando o bot é endereçado
+    _addr = (
+        client.user in message.mentions
+        or (bool(message.reference) and getattr(message.reference, "resolved", None)
+            and getattr(message.reference.resolved, "author", None) == client.user)
+        or (bool(GATILHOS_NOME.search(conteudo)) and not _GATILHO_EXCLUIDO.search(conteudo))
+    )
+
     # ── silenciar @user [minutos] ──────────────────────────────────────────────
     if cmd in ("silenciar", "mute", "mutar", "calar"):
         minutos = 10
@@ -2941,7 +2972,7 @@ async def processar_ordem(message: discord.Message) -> bool:
 
     # ── enquete / votação ─────────────────────────────────────────────────────
     # Uso: "Shell abre enquete: Tema | Opção A | Opção B | Opção C"
-    elif re.search(r'\b(enquete|votação|votacao|poll|votar)\b', conteudo.lower()):
+    elif _addr and re.search(r'\b(enquete|votação|votacao|poll|votar)\b', conteudo.lower()):
         partes_eq = re.split(r'[|/]', re.sub(
             r'(?i).*?\b(?:enquete|votação|votacao|poll|sobre|votar)\b\s*:?\s*', '', conteudo, count=1
         ).strip())
@@ -2967,7 +2998,7 @@ async def processar_ordem(message: discord.Message) -> bool:
 
     # ── sorteio ───────────────────────────────────────────────────────────────
     # Uso: "Shell sorteia 1 membro" ou "Shell sorteia 3 membros do cargo Posse"
-    elif re.search(r'\b(sortei[ao]|sorteio|sorteiar|rifa)\b', conteudo.lower()):
+    elif _addr and re.search(r'\b(sortei[ao]|sorteio|sorteiar|rifa)\b', conteudo.lower()):
         qtd = extrair_quantidade(conteudo) or 1
         pool = []
         if message.role_mentions:
@@ -2989,7 +3020,7 @@ async def processar_ordem(message: discord.Message) -> bool:
 
     # ── pin / fixar mensagem ──────────────────────────────────────────────────
     # Uso: responde à mensagem e diz "Shell fixa isso" ou "Shell pin"
-    elif re.search(r'\b(fixa[r]?|fix[ae]|pin|fixar|pinar)\b', conteudo.lower()):
+    elif _addr and re.search(r'\b(fixa[r]?|fix[ae]|pin|fixar|pinar)\b', conteudo.lower()):
         alvo_pin = None
         if message.reference and isinstance(getattr(message.reference, "resolved", None), discord.Message):
             alvo_pin = message.reference.resolved
@@ -3009,7 +3040,7 @@ async def processar_ordem(message: discord.Message) -> bool:
             await message.channel.send("Responde à mensagem que quer fixar, ou diz qual.")
 
     # ── unpin / desafixar ─────────────────────────────────────────────────────
-    elif re.search(r'\b(desafix[ae]r?|unpin|despin)\b', conteudo.lower()):
+    elif _addr and re.search(r'\b(desafix[ae]r?|unpin|despin)\b', conteudo.lower()):
         alvo_unpin = None
         if message.reference and isinstance(getattr(message.reference, "resolved", None), discord.Message):
             alvo_unpin = message.reference.resolved
@@ -3024,7 +3055,7 @@ async def processar_ordem(message: discord.Message) -> bool:
 
     # ── limpar canal ──────────────────────────────────────────────────────────
     # Uso: "Shell limpa 10 mensagens" ou "Shell limpa #canal 5 mensagens"
-    elif re.search(r'\b(limpa[r]?|purga[r]?|apaga[r]?\s+mensagens?|deleta[r]?\s+mensagens?)\b', conteudo.lower()):
+    elif _addr and re.search(r'\b(limpa[r]?|purga[r]?|apaga[r]?\s+mensagens?|deleta[r]?\s+mensagens?)\b', conteudo.lower()):
         qtd_limpa = extrair_quantidade(conteudo) or 10
         qtd_limpa = min(qtd_limpa, 50)
         canal_limpa = message.channel_mentions[0] if message.channel_mentions else message.channel
@@ -3044,7 +3075,7 @@ async def processar_ordem(message: discord.Message) -> bool:
     # ── criar canal ───────────────────────────────────────────────────────────
     # Uso: "Shell cria canal texto nome-do-canal [categoria]"
     # Ou:  "Shell cria canal voz nome-do-canal"
-    elif re.search(r'\b(cri[ae]r?\s+canal|cria\s+(?:um\s+)?canal)\b', conteudo.lower()):
+    elif _addr and re.search(r'\b(cri[ae]r?\s+canal|cria\s+(?:um\s+)?canal)\b', conteudo.lower()):
         tipo_voz = bool(re.search(r'\b(voz|voice|áudio|audio)\b', conteudo.lower()))
         # Extrai nome — tudo após "canal voz/texto/de/um"
         nome_canal = re.sub(
@@ -3073,7 +3104,7 @@ async def processar_ordem(message: discord.Message) -> bool:
 
     # ── criar cargo ───────────────────────────────────────────────────────────
     # Uso: "Shell cria cargo NomeDoCargo"
-    elif re.search(r'\b(cri[ae]r?\s+cargo|cria\s+(?:um\s+)?cargo)\b', conteudo.lower()):
+    elif _addr and re.search(r'\b(cri[ae]r?\s+cargo|cria\s+(?:um\s+)?cargo)\b', conteudo.lower()):
         nome_cargo = re.sub(
             r'(?i).*?\bcria[r]?\s+(?:um\s+)?cargo\s*', '', conteudo
         ).strip()
@@ -3087,7 +3118,7 @@ async def processar_ordem(message: discord.Message) -> bool:
 
     # ── renomear canal ────────────────────────────────────────────────────────
     # Uso: "Shell renomeia #canal para novo-nome"
-    elif re.search(r'\b(renomei[ae]r?|rename)\b.{0,20}\bcanal\b', conteudo.lower()):
+    elif _addr and re.search(r'\b(renomei[ae]r?|rename)\b.{0,20}\bcanal\b', conteudo.lower()):
         if not message.channel_mentions:
             await message.channel.send("Menciona o canal a renomear.")
             return True
@@ -3106,7 +3137,7 @@ async def processar_ordem(message: discord.Message) -> bool:
 
     # ── renomear cargo ────────────────────────────────────────────────────────
     # Uso: "Shell renomeia cargo NomeAntigo para NomeNovo"
-    elif re.search(r'\b(renomei[ae]r?|rename)\b.{0,20}\bcargo\b', conteudo.lower()):
+    elif _addr and re.search(r'\b(renomei[ae]r?|rename)\b.{0,20}\bcargo\b', conteudo.lower()):
         m_para = re.search(r'\bpara\s+(.+)$', conteudo, re.IGNORECASE)
         if not m_para:
             await message.channel.send("Formato: Shell renomeia cargo NomeAtual para NomeNovo")
@@ -3129,7 +3160,7 @@ async def processar_ordem(message: discord.Message) -> bool:
     # ── lembrete agendado ─────────────────────────────────────────────────────
     # Uso: "Shell em 30 minutos avisa a galera no #canal sobre o evento"
     # Ou:  "Shell em 2 horas manda no #canal: bora jogar"
-    elif re.search(r'\bem\s+\d+\s*(minuto|min|hora|h)\b', conteudo.lower()):
+    elif _addr and re.search(r'\bem\s+\d+\s*(minuto|min|hora|h)\b', conteudo.lower()):
         m_tempo = re.search(r'em\s+(\d+)\s*(minuto|min|hora|h)\w*', conteudo.lower())
         if not m_tempo:
             return False
@@ -3156,7 +3187,7 @@ async def processar_ordem(message: discord.Message) -> bool:
 
     # ── debate ────────────────────────────────────────────────────────────────
     # Uso: "Shell abre debate: tema aqui" — bot posta o tema e gerencia 10 minutos
-    elif re.search(r'\b(debate|discussão|discussao|discutir)\b', conteudo.lower()):
+    elif _addr and re.search(r'\b(debate|discussão|discussao|discutir)\b', conteudo.lower()):
         tema_db = re.sub(r'(?i).*?\b(?:debate|discussão|discussao|discutir)\b\s*:?\s*', '', conteudo).strip()
         if not tema_db:
             await message.channel.send("Qual o tema do debate? Diga: Shell debate: tema aqui")
@@ -3179,7 +3210,7 @@ async def processar_ordem(message: discord.Message) -> bool:
 
     # ── posta relatório em canal ──────────────────────────────────────────────
     # Uso: "Shell posta relatório [semanal/mensal/membros] em #canal"
-    elif re.search(r'\b(posta[r]?\s+relat[oó]rio|relat[oó]rio\s+em)\b', conteudo.lower()):
+    elif _addr and re.search(r'\b(posta[r]?\s+relat[oó]rio|relat[oó]rio\s+em)\b', conteudo.lower()):
         canal_rel = message.channel_mentions[0] if message.channel_mentions else message.channel
         msg_l = conteudo.lower()
         dias_rel = 30 if 'mensa' in msg_l else 7
@@ -3382,6 +3413,231 @@ async def resposta_inicial_superior(conteudo: str, autor: str, user_id: int, gui
 
     # ── Fallback ───────────────────────────────────────────────────────────────
     return await resposta_inicial(conteudo, autor, user_id, guild, membro, canal_id)
+
+
+
+# ── Interpretação natural de instruções (adendo: sem comandos explícitos) ─────
+
+async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | None:
+    """
+    Usa llama-3.1-8b-instant para interpretar instrução em linguagem natural.
+    Retorna dict com {acao, params} ou None em caso de falha.
+    Custo estimado: ~250 tokens por chamada.
+    """
+    if not GROQ_DISPONIVEL or not GROQ_API_KEY:
+        return None
+
+    membros_txt = ""
+    if guild:
+        membros_txt = ", ".join(
+            m.display_name for m in guild.members if not m.bot
+        )[:400]
+
+    system = (
+        "Você é um parser de intenção para bot Discord. "
+        "Analise a instrução e retorne APENAS JSON válido (sem markdown, sem explicações). "
+        "Ações disponíveis: silenciar(usuario,minutos), banir(usuario,motivo), "
+        "enquete(tema,opcoes=[]), sorteio(quantidade,cargo=null), "
+        "lembrete(texto,segundos,canal=null), aviso(texto,canal=null), "
+        "criar_canal(nome,tipo=texto|voz), criar_cargo(nome), "
+        "debate(tema,canal=null), limpar(quantidade,canal=null). "
+        "Se for pergunta ou conversa, retorne {\"acao\":\"conversa\"}. "
+        f"Membros do servidor: {membros_txt}."
+    )
+    try:
+        resp = await _groq_client().chat.completions.create(
+            model="llama-3.1-8b-instant",
+            max_tokens=100,
+            temperature=0,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": conteudo},
+            ],
+        )
+        _registrar_tokens("8b", (resp.usage.total_tokens if resp.usage else 250))
+        txt = resp.choices[0].message.content.strip()
+        txt = re.sub(r'^```(?:json)?\s*|\s*```$', '', txt, flags=re.MULTILINE).strip()
+        return json.loads(txt)
+    except Exception as e:
+        log.debug(f"[IA_PARSE] falhou: {e}")
+        return None
+
+
+async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.Guild) -> bool:
+    """Executa ação parseada pela IA. Retorna True se executou algo."""
+    acao = intencao.get("acao", "conversa")
+    params = intencao.get("params", {})
+
+    if acao in ("conversa", "", None):
+        return False
+
+    canal = message.channel
+    autor = message.author.display_name
+
+    def _resolver_membro(nome: str) -> discord.Member | None:
+        if not nome or not guild:
+            return None
+        nome_l = nome.lower()
+        return next(
+            (m for m in guild.members if nome_l in m.display_name.lower() or nome_l in m.name.lower()),
+            None
+        )
+
+    if acao == "silenciar":
+        alvo = _resolver_membro(params.get("usuario", ""))
+        if not alvo:
+            await canal.send(f"Não encontrei '{params.get('usuario')}' no servidor.")
+            return True
+        minutos = int(params.get("minutos", 10))
+        try:
+            await alvo.timeout(agora_utc() + timedelta(minutes=minutos), reason=f"Ordem de {autor}")
+            await canal.send(f"{alvo.mention} silenciado por {minutos} minuto{'s' if minutos != 1 else ''}.")
+            log.info(f"[IA] silenciar {alvo.display_name} {minutos}min — {autor}")
+        except Exception as e:
+            await canal.send(f"Não foi possível silenciar: {e}")
+        return True
+
+    if acao == "banir":
+        alvo = _resolver_membro(params.get("usuario", ""))
+        if not alvo:
+            await canal.send(f"Não encontrei '{params.get('usuario')}' para banir.")
+            return True
+        motivo = params.get("motivo", f"Ordem de {autor}")
+        try:
+            await guild.ban(alvo, reason=motivo)
+            await canal.send(f"{alvo.display_name} banido. Motivo: {motivo}")
+            log.info(f"[IA] banir {alvo.display_name} — {autor}")
+        except Exception as e:
+            await canal.send(f"Não foi possível banir: {e}")
+        return True
+
+    if acao == "enquete":
+        tema = params.get("tema", "Enquete")
+        opcoes = params.get("opcoes", [])
+        if not opcoes:
+            await canal.send("Quais são as opções? Ex.: Shell enquete: Tema | A | B | C")
+            return True
+        emojis = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+        opcoes = opcoes[:len(emojis)]
+        linhas = [f"**Enquete: {tema}**"] + [f"{emojis[i]} {op}" for i, op in enumerate(opcoes)]
+        msg_e = await canal.send("\n".join(linhas))
+        for i in range(len(opcoes)):
+            try: await msg_e.add_reaction(emojis[i])
+            except Exception: pass
+        log.info(f"[IA] enquete '{tema}' — {autor}")
+        return True
+
+    if acao == "aviso":
+        texto = params.get("texto", "")
+        if not texto:
+            return False
+        canal_nome = params.get("canal")
+        dest = discord.utils.get(guild.text_channels, name=canal_nome) if (canal_nome and guild) else canal
+        mencao = guild.default_role if guild else "@everyone"
+        try:
+            await dest.send(f"Atenção {mencao}, {texto}")
+            if dest.id != canal.id:
+                await canal.send(f"Aviso enviado em {dest.mention}.")
+        except Exception as e:
+            await canal.send(f"Erro ao enviar aviso: {e}")
+        return True
+
+    if acao == "lembrete":
+        texto = params.get("texto", "Lembrete.")
+        segundos = int(params.get("segundos", 300))
+        canal_nome = params.get("canal")
+        dest = discord.utils.get(guild.text_channels, name=canal_nome) if (canal_nome and guild) else canal
+        mins = segundos // 60
+        await canal.send(f"Lembrete agendado em {mins} minuto{'s' if mins != 1 else ''} em {dest.mention}.")
+        async def _disparar_lemb():
+            await asyncio.sleep(segundos)
+            try: await dest.send(f"Lembrete: {texto}")
+            except Exception: pass
+        asyncio.ensure_future(_disparar_lemb())
+        return True
+
+    if acao == "criar_canal":
+        nome = re.sub(r'[^\w\-]', '-', params.get("nome", "novo-canal").lower()).strip('-') or "novo-canal"
+        tipo = params.get("tipo", "texto")
+        try:
+            if tipo == "voz":
+                novo = await guild.create_voice_channel(nome, reason=f"IA — {autor}")
+            else:
+                novo = await guild.create_text_channel(nome, reason=f"IA — {autor}")
+            await canal.send(f"Canal {novo.mention} criado.")
+            log.info(f"[IA] criar_canal #{nome} — {autor}")
+        except Exception as e:
+            await canal.send(f"Não foi possível criar o canal: {e}")
+        return True
+
+    if acao == "criar_cargo":
+        nome = params.get("nome", "Novo Cargo")[:50]
+        try:
+            novo = await guild.create_role(name=nome, reason=f"IA — {autor}")
+            await canal.send(f"Cargo {novo.mention} criado.")
+            log.info(f"[IA] criar_cargo '{nome}' — {autor}")
+        except Exception as e:
+            await canal.send(f"Não foi possível criar o cargo: {e}")
+        return True
+
+    if acao == "debate":
+        tema = params.get("tema", "")
+        if not tema:
+            return False
+        canal_nome = params.get("canal")
+        dest = discord.utils.get(guild.text_channels, name=canal_nome) if (canal_nome and guild) else canal
+        await dest.send(
+            f"**Debate aberto: {tema}**\n"
+            "Galera, a discussão tá rolando por 10 minutos. Respeito nos argumentos."
+        )
+        async def _encerrar_debate_ia():
+            await asyncio.sleep(600)
+            try: await dest.send(f"Debate encerrado: **{tema}**. Bom papo, galera.")
+            except Exception: pass
+        asyncio.ensure_future(_encerrar_debate_ia())
+        log.info(f"[IA] debate '{tema}' — {autor}")
+        return True
+
+    if acao == "limpar":
+        qtd = min(int(params.get("quantidade", 10)), 50)
+        canal_nome = params.get("canal")
+        dest = discord.utils.get(guild.text_channels, name=canal_nome) if (canal_nome and guild) else canal
+        apagadas = 0
+        try:
+            async for m in dest.history(limit=qtd + 5):
+                if m.author == client.user:
+                    await m.delete()
+                    apagadas += 1
+                    if apagadas >= qtd:
+                        break
+                    await asyncio.sleep(0.4)
+            await canal.send(f"{apagadas} mensagem{'s' if apagadas != 1 else ''} minhas apagada{'s' if apagadas != 1 else ''} em {dest.mention}.")
+        except Exception as e:
+            await canal.send(f"Erro ao limpar: {e}")
+        return True
+
+    if acao == "sorteio":
+        qtd = int(params.get("quantidade", 1))
+        cargo_nome = params.get("cargo")
+        role = discord.utils.get(guild.roles, name=cargo_nome) if (cargo_nome and guild) else None
+        pool = (
+            [m for m in role.members if not m.bot]
+            if role
+            else [m for m in guild.members if not m.bot and m != client.user]
+        )
+        if not pool:
+            await canal.send("Nenhum membro disponível para sortear.")
+            return True
+        qtd = min(qtd, len(pool))
+        ganhadores = random.sample(pool, qtd)
+        mencoes = " ".join(m.mention for m in ganhadores)
+        sufixo = "o sorteado é" if qtd == 1 else f"os {qtd} sorteados são"
+        await canal.send(f"Sorteio encerrado — {sufixo}: {mencoes}")
+        log.info(f"[IA] sorteio {qtd}x — {autor}")
+        return True
+
+    log.debug(f"[IA_EXEC] ação '{acao}' não reconhecida — passando adiante")
+    return False
 
 
 ESCALA_SILENCIO = [
@@ -3691,10 +3947,11 @@ async def _on_message_impl(message: discord.Message):
         and message.reference.resolved.author == client.user
     )
 
+    _gatilho_nome = bool(GATILHOS_NOME.search(conteudo)) and not _GATILHO_EXCLUIDO.search(conteudo)
     mencionado = (
         client.user in message.mentions
         or client.user.id in ids_mencionados
-        or bool(GATILHOS_NOME.search(conteudo))
+        or _gatilho_nome
         or eh_resposta_ao_bot
     )
 
@@ -3731,6 +3988,13 @@ async def _on_message_impl(message: discord.Message):
         tratado = await processar_ordem(message)
         log.info(f"[DONO] processar_ordem retornou {tratado}")
         if not tratado and mencionado:
+            # Tenta interpretar como instrução natural via IA antes de cair no chat
+            intencao_ia = await _ia_parsear_instrucao(conteudo, message.guild)
+            if intencao_ia:
+                log.info(f"[DONO] IA interpretou: {intencao_ia.get('acao')}")
+                tratado_ia = await _ia_executar(intencao_ia, message, message.guild)
+                if tratado_ia:
+                    return
             # Continua conversa ativa antes de cair em resposta_inicial_superior
             estado_conv = conversas.get(user_id)
             if estado_conv and (estado_conv.get("canal") is None or estado_conv["canal"] == message.channel.id):
@@ -3757,6 +4021,13 @@ async def _on_message_impl(message: discord.Message):
             await message.channel.send(f"{message.author.mention}, modo ausente desativado.")
         tratado = await processar_ordem(message)
         if not tratado and mencionado:
+            # Tenta interpretar como instrução natural via IA antes de cair no chat
+            intencao_ia = await _ia_parsear_instrucao(conteudo, message.guild)
+            if intencao_ia:
+                log.info(f"[SUP] IA interpretou: {intencao_ia.get('acao')}")
+                tratado_ia = await _ia_executar(intencao_ia, message, message.guild)
+                if tratado_ia:
+                    return
             # Continua conversa ativa antes de cair em resposta_inicial_superior
             estado_conv = conversas.get(user_id)
             if estado_conv and (estado_conv.get("canal") is None or estado_conv["canal"] == message.channel.id):
