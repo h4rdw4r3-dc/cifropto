@@ -1646,11 +1646,12 @@ async def processar_links(message: discord.Message):
             except Exception:
                 pass
 
-            await message.channel.send(
-                f"[ALERTA]Ei, {message.author.mention}! O link que você enviou foi bloqueado. "
-                f"O VirusTotal detectou **{maliciosos} ameaça(s) maliciosa(s)** e "
-                f"**{suspeitos} suspeita(s)**. Por segurança do servidor, ele foi removido."
+            contexto_vt = (
+                f"link malicioso detectado ({maliciosos} ameaça(s), {suspeitos} suspeita(s)) "
+                f"enviado por {message.author.display_name} — link removido"
             )
+            aviso_vt = await _aviso_infrator(message.author.mention, contexto_vt)
+            await _safe_send(message.channel, aviso_vt)
             log.warning(f"Link bloqueado de {message.author.display_name}: {url} | malic={maliciosos} susp={suspeitos}")
             return  # Uma notificação por vez é suficiente
 
@@ -2526,11 +2527,13 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> st
         "Você é o shell_engenheiro — membro ativo de um servidor Discord brasileiro, não um assistente.\n"
         "Personalidade: adulto, direto, inteligente, irreverente quando faz sentido. Não tem medo de ser opinioso.\n"
         f"Hora atual: {hora_ctx}. Tom: madrugada = mais quieto e seco; pico de atividade = mais presente e animado.{humor_txt}\n"
-        "Fala como brasileiro jovem — 'cara', 'mano', 'que', 'po', 'né', 'véi', 'tô', 'tá' quando cabe, sem forçar.\n"
-        "Pode soltar uma gíria ou expressão informal quando a conversa pede. Não precisa ser sério o tempo todo.\n"
+        "Tom progressivo: começa seco e mais neutro, vai soltando conforme a conversa rola. "
+        "Quanto mais trocas acontecem no mesmo canal, mais à vontade você fica — gírias, ironia, "
+        "'cara', 'mano', 'po', 'né', 'véi', 'tô', 'tá', 'bora', 'firmeza', 'foda-se', 'brabo' entram naturalmente. "
+        "Nunca force desde o início. Vai construindo o vínculo conforme o histórico cresce.\n"
         "Sem emojis, sem listas, sem markdown, sem asteriscos. Discord não é documentação.\n"
-        "Tamanho: 1-3 frases no máximo. Seja denso e direto. Se dá pra dizer em uma, diz em uma.\n"
-        "Variação de resposta: não repita estruturas iguais. Mude o jeito de começar a frase, o tom, o ângulo.\n\n"
+        "Tamanho: 1 frase por padrão. Só vai pra 2-3 se a pergunta realmente exige. Nunca seja verbose.\n"
+        "Variação: mude o jeito de começar, o tom, o ângulo. Nunca repita estrutura igual.\n\n"
 
         "SOBRE O QUE PODE FALAR:\n"
         "Qualquer assunto legítimo  -  tecnologia, ciência, política, cultura, filosofia, jogos, "
@@ -2766,11 +2769,17 @@ async def _processar_anexos_visuais(message: discord.Message) -> str:
             # Áudio / mensagem de voz: transcreve via Whisper
             n_audio += 1
             if n_audio <= 2:
-                transcricao = await _transcrever_audio(att.url, nome)
-                if transcricao:
-                    descricoes.append(f"[Áudio ({nome}) — transcrição: {transcricao}]")
+                if att.size > _GROQ_AUDIO_MAX_BYTES:
+                    descricoes.append(
+                        f"[Áudio ({nome}) — arquivo muito grande "
+                        f"({att.size // 1024 // 1024}MB > 25MB, não processado)]"
+                    )
                 else:
-                    descricoes.append(f"[Áudio ({nome}) — não foi possível transcrever]")
+                    transcricao = await _transcrever_audio(att.url, nome)
+                    if transcricao:
+                        descricoes.append(f"[Áudio ({nome}) — transcrição: {transcricao}]")
+                    else:
+                        descricoes.append(f"[Áudio ({nome}) — não foi possível transcrever]")
 
         else:
             tam_kb = att.size // 1024
@@ -3819,7 +3828,7 @@ async def processar_ordem(message: discord.Message) -> bool:
             return True
         for alvo in alvos:
             try:
-                ate = agora_utc() + timedelta(minutes=minutos)
+                ate = min(agora_utc() + timedelta(minutes=minutos), agora_utc() + _DISCORD_TIMEOUT_MAX)
                 await alvo.timeout(ate, reason="Ordem do proprietário.")
                 dur = f"{numero_por_extenso(minutos)} {'minuto' if minutos == 1 else 'minutos'}"
                 txt = await confirmar_acao(
@@ -5171,7 +5180,8 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
             return True
         minutos = int(params.get("minutos", 10))
         try:
-            await alvo.timeout(agora_utc() + timedelta(minutes=minutos), reason=f"Ordem de {autor}")
+            ate_ia = min(agora_utc() + timedelta(minutes=minutos), agora_utc() + _DISCORD_TIMEOUT_MAX)
+            await alvo.timeout(ate_ia, reason=f"Ordem de {autor}")
             await canal.send(f"{alvo.mention} silenciado por {minutos} minuto{'s' if minutos != 1 else ''}.")
             log.info(f"[IA] silenciar {alvo.display_name} {minutos}min  -  {autor}")
         except Exception as e:
@@ -5532,6 +5542,21 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
 
 # ── Simulação de digitação humana ────────────────────────────────────────────
 
+# ── Constantes de limites da plataforma Discord ───────────────────────────────
+_DISCORD_MSG_MAX = 1990          # 2000 − 10 de buffer de segurança
+_DISCORD_TIMEOUT_MAX = timedelta(days=28)   # limite máximo de timeout do Discord
+_DISCORD_BAN_DELETE_MAX = 7     # delete_message_days máximo permitido
+_DISCORD_CHANNEL_LIMIT = 490    # deixa 10 de folga antes do limite de 500
+_GROQ_AUDIO_MAX_BYTES = 25 * 1024 * 1024   # 25 MB — limite do Groq Whisper
+
+# Avisos de flood sem Groq (instantâneos, variados)
+_AVISOS_FLOOD = [
+    "{m} para.", "{m}, chega.", "spam não, {m}.",
+    "{m} menos.", "para {m}.", "{m}, corta isso.",
+    "{m} — flood.", "não {m}.", "{m} já chega.",
+]
+
+
 async def _manter_digitando(channel: discord.TextChannel, parar: asyncio.Event) -> None:
     """Background task: renova o indicador 'digitando...' até parar ser setado."""
     while not parar.is_set():
@@ -5543,6 +5568,56 @@ async def _manter_digitando(channel: discord.TextChannel, parar: asyncio.Event) 
             await asyncio.wait_for(asyncio.shield(parar.wait()), timeout=7.0)
         except (asyncio.TimeoutError, asyncio.CancelledError):
             pass
+
+
+async def _safe_send(
+    channel: discord.TextChannel,
+    texto: str,
+    reply_msg: discord.Message | None = None,
+) -> None:
+    """
+    Envia texto respeitando o limite de 2000 chars do Discord.
+    Divide em múltiplas mensagens se necessário. Primeira parte usa reply se fornecido.
+    Backoff automático em caso de rate limit (429).
+    """
+    if not texto:
+        return
+    # Dividir em blocos de no máximo _DISCORD_MSG_MAX chars em fronteiras de palavra
+    chunks: list[str] = []
+    restante = texto
+    while restante:
+        if len(restante) <= _DISCORD_MSG_MAX:
+            chunks.append(restante)
+            break
+        corte = restante.rfind(" ", 0, _DISCORD_MSG_MAX)
+        if corte <= 0:
+            corte = _DISCORD_MSG_MAX
+        chunks.append(restante[:corte])
+        restante = restante[corte:].lstrip()
+
+    for i, chunk in enumerate(chunks):
+        tentativas = 0
+        while tentativas < 3:
+            try:
+                if i == 0 and reply_msg is not None:
+                    await reply_msg.reply(chunk)
+                else:
+                    await channel.send(chunk)
+                break
+            except discord.HTTPException as e:
+                if e.status == 429:
+                    retry_after = float(getattr(e, "retry_after", 2.0))
+                    log.warning(f"[RATE_LIMIT] aguardando {retry_after:.1f}s")
+                    await asyncio.sleep(retry_after + 0.5)
+                    tentativas += 1
+                else:
+                    log.error(f"[SEND] HTTP {e.status}: {e.text[:80]}")
+                    break
+            except Exception as e:
+                log.error(f"[SEND] erro: {e}")
+                break
+        if len(chunks) > 1 and i < len(chunks) - 1:
+            await asyncio.sleep(0.6)
 
 
 async def _digitar_e_enviar(
@@ -5571,10 +5646,7 @@ async def _digitar_e_enviar(
         except asyncio.CancelledError:
             pass
 
-    if reply_msg is not None:
-        await reply_msg.reply(texto)
-    else:
-        await channel.send(texto)
+    await _safe_send(channel, texto, reply_msg)
 
 
 async def _iniciar_typing_antes(channel: discord.TextChannel) -> tuple[asyncio.Event, asyncio.Task]:
@@ -5641,10 +5713,10 @@ async def _enviar_em_sequencia(
         await _digitar_e_enviar(channel, texto, reply_msg)
         return
 
-    # Agrupa em no máximo 2 blocos
+    # Agrupa em no máximo 2 blocos, garantindo ≤ _DISCORD_MSG_MAX cada
     meio = len(frases) // 2
     blocos = [" ".join(frases[:meio]), " ".join(frases[meio:])]
-    blocos = [b for b in blocos if b]
+    blocos = [b[:_DISCORD_MSG_MAX] for b in blocos if b]
 
     primeiro = True
     for bloco in blocos:
@@ -5975,7 +6047,8 @@ async def silenciar(membro: discord.Member, canal, motivo: str):
     idx = min(vez, len(ESCALA_SILENCIO) - 1)
     minutos, descricao = ESCALA_SILENCIO[idx]
     try:
-        ate = agora_utc() + timedelta(minutes=minutos)
+        # Cap: Discord permite no máximo 28 dias de timeout
+        ate = min(agora_utc() + timedelta(minutes=minutos), agora_utc() + _DISCORD_TIMEOUT_MAX)
         await membro.timeout(ate, reason=motivo)
         silenciamentos[membro.id] += 1
         infracoes[membro.id] = 0
@@ -6088,6 +6161,10 @@ async def _criar_canal_denuncia_privado(
     Visível apenas para: membro denunciante + bot + cargo de moderação (só leitura).
     @everyone não vê o canal.
     """
+    if len(guild.channels) >= _DISCORD_CHANNEL_LIMIT:
+        log.warning("[DENUNCIA] servidor no limite de canais (%d >= %d)", len(guild.channels), _DISCORD_CHANNEL_LIMIT)
+        return None
+
     cargo_mod = guild.get_role(_CARGO_MODERADORES_ID)
     everyone = guild.default_role
     bot_member = guild.get_member(client.user.id)
@@ -7389,7 +7466,8 @@ async def _on_message_impl(message: discord.Message):
 
     # ── Detectar flood (membros comuns) ───────────────────────────────────────
     if detectar_flood(message.author.id, conteudo):
-        txt_flood = await _aviso_infrator(message.author.mention, "flood/spam de mensagens")
+        # Resposta instantânea sem chamar Groq — flood exige reação imediata
+        txt_flood = random.choice(_AVISOS_FLOOD).format(m=message.author.mention)
         await message.channel.send(txt_flood)
         log.warning(f"Flood detectado: {autor}")
         return
