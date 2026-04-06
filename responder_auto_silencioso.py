@@ -536,6 +536,10 @@ ultima_interjeccao: dict[int, datetime] = {}  # cooldown por canal
 atividade_mensagens: dict[int, int] = defaultdict(int)  # user_id → contagem
 citacoes: list[dict] = []  # {texto, autor, canal, ts}
 
+# ── Confirmações pendentes ────────────────────────────────────────────────────
+# {user_id: {descricao, coro_fn, args, kwargs, canal_id, ts}}
+confirmacoes_pendentes: dict[int, dict] = {}
+
 # ── Rastreamento de entradas e saídas ─────────────────────────────────────────
 # registro_entradas: user_id -> lista de ISO timestamps de cada entrada
 registro_entradas: dict[int, list[str]] = {}
@@ -2864,6 +2868,62 @@ def extrair_quantidade(texto: str) -> int | None:
     return total if encontrou else None
 
 
+async def _solicitar_confirmacao(message: discord.Message, descricao: str, coro_fn, *args, **kwargs) -> bool:
+    """
+    Pede confirmação ao usuário antes de executar uma ação pesada.
+    Armazena o coro pendente e retorna True (a mensagem de confirmação já foi enviada).
+    O coro é executado quando o usuário responder 'sim'.
+    """
+    user_id = message.author.id
+    confirmacoes_pendentes[user_id] = {
+        "descricao": descricao,
+        "coro_fn": coro_fn,
+        "args": args,
+        "kwargs": kwargs,
+        "canal_id": message.channel.id,
+        "ts": agora_utc(),
+    }
+    await message.channel.send(
+        f"Confirma a geração de: **{descricao}**?\n"
+        f"Responde **sim** para prosseguir ou **não** para cancelar."
+    )
+    return True
+
+
+async def _verificar_confirmacao_pendente(message: discord.Message) -> bool:
+    """
+    Verifica se o usuário está respondendo a uma confirmação pendente.
+    Retorna True se consumiu a mensagem (sim/não).
+    """
+    user_id = message.author.id
+    pendente = confirmacoes_pendentes.get(user_id)
+    if not pendente:
+        return False
+    # Expira após 2 minutos
+    if (agora_utc() - pendente["ts"]).total_seconds() > 120:
+        del confirmacoes_pendentes[user_id]
+        return False
+    # Só responde no mesmo canal
+    if pendente["canal_id"] != message.channel.id:
+        return False
+
+    resp = message.content.strip().lower()
+    if resp in ("sim", "s", "yes", "y", "confirma", "ok", "pode"):
+        del confirmacoes_pendentes[user_id]
+        await message.channel.send("Certo, processando...")
+        try:
+            await pendente["coro_fn"](*pendente["args"], **pendente["kwargs"])
+        except Exception as e:
+            await message.channel.send(f"Erro: {e}")
+        return True
+    elif resp in ("nao", "não", "n", "no", "cancela", "cancelar"):
+        del confirmacoes_pendentes[user_id]
+        await message.channel.send("Cancelado.")
+        return True
+    # Resposta não reconhecida — deixa a mensagem passar normalmente
+    return False
+
+
 async def processar_ordem(message: discord.Message) -> bool:
     """Processa comandos dos donos. Retorna True se algum comando foi executado."""
     conteudo = message.content.strip()
@@ -3590,36 +3650,40 @@ async def processar_ordem(message: discord.Message) -> bool:
             await message.channel.send(f"Relatório {tipo_txt} postado em {canal_rel.mention}.")
 
     # ── Google Docs ────────────────────────────────────────────────────────────
-    # Uso: "Shell cria doc com o relatório", "Shell cria doc com histórico do #canal"
-    #      "Shell cria doc com as regras"
     elif _addr and re.search(r'\b(doc|documento|google\s*doc)\b', conteudo.lower()) and re.search(r'\b(cria[r]?|gera[r]?|abre[r]?|manda[r]?|faz)\b', conteudo.lower()):
         if not _google_ok():
             await message.channel.send(
-                "Google API não configurada. Configure `GOOGLE_CREDENTIALS_JSON` no Railway "
-                "com o JSON da service account e, opcionalmente, `GDRIVE_FOLDER_ID`."
+                "Google API não configurada. Configure `GOOGLE_CREDENTIALS_JSON` no Railway."
             )
             return True
         msg_l = conteudo.lower()
-        try:
-            await message.channel.send("Criando documento no Google Docs, aguarde...")
+        _nome_doc = message.author.display_name
+
+        async def _exec_gdoc():
             if re.search(r'\bhist[oó]rico\b|\bcanal\b|\bmensagens?\b', msg_l):
                 canal_exp = message.channel_mentions[0] if message.channel_mentions else message.channel
+                await message.channel.send(f"Criando documento no Google Docs, aguarde...")
                 url = await gdoc_historico_canal(canal_exp, 200)
                 await message.channel.send(f"Historico de {canal_exp.mention} no Google Docs: {url}")
             elif re.search(r'\bregra[s]?\b', msg_l):
+                await message.channel.send("Criando documento no Google Docs, aguarde...")
                 url = await gdoc_regras()
                 await message.channel.send(f"Regras no Google Docs: {url}")
             else:
                 dias_doc = 30 if re.search(r'\bmensal\b|\bmes\b', msg_l) else 7
+                await message.channel.send("Criando documento no Google Docs, aguarde...")
                 url = await gdoc_relatorio(guild, dias_doc)
                 await message.channel.send(f"Relatorio no Google Docs: {url}")
-            log.info(f"[GDOC] {autor} criou documento")
-        except Exception as e:
-            await message.channel.send(f"Erro ao criar documento: {e}")
+            log.info(f"[GDOC] {_nome_doc} criou documento")
+
+        tipo_gdoc = ("historico de canal" if re.search(r'\bhist[oó]rico\b|\bcanal\b', msg_l)
+                     else "regras" if re.search(r'\bregra[s]?\b', msg_l)
+                     else "relatorio semanal" if "semanal" in msg_l
+                     else "relatorio mensal" if re.search(r'\bmensal\b|\bmes\b', msg_l)
+                     else "relatorio semanal")
+        return await _solicitar_confirmacao(message, f"Google Doc de {tipo_gdoc}", _exec_gdoc)
 
     # ── Google Sheets ──────────────────────────────────────────────────────────
-    # Uso: "Shell cria planilha de membros", "Shell planilha de infrações"
-    #      "Shell cria sheet de atividade", "Shell planilha de citações"
     elif _addr and re.search(r'\b(planilha|sheet|google\s*sheet[s]?|calc|spreadsheet)\b', conteudo.lower()) and re.search(r'\b(cria[r]?|gera[r]?|abre[r]?|manda[r]?|faz)\b', conteudo.lower()):
         if not _google_ok():
             await message.channel.send(
@@ -3627,7 +3691,9 @@ async def processar_ordem(message: discord.Message) -> bool:
             )
             return True
         msg_l = conteudo.lower()
-        try:
+        _nome_sheet = message.author.display_name
+
+        async def _exec_gsheet():
             await message.channel.send("Criando planilha no Google Sheets, aguarde...")
             if re.search(r'\binfra[cç][aã]o|infracoes|punicao|punicoes\b', msg_l):
                 url = await gsheet_infracoes(guild)
@@ -3641,24 +3707,26 @@ async def processar_ordem(message: discord.Message) -> bool:
             else:
                 url = await gsheet_membros(guild)
                 await message.channel.send(f"Planilha de membros: {url}")
-            log.info(f"[GSHEET] {autor} criou planilha")
-        except Exception as e:
-            await message.channel.send(f"Erro ao criar planilha: {e}")
+            log.info(f"[GSHEET] {_nome_sheet} criou planilha")
+
+        tipo_sheet = ("de infracoes" if re.search(r'\binfra[cç][aã]o|infracoes\b', msg_l)
+                      else "de atividade" if re.search(r'\batividade\b|\branking\b', msg_l)
+                      else "de citacoes" if re.search(r'\bcita[cç][aã]o\b', msg_l)
+                      else "de membros")
+        return await _solicitar_confirmacao(message, f"Google Sheet {tipo_sheet}", _exec_gsheet)
 
     # ── gerar PDF ─────────────────────────────────────────────────────────────
-    # Uso: "Shell gera PDF do relatório [semanal/mensal]"
-    #      "Shell exporta histórico do #canal para PDF"
-    #      "Shell PDF de membros", "Shell PDF das regras", "Shell PDF de citações"
     elif _addr and re.search(r'\bpdf\b', conteudo.lower()):
         if not FPDF_DISPONIVEL:
             await message.channel.send("fpdf2 não está instalado no ambiente. Adicione ao requirements.txt e redeploy.")
             return True
         msg_l = conteudo.lower()
-        try:
+        _nome_pdf = message.author.display_name
+
+        async def _exec_pdf():
             nome_arquivo = "relatorio.pdf"
             if re.search(r'\bhist[oó]rico\b|\bcanal\b|\bmensagens?\b', msg_l):
                 canal_exp = message.channel_mentions[0] if message.channel_mentions else message.channel
-                await message.channel.send(f"Exportando histórico de {canal_exp.mention}, aguarde…")
                 pdf_bytes = await gerar_pdf_historico_canal(canal_exp, limite=150)
                 nome_arquivo = f"historico-{canal_exp.name}.pdf"
             elif re.search(r'\bmembro[s]?\b|\blista\b', msg_l):
@@ -3672,14 +3740,20 @@ async def processar_ordem(message: discord.Message) -> bool:
                 nome_arquivo = "citacoes.pdf"
             else:
                 dias_pdf = 30 if 'mensal' in msg_l or 'mes' in msg_l else 7
-                await message.channel.send("Gerando PDF do relatório, aguarde…")
                 pdf_bytes = await gerar_pdf_relatorio_servidor(guild, dias_pdf)
                 nome_arquivo = f"relatorio-{'mensal' if dias_pdf >= 28 else 'semanal'}.pdf"
             arquivo = discord.File(io.BytesIO(pdf_bytes), filename=nome_arquivo)
-            await message.channel.send(f"PDF gerado:", file=arquivo)
-            log.info(f"[PDF] {autor} gerou {nome_arquivo}")
-        except Exception as e:
-            await message.channel.send(f"Erro ao gerar PDF: {e}")
+            await message.channel.send("PDF gerado:", file=arquivo)
+            log.info(f"[PDF] {_nome_pdf} gerou {nome_arquivo}")
+
+        tipo_pdf = ("historico de canal" if re.search(r'\bhist[oó]rico\b|\bcanal\b', msg_l)
+                    else "membros" if re.search(r'\bmembro[s]?\b|\blista\b', msg_l)
+                    else "regras" if re.search(r'\bregra[s]?\b', msg_l)
+                    else "citacoes" if re.search(r'\bcita[cç][aã]o\b', msg_l)
+                    else "relatorio semanal" if 'semanal' in msg_l
+                    else "relatorio mensal" if re.search(r'\bmensal\b|\bmes\b', msg_l)
+                    else "relatorio semanal")
+        return await _solicitar_confirmacao(message, f"PDF de {tipo_pdf}", _exec_pdf)
 
     # ── traduzir mensagem ─────────────────────────────────────────────────────
     # Uso: "Shell traduz isso para inglês" (reply na mensagem), "Shell traduz: texto"
@@ -4831,6 +4905,8 @@ async def _on_message_impl(message: discord.Message):
         if message.author.id in ausencia:
             del ausencia[message.author.id]
             await message.channel.send(f"{message.author.mention}, modo ausente desativado.")
+        if await _verificar_confirmacao_pendente(message):
+            return
         tratado = await processar_ordem(message)
         log.info(f"[DONO] processar_ordem retornou {tratado}")
         if not tratado and mencionado:
@@ -4865,6 +4941,8 @@ async def _on_message_impl(message: discord.Message):
         if message.author.id in ausencia:
             del ausencia[message.author.id]
             await message.channel.send(f"{message.author.mention}, modo ausente desativado.")
+        if await _verificar_confirmacao_pendente(message):
+            return
         tratado = await processar_ordem(message)
         if not tratado and mencionado:
             # Tenta interpretar como instrução natural via IA antes de cair no chat
