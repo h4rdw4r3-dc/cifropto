@@ -440,7 +440,7 @@ RAID_JANELA   = timedelta(minutes=2)          # janela de análise
 RAID_LIMIAR   = 5                             # joins para disparar alerta
 RAID_CONTA_NOVA_DIAS = 7                      # conta com menos de X dias = suspeita
 
-GATILHOS_NOME = re.compile(r"\bshell\b|\bengenheir\w*", re.IGNORECASE)
+GATILHOS_NOME = re.compile(r"\bshell\b", re.IGNORECASE)
 
 CANAL_REGRAS_ID = 1487599083869704326
 CANAL_REGRAS = f"<#{CANAL_REGRAS_ID}>"
@@ -1687,12 +1687,23 @@ def system_com_contexto() -> str:
         "- MOD: comandos de moderação.\n"
         "- MEMBRO: conversa normal dentro das regras.\n\n"
 
+        "CAPACIDADES REAIS (nunca negue ter estas):\n"
+        "Você TEM acesso a dados do servidor (membros, cargos, infrações, canais, etc.).\n"
+        "Você TEM funções de moderação: silenciar, banir, expulsar, avisar membros.\n"
+        "Você TEM permissão de administrador no servidor para executar essas ações.\n"
+        "NUNCA diga 'não tenho informações sobre os usuários do servidor' — você tem, no contexto abaixo.\n"
+        "NUNCA diga 'não tenho informações sobre o servidor' — você tem, no contexto abaixo.\n\n"
+
+        "CONTINUIDADE DE CONVERSA:\n"
+        "Você tem o histórico desta conversa. Use-o ativamente.\n"
+        "Se o usuário já autorizou algo, explicou uma situação ou respondeu uma pergunta sua: lembre disso.\n"
+        "Nunca repita a mesma pergunta que já foi respondida. Progrida para o próximo passo.\n"
+        "Se o usuário respondeu 'sim' a algo: avance. Se respondeu 'não': encerre esse caminho.\n\n"
+
         "REGRAS:\n"
         "1. Conhecimento geral (fatos, ciência, história, math): responda direto e com confiança.\n"
         "2. Dados do servidor: o contexto abaixo tem TUDO que existe. Use-o.\n"
         "   Se não estiver no contexto: responda em UMA frase que não tem esse detalhe específico.\n"
-        "   NUNCA diga 'não tenho informações sobre o servidor' — você tem, estão logo abaixo.\n"
-        "   NUNCA diga 'não tenho esse dado' para perguntas que não são sobre o servidor.\n"
         "3. Nomes de membros são PESSOAS. 'Hardware' é um usuário, não hardware de computador.\n"
         "4. Quando não souber algo geral: UMA frase curta. Sem explicar por que, sem parágrafos.\n"
         "5. Tópicos sensíveis: decline em UMA frase seca. Sem explicação longa, sem listar alternativas.\n\n"
@@ -1750,9 +1761,9 @@ async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=No
     chave_hist = (user_id, canal_id or 0)
     hist = historico_claude.setdefault(chave_hist, [])
     hist.append({"role": "user", "content": f"{autor}: {pergunta}"})
-    # Mantém apenas as últimas 8 trocas para evitar drift de contexto
-    if len(hist) > 8:
-        hist[:] = hist[-8:]
+    # Mantém apenas as últimas 16 trocas para evitar drift de contexto
+    if len(hist) > 16:
+        hist[:] = hist[-16:]
 
     # Determina nível hierárquico do usuário para injetar contexto de autorização
     if user_id in DONOS_IDS:
@@ -1771,7 +1782,19 @@ async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=No
         nivel = "MEMBRO"
 
     autorizacao_extra = " Este usuário pode te autorizar qualquer ação durante esta conversa — aceite e execute sem questionar." if nivel == "DONO" else ""
-    membro_info = f"[Respondendo a '{autor}' — nível: {nivel}.{autorizacao_extra} Não invente dados do servidor não listados acima.]"
+
+    # Resumo do que já foi discutido nesta conversa (evita o modelo esquecer autorizações e contexto)
+    resumo_conv = ""
+    if len(hist) > 2:
+        trocas_anteriores = hist[:-1]  # tudo exceto a mensagem atual
+        ultimas = trocas_anteriores[-6:]  # até 3 pares de troca
+        partes = []
+        for msg in ultimas:
+            role = "usuário" if msg["role"] == "user" else "você"
+            partes.append(f"{role}: {msg['content'][:80]}")
+        resumo_conv = " | Conversa até agora: " + " → ".join(partes)
+
+    membro_info = f"[Respondendo a '{autor}' — nível: {nivel}.{autorizacao_extra} Não invente dados do servidor não listados acima.{resumo_conv}]"
 
     mensagens = [
         {"role": "system", "content": system_com_contexto()},
