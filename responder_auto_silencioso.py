@@ -1,6 +1,7 @@
 import discord
 import re
 import aiohttp
+import asyncio
 import json
 import os
 import io
@@ -2938,6 +2939,259 @@ async def processar_ordem(message: discord.Message) -> bool:
             f"8b-instant:    {_tokens_8b_hoje:,}/{LIMITE_8B:,} tokens ({pct_8b}%)"
         )
 
+    # ── enquete / votação ─────────────────────────────────────────────────────
+    # Uso: "Shell abre enquete: Tema | Opção A | Opção B | Opção C"
+    elif re.search(r'\b(enquete|votação|votacao|poll|votar)\b', conteudo.lower()):
+        partes_eq = re.split(r'[|/]', re.sub(
+            r'(?i).*?\b(?:enquete|votação|votacao|poll|sobre|votar)\b\s*:?\s*', '', conteudo, count=1
+        ).strip())
+        partes_eq = [p.strip() for p in partes_eq if p.strip()]
+        if len(partes_eq) < 2:
+            await message.channel.send("Formato: Shell abre enquete: Tema | Opção A | Opção B")
+            return True
+        tema = partes_eq[0]
+        opcoes = partes_eq[1:]
+        emojis = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+        if len(opcoes) > len(emojis):
+            opcoes = opcoes[:len(emojis)]
+        linhas = [f"**Enquete: {tema}**"]
+        for i, op in enumerate(opcoes):
+            linhas.append(f"{emojis[i]} {op}")
+        msg_enquete = await message.channel.send("\n".join(linhas))
+        for i in range(len(opcoes)):
+            try:
+                await msg_enquete.add_reaction(emojis[i])
+            except Exception:
+                pass
+        log.info(f"[ENQUETE] {autor}: {tema} ({len(opcoes)} opções)")
+
+    # ── sorteio ───────────────────────────────────────────────────────────────
+    # Uso: "Shell sorteia 1 membro" ou "Shell sorteia 3 membros do cargo Posse"
+    elif re.search(r'\b(sortei[ao]|sorteio|sorteiar|rifa)\b', conteudo.lower()):
+        qtd = extrair_quantidade(conteudo) or 1
+        pool = []
+        if message.role_mentions:
+            role_s = message.role_mentions[0]
+            pool = [m for m in role_s.members if not m.bot and m != client.user]
+        elif alvos:
+            pool = alvos
+        else:
+            pool = [m for m in guild.members if not m.bot and m != client.user]
+        if not pool:
+            await message.channel.send("Nenhum membro disponível para sortear.")
+            return True
+        qtd = min(qtd, len(pool))
+        ganhadores = random.sample(pool, qtd)
+        mencoes = " ".join(m.mention for m in ganhadores)
+        sufixo = "o sorteado é" if qtd == 1 else f"os {qtd} sorteados são"
+        await message.channel.send(f"Sorteio encerrado — {sufixo}: {mencoes}")
+        log.info(f"[SORTEIO] {autor}: {[m.display_name for m in ganhadores]}")
+
+    # ── pin / fixar mensagem ──────────────────────────────────────────────────
+    # Uso: responde à mensagem e diz "Shell fixa isso" ou "Shell pin"
+    elif re.search(r'\b(fixa[r]?|fix[ae]|pin|fixar|pinar)\b', conteudo.lower()):
+        alvo_pin = None
+        if message.reference and isinstance(getattr(message.reference, "resolved", None), discord.Message):
+            alvo_pin = message.reference.resolved
+        else:
+            # Última mensagem do canal que não seja do bot
+            async for m in message.channel.history(limit=10):
+                if m.id != message.id and m.author != client.user:
+                    alvo_pin = m
+                    break
+        if alvo_pin:
+            try:
+                await alvo_pin.pin()
+                await message.channel.send("Mensagem fixada.")
+            except Exception as e:
+                await message.channel.send(f"Não foi possível fixar: {e}")
+        else:
+            await message.channel.send("Responde à mensagem que quer fixar, ou diz qual.")
+
+    # ── unpin / desafixar ─────────────────────────────────────────────────────
+    elif re.search(r'\b(desafix[ae]r?|unpin|despin)\b', conteudo.lower()):
+        alvo_unpin = None
+        if message.reference and isinstance(getattr(message.reference, "resolved", None), discord.Message):
+            alvo_unpin = message.reference.resolved
+        if alvo_unpin:
+            try:
+                await alvo_unpin.unpin()
+                await message.channel.send("Mensagem desafixada.")
+            except Exception as e:
+                await message.channel.send(f"Não foi possível desafixar: {e}")
+        else:
+            await message.channel.send("Responde à mensagem que quer desafixar.")
+
+    # ── limpar canal ──────────────────────────────────────────────────────────
+    # Uso: "Shell limpa 10 mensagens" ou "Shell limpa #canal 5 mensagens"
+    elif re.search(r'\b(limpa[r]?|purga[r]?|apaga[r]?\s+mensagens?|deleta[r]?\s+mensagens?)\b', conteudo.lower()):
+        qtd_limpa = extrair_quantidade(conteudo) or 10
+        qtd_limpa = min(qtd_limpa, 50)
+        canal_limpa = message.channel_mentions[0] if message.channel_mentions else message.channel
+        apagadas = 0
+        try:
+            async for m in canal_limpa.history(limit=qtd_limpa + 5):
+                if m.author == client.user:
+                    await m.delete()
+                    apagadas += 1
+                    if apagadas >= qtd_limpa:
+                        break
+                    await asyncio.sleep(0.4)
+            await message.channel.send(f"{apagadas} mensagem{'s' if apagadas != 1 else ''} minhas apagada{'s' if apagadas != 1 else ''} em {canal_limpa.mention}.")
+        except Exception as e:
+            await message.channel.send(f"Erro ao limpar: {e}")
+
+    # ── criar canal ───────────────────────────────────────────────────────────
+    # Uso: "Shell cria canal texto nome-do-canal [categoria]"
+    # Ou:  "Shell cria canal voz nome-do-canal"
+    elif re.search(r'\b(cri[ae]r?\s+canal|cria\s+(?:um\s+)?canal)\b', conteudo.lower()):
+        tipo_voz = bool(re.search(r'\b(voz|voice|áudio|audio)\b', conteudo.lower()))
+        # Extrai nome — tudo após "canal voz/texto/de/um"
+        nome_canal = re.sub(
+            r'(?i).*?\bcria[r]?\s+(?:um\s+)?canal\s+(?:de\s+)?(?:texto|voz|voice|áudio|audio)?\s*', '', conteudo
+        ).strip()
+        # Remove menções de categoria se houver
+        cat_nome = None
+        m_cat = re.search(r'\b(?:na\s+categoria|categoria)\s+["\']?(.+?)["\']?\s*$', nome_canal, re.IGNORECASE)
+        if m_cat:
+            cat_nome = m_cat.group(1).strip()
+            nome_canal = nome_canal[:m_cat.start()].strip()
+        nome_canal = re.sub(r'[^\w\-]', '-', nome_canal.lower()).strip('-') or "novo-canal"
+        categoria = None
+        if cat_nome:
+            categoria = discord.utils.get(guild.categories, name=cat_nome)
+        try:
+            if tipo_voz:
+                novo = await guild.create_voice_channel(nome_canal, category=categoria, reason=f"Ordem de {autor}")
+            else:
+                novo = await guild.create_text_channel(nome_canal, category=categoria, reason=f"Ordem de {autor}")
+            tipo_txt = "voz" if tipo_voz else "texto"
+            await message.channel.send(f"Canal de {tipo_txt} {novo.mention} criado.")
+            log.info(f"[CANAL] {autor} criou #{nome_canal} ({tipo_txt})")
+        except Exception as e:
+            await message.channel.send(f"Não foi possível criar o canal: {e}")
+
+    # ── criar cargo ───────────────────────────────────────────────────────────
+    # Uso: "Shell cria cargo NomeDoCargo"
+    elif re.search(r'\b(cri[ae]r?\s+cargo|cria\s+(?:um\s+)?cargo)\b', conteudo.lower()):
+        nome_cargo = re.sub(
+            r'(?i).*?\bcria[r]?\s+(?:um\s+)?cargo\s*', '', conteudo
+        ).strip()
+        nome_cargo = nome_cargo[:50] or "Novo Cargo"
+        try:
+            novo_cargo = await guild.create_role(name=nome_cargo, reason=f"Ordem de {autor}")
+            await message.channel.send(f"Cargo {novo_cargo.mention} criado.")
+            log.info(f"[CARGO] {autor} criou cargo '{nome_cargo}'")
+        except Exception as e:
+            await message.channel.send(f"Não foi possível criar o cargo: {e}")
+
+    # ── renomear canal ────────────────────────────────────────────────────────
+    # Uso: "Shell renomeia #canal para novo-nome"
+    elif re.search(r'\b(renomei[ae]r?|rename)\b.{0,20}\bcanal\b', conteudo.lower()):
+        if not message.channel_mentions:
+            await message.channel.send("Menciona o canal a renomear.")
+            return True
+        m_para = re.search(r'\bpara\s+(.+)$', conteudo, re.IGNORECASE)
+        if not m_para:
+            await message.channel.send("Formato: Shell renomeia #canal para novo-nome")
+            return True
+        novo_nome = re.sub(r'[^\w\-]', '-', m_para.group(1).strip().lower()).strip('-')
+        canal_ren = message.channel_mentions[0]
+        nome_antigo = canal_ren.name
+        try:
+            await canal_ren.edit(name=novo_nome, reason=f"Ordem de {autor}")
+            await message.channel.send(f"Canal #{nome_antigo} renomeado para #{novo_nome}.")
+        except Exception as e:
+            await message.channel.send(f"Não foi possível renomear: {e}")
+
+    # ── renomear cargo ────────────────────────────────────────────────────────
+    # Uso: "Shell renomeia cargo NomeAntigo para NomeNovo"
+    elif re.search(r'\b(renomei[ae]r?|rename)\b.{0,20}\bcargo\b', conteudo.lower()):
+        m_para = re.search(r'\bpara\s+(.+)$', conteudo, re.IGNORECASE)
+        if not m_para:
+            await message.channel.send("Formato: Shell renomeia cargo NomeAtual para NomeNovo")
+            return True
+        novo_nome_c = m_para.group(1).strip()[:50]
+        # Extrai nome atual do cargo
+        nome_atual = re.sub(r'(?i).*?\bcargo\s+', '', conteudo)
+        nome_atual = re.sub(r'\bpara\b.*$', '', nome_atual, flags=re.IGNORECASE).strip()
+        role_ren = _buscar_role_por_nome(guild, nome_atual) or (message.role_mentions[0] if message.role_mentions else None)
+        if not role_ren:
+            await message.channel.send(f"Não encontrei o cargo '{nome_atual}'.")
+            return True
+        try:
+            nome_antigo_c = role_ren.name
+            await role_ren.edit(name=novo_nome_c, reason=f"Ordem de {autor}")
+            await message.channel.send(f"Cargo '{nome_antigo_c}' renomeado para '{novo_nome_c}'.")
+        except Exception as e:
+            await message.channel.send(f"Não foi possível renomear o cargo: {e}")
+
+    # ── lembrete agendado ─────────────────────────────────────────────────────
+    # Uso: "Shell em 30 minutos avisa a galera no #canal sobre o evento"
+    # Ou:  "Shell em 2 horas manda no #canal: bora jogar"
+    elif re.search(r'\bem\s+\d+\s*(minuto|min|hora|h)\b', conteudo.lower()):
+        m_tempo = re.search(r'em\s+(\d+)\s*(minuto|min|hora|h)\w*', conteudo.lower())
+        if not m_tempo:
+            return False
+        valor = int(m_tempo.group(1))
+        unidade = m_tempo.group(2)
+        segundos = valor * 3600 if unidade.startswith('h') else valor * 60
+        canal_lemb = message.channel_mentions[0] if message.channel_mentions else message.channel
+        # Extrai mensagem — tudo após "avisa/manda/diz" ou após ":"
+        texto_lemb = re.sub(r'(?i).*?\bem\s+\d+\s*\w+\s+(?:\w+\s+)?(?:no\s+\w+\s+)?(?:<#\d+>\s*)?', '', conteudo).strip()
+        if ':' in texto_lemb:
+            texto_lemb = texto_lemb.split(':', 1)[1].strip()
+        texto_lemb = re.sub(r'<#\d+>', '', texto_lemb).strip() or "Lembrete do servidor."
+        dur_txt = f"{valor} {'minuto' if unidade.startswith('m') else 'hora'}{'s' if valor != 1 else ''}"
+        await message.channel.send(f"Lembrete agendado em {dur_txt} em {canal_lemb.mention}.")
+
+        async def _disparar():
+            await asyncio.sleep(segundos)
+            try:
+                await canal_lemb.send(f"Lembrete: {texto_lemb}")
+            except Exception:
+                pass
+        asyncio.ensure_future(_disparar())
+        log.info(f"[LEMBRETE] {autor}: {texto_lemb!r} em {dur_txt} → {canal_lemb.name}")
+
+    # ── debate ────────────────────────────────────────────────────────────────
+    # Uso: "Shell abre debate: tema aqui" — bot posta o tema e gerencia 10 minutos
+    elif re.search(r'\b(debate|discussão|discussao|discutir)\b', conteudo.lower()):
+        tema_db = re.sub(r'(?i).*?\b(?:debate|discussão|discussao|discutir)\b\s*:?\s*', '', conteudo).strip()
+        if not tema_db:
+            await message.channel.send("Qual o tema do debate? Diga: Shell debate: tema aqui")
+            return True
+        canal_db = message.channel_mentions[0] if message.channel_mentions else message.channel
+        await canal_db.send(
+            f"**Debate aberto: {tema_db}**\n"
+            f"Galera, a discussão tá rolando por 10 minutos. "
+            f"Respeito nos argumentos — sem agressividade."
+        )
+
+        async def _encerrar_debate():
+            await asyncio.sleep(600)
+            try:
+                await canal_db.send(f"Debate encerrado: **{tema_db}**. Bom papo, galera.")
+            except Exception:
+                pass
+        asyncio.ensure_future(_encerrar_debate())
+        log.info(f"[DEBATE] {autor}: {tema_db!r}")
+
+    # ── posta relatório em canal ──────────────────────────────────────────────
+    # Uso: "Shell posta relatório [semanal/mensal/membros] em #canal"
+    elif re.search(r'\b(posta[r]?\s+relat[oó]rio|relat[oó]rio\s+em)\b', conteudo.lower()):
+        canal_rel = message.channel_mentions[0] if message.channel_mentions else message.channel
+        msg_l = conteudo.lower()
+        dias_rel = 30 if 'mensa' in msg_l else 7
+        rel = await relatorio_membros(guild, dias_rel)
+        tipo_txt = "mensal" if dias_rel == 30 else "semanal"
+        blocos = [rel[i:i+1800] for i in range(0, len(rel), 1800)]
+        await canal_rel.send(f"**Relatório {tipo_txt} — {guild.name}**")
+        for bloco in blocos:
+            await canal_rel.send(f"```\n{bloco}\n```")
+        if canal_rel.id != message.channel.id:
+            await message.channel.send(f"Relatório {tipo_txt} postado em {canal_rel.mention}.")
+
     else:
         return False
 
@@ -3163,6 +3417,31 @@ def _atualizar_contexto(guild: discord.Guild):
     _contexto_compacto = build_server_context_compact(guild)
 
 
+async def _task_relatorio_semanal():
+    """Task em background: posta relatório semanal no canal de auditoria toda segunda-feira às 08h (Brasília)."""
+    await client.wait_until_ready()
+    brasilia = timezone(timedelta(hours=-3))
+    while not client.is_closed():
+        agora = datetime.now(brasilia)
+        # Calcula próxima segunda-feira às 08h
+        dias_ate_segunda = (7 - agora.weekday()) % 7 or 7
+        proxima = agora.replace(hour=8, minute=0, second=0, microsecond=0) + timedelta(days=dias_ate_segunda)
+        espera = (proxima - agora).total_seconds()
+        await asyncio.sleep(espera)
+        guild = client.get_guild(SERVIDOR_ID)
+        if not guild:
+            continue
+        canal = guild.get_channel(CANAL_AUDITORIA_ID)
+        if not canal:
+            continue
+        try:
+            rel = await relatorio_membros(guild, 7)
+            await canal.send(f"**Relatório semanal automático — semana encerrada**\n```\n{rel[:1800]}\n```")
+            log.info("[SEMANAL] Relatório postado.")
+        except Exception as e:
+            log.error(f"[SEMANAL] Falha: {e}")
+
+
 @client.event
 async def on_ready():
     carregar_dados()
@@ -3175,6 +3454,7 @@ async def on_ready():
         log.info(f"Contexto mapeado: {len(guild.channels)} canais, {len(guild.roles)} cargos, {guild.member_count} membros.")
     else:
         log.error(f"Servidor {SERVIDOR_ID} não encontrado.")
+    asyncio.ensure_future(_task_relatorio_semanal())
 
 
 @client.event
@@ -3228,6 +3508,23 @@ async def on_member_join(member: discord.Member):
             f"[ENTRADA]{aviso}{reentrada} {member.display_name} ({member.id}) "
             f"entrou. Conta criada há {formatar_duracao(idade_conta)}."
         )
+
+    # ── Boas-vindas automática no canal geral ─────────────────────────────────
+    canal_geral = discord.utils.get(member.guild.text_channels, name="geral") \
+               or discord.utils.get(member.guild.text_channels, name="chat") \
+               or discord.utils.get(member.guild.text_channels, name="testes") \
+               or member.guild.system_channel
+    if canal_geral:
+        if vezes > 1:
+            bv = f"Eae {member.mention}, voltou por aqui. Seja bem-vindo de volta."
+        elif conta_nova:
+            bv = f"Eae {member.mention}, conta nova em folha. Leia as regras em {CANAL_REGRAS} antes de qualquer coisa."
+        else:
+            bv = f"Eae {member.mention}, bem-vindo ao servidor. Leia as regras em {CANAL_REGRAS} e aproveita."
+        try:
+            await canal_geral.send(bv)
+        except Exception:
+            pass
 
     # Atualiza contexto do servidor
     _atualizar_contexto(member.guild)
