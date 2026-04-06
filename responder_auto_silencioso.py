@@ -658,11 +658,17 @@ GATILHOS_NOME = re.compile(
     re.IGNORECASE
 )
 # Contextos que desambiguam "shell" (terminal/bash) ou "engenheiro" (profissão técnica).
-# Se presentes, GATILHOS_NOME não dispara  -  evita responder "shell bash", "engenheiro elétrico".
+# Se presentes, GATILHOS_NOME não dispara.
 _GATILHO_EXCLUIDO = re.compile(
     r'\b(?:bash|zsh|fish|sh\b|script|linux|unix|terminal|comando'
     r'|el[eé]tric[ao]|civil|mecânic[ao]|mecanico|quimic[ao]|nuclear'
     r'|agrônom[ao]|agronomo|de\s+software|de\s+dados|de\s+sistemas)\b',
+    re.IGNORECASE
+)
+# Nome do bot precedido de negativa/dismissão  -  "N Shell", "Não Shell", "Nop Shell".
+# Nesses casos o nome é citado, não endereçado.
+_GATILHO_NEGATIVO = re.compile(
+    r"^(?:n(?:[aã]o?)?|nop[e]?|nunca|negat\w*|claro\s+que\s+n[aã]o?)[,\s]+(?:shell|engenheir\w*)\b",
     re.IGNORECASE
 )
 
@@ -2313,6 +2319,16 @@ def system_com_contexto() -> str:
         "NUNCA diga 'como estou em um ambiente de texto não posso...'  -  você não está limitado a texto.\n"
         "Se não conseguir fazer algo: diga em UMA frase curta que não consegue. Ponto. Sem elaborar.\n"
         "Se consegue fazer: faça. Não anuncie que vai fazer, não descreva a ação  -  execute.\n\n"
+
+        "CONTROLE DE INTERPRETAÇÃO  -  NÃO REAJA POR IMPULSO:\n"
+        "Nem toda mensagem é um pedido. Nem toda fala é uma instrução.\n"
+        "Antes de agir: verifique se há contexto suficiente, intenção clara e direcionamento real.\n"
+        "Se a mensagem for observação, comentário, verificação, hipótese ou raciocínio: RESPONDA, não execute.\n"
+        "  Exemplos de não-pedidos: 'vi que você faz X', 'você avisa quando Y, certo?', 'interessante como Z'\n"
+        "  Exemplos de pedidos: 'cria o canal X', 'me manda uma lista', 'bane o usuário Y'\n"
+        "Dúvida entre conversa e solicitação? Assuma conversa.\n"
+        "Dúvida entre observação e instrução? Assuma observação.\n"
+        "É melhor não agir do que agir com interpretação errada.\n\n"
 
         "CONTINUIDADE DE CONVERSA:\n"
         "Você tem o histórico desta conversa. Use-o ativamente.\n"
@@ -4373,6 +4389,56 @@ async def resposta_inicial_superior(conteudo: str, autor: str, user_id: int, gui
 
 
 
+# ── Validação de intenção: separa solicitação de observação ──────────────────
+
+def _tem_intencao_de_acao(conteudo: str) -> bool:
+    """
+    Heurística rápida (sem API): retorna True apenas quando a mensagem contém
+    indicadores claros de solicitação de ação.
+
+    Retorna False para:
+    - observações ("vi que X", "notei que Y")
+    - verificações ("X funciona, certo?", "é isso mesmo?")
+    - confirmações do que o bot faz ("você avisa quando X, né?")
+    - construções hipotéticas já filtradas antes
+    """
+    msg = conteudo.lower().strip()
+
+    # Marcadores de observação/verificação — não são pedidos
+    if re.search(
+        r'\b(?:vi\s+qu[e]?|notei\s+qu[e]?|percebi\s+qu[e]?|parece\s+qu[e]?'
+        r'|vejo\s+qu[e]?|sei\s+qu[e]?|soube\s+qu[e]?)\b'
+        r'|\bcerto\s*\?|\bné\s*\?|\bnão\s+é\s*\?|\bverdade\s*\?|\bmesmo\s*\?'
+        r'|\bé\s+isso\b|\bé\s+verdade\b|\bfuncion[ao]u?\b.*\?$'
+        r'|\bvc\s+(?:faz|avisa|manda|responde)\b.*\?\s*$',
+        msg,
+        re.IGNORECASE,
+    ):
+        return False
+
+    # Verbos de ação claros — provavelmente é um pedido
+    if re.search(
+        r'\b(?:cria[r]?|gera[r]?|faze[r]?|mand[ae][r]?|envi[ae][r]?'
+        r'|bota[r]?|add|adiciona[r]?|remove[r]?|deleta[r]?|apaga[r]?'
+        r'|ban[e]?|kick|expuls[ae]|silencia[r]?|muta[r]?'
+        r'|posta[r]?|escreve[r]?|coloca[r]?|configura[r]?'
+        r'|ativa[r]?|desativa[r]?|abre[r]?|fecha[r]?|lista[r]?|mostra[r]?)\b',
+        msg,
+    ):
+        return True
+
+    if re.search(
+        r'\bquero\s+que\b|\bpreciso\s+que\b'
+        r'|\bme\s+(?:ajuda|faz|diz|manda|da|d[aá])\b'
+        r'|\bpode[s]?\s+(?:fazer|criar|me|ir)\b',
+        msg,
+    ):
+        return True
+
+    # Por padrão: assume que é conversa, não ação
+    return False
+
+
 # ── Interpretação natural de instruções (adendo: sem comandos explícitos) ─────
 
 async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | None:
@@ -4426,6 +4492,11 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
         return None
 
 
+_ACOES_DESTRUTIVAS = frozenset({
+    "criar_cargo", "criar_canal", "banir", "expulsar", "silenciar",
+    "aviso", "remover_cargo", "deletar_canal",
+})
+
 async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.Guild) -> bool:
     """Executa ação parseada pela IA. Retorna True se executou algo."""
     acao = intencao.get("acao", "conversa")
@@ -4436,6 +4507,11 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
 
     canal = message.channel
     autor = message.author.display_name
+
+    # Ações destrutivas/irreversíveis exigem @menção explícita — não apenas gatilho de nome
+    if acao in _ACOES_DESTRUTIVAS and client.user not in message.mentions:
+        log.info(f"[IA] acao destrutiva '{acao}' bloqueada: sem @mencao direta (autor={autor})")
+        return False
 
     def _resolver_membro(nome: str) -> discord.Member | None:
         if not nome or not guild:
@@ -5297,8 +5373,8 @@ async def _on_message_impl(message: discord.Message):
                 asyncio.ensure_future(_participar_debate(message, _debate["tema"]))
         elif _canal_id in canais_monitorados:
             _ultima = ultima_interjeccao.get(_canal_id, datetime(1970, 1, 1, tzinfo=timezone.utc))
-            # Interjeta com 15% de chance, cooldown de 3min
-            if (_agora - _ultima).total_seconds() > 180 and random.random() < 0.15:
+            # Interjeta com 6% de chance, cooldown de 8min — não invasivo
+            if (_agora - _ultima).total_seconds() > 480 and random.random() < 0.06:
                 ultima_interjeccao[_canal_id] = _agora
                 asyncio.ensure_future(_interjetar_conversa(message))
 
@@ -5323,7 +5399,11 @@ async def _on_message_impl(message: discord.Message):
         and message.reference.resolved.author == client.user
     )
 
-    _gatilho_nome = bool(GATILHOS_NOME.search(conteudo)) and not _GATILHO_EXCLUIDO.search(conteudo)
+    _gatilho_nome = (
+        bool(GATILHOS_NOME.search(conteudo))
+        and not _GATILHO_EXCLUIDO.search(conteudo)
+        and not _GATILHO_NEGATIVO.search(conteudo)
+    )
     mencionado = (
         client.user in message.mentions
         or client.user.id in ids_mencionados
@@ -5368,13 +5448,14 @@ async def _on_message_impl(message: discord.Message):
         tratado = await processar_ordem(message)
         log.info(f"[DONO] processar_ordem retornou {tratado}")
         if not tratado and mencionado:
-            # Tenta interpretar como instrução natural via IA antes de cair no chat
-            intencao_ia = await _ia_parsear_instrucao(conteudo, message.guild)
-            if intencao_ia:
-                log.info(f"[DONO] IA interpretou: {intencao_ia.get('acao')}")
-                tratado_ia = await _ia_executar(intencao_ia, message, message.guild)
-                if tratado_ia:
-                    return
+            # Só interpreta como instrução quando há intenção clara de ação
+            if _tem_intencao_de_acao(conteudo):
+                intencao_ia = await _ia_parsear_instrucao(conteudo, message.guild)
+                if intencao_ia:
+                    log.info(f"[DONO] IA interpretou: {intencao_ia.get('acao')}")
+                    tratado_ia = await _ia_executar(intencao_ia, message, message.guild)
+                    if tratado_ia:
+                        return
             # Continua conversa ativa antes de cair em resposta_inicial_superior
             estado_conv = conversas.get(user_id)
             if estado_conv and (estado_conv.get("canal") is None or estado_conv["canal"] == message.channel.id):
@@ -5405,13 +5486,14 @@ async def _on_message_impl(message: discord.Message):
             return
         tratado = await processar_ordem(message)
         if not tratado and mencionado:
-            # Tenta interpretar como instrução natural via IA antes de cair no chat
-            intencao_ia = await _ia_parsear_instrucao(conteudo, message.guild)
-            if intencao_ia:
-                log.info(f"[SUP] IA interpretou: {intencao_ia.get('acao')}")
-                tratado_ia = await _ia_executar(intencao_ia, message, message.guild)
-                if tratado_ia:
-                    return
+            # Só interpreta como instrução quando há intenção clara de ação
+            if _tem_intencao_de_acao(conteudo):
+                intencao_ia = await _ia_parsear_instrucao(conteudo, message.guild)
+                if intencao_ia:
+                    log.info(f"[SUP] IA interpretou: {intencao_ia.get('acao')}")
+                    tratado_ia = await _ia_executar(intencao_ia, message, message.guild)
+                    if tratado_ia:
+                        return
             # Continua conversa ativa antes de cair em resposta_inicial_superior
             estado_conv = conversas.get(user_id)
             if estado_conv and (estado_conv.get("canal") is None or estado_conv["canal"] == message.channel.id):
