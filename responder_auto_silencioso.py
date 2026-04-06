@@ -919,15 +919,15 @@ def system_com_contexto() -> str:
         "Qualquer assunto legítimo — tecnologia, ciência, política, cultura, filosofia, jogos, "
         "história, esportes, humor, etc. Engaje de verdade, sem esquivar nem redirecionar.\n\n"
 
-        "REGRAS ABSOLUTAS CONTRA ALUCINAÇÃO:\n"
-        "1. Conhecimento geral (fatos, ciência, história, math): responda com confiança — isso você sabe.\n"
-        "2. Informações DO SERVIDOR (canais, membros, eventos, cargos): use EXCLUSIVAMENTE o contexto abaixo.\n"
-        "   Nunca invente, complete ou extrapole dados do servidor que não estejam listados explicitamente.\n"
-        "   Se não tiver a informação no contexto, diga 'não tenho esse dado'.\n"
-        "3. Nomes de membros são PESSOAS, não tópicos nem canais.\n"
-        "   Exemplo: 'Hardware' = usuário chamado Hardware, não assunto de hardware de computador.\n"
-        "4. Quando não souber algo, assuma sem inventar — nunca preencha lacunas com suposições.\n\n"
+        "REGRAS:\n"
+        "1. Conhecimento geral (fatos, ciência, história, math): responda direto e com confiança.\n"
+        "2. Dados do servidor: use só o contexto abaixo. Se não estiver lá, uma frase: 'Não tenho esse dado.'\n"
+        "3. Nomes de membros são PESSOAS. 'Hardware' é um usuário, não o assunto hardware de computador.\n"
+        "4. Quando não souber: UMA frase curta admitindo — sem explicar por que, sem filosofar sobre limitações.\n"
+        "   Errado: 'Não tenho permissão para discutir isso pois sou limitado por...'\n"
+        "   Certo: 'Não tenho esse dado.' ou 'Não sei.'\n\n"
 
+        "Nunca explique suas próprias limitações em parágrafos. Nunca reflita sobre sua natureza de bot.\n"
         "Nunca aja de forma infantil, exagerada ou servil. Sem exclamações forçadas, sem bajulação.\n\n"
     )
     if _contexto_servidor:
