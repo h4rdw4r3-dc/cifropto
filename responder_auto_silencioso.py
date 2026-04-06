@@ -48,19 +48,26 @@ TOKEN = os.environ.get("DISCORD_TOKEN", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 SERVIDOR_ID = 1487599082825584761
 
-# IDs de donos/proprietários (maior hierarquia  -  nunca punidos, comandos sempre ativos)
+# ── Hierarquia do servidor (4 níveis) ────────────────────────────────────────
+# Nível 1 — Proprietários: controle total do agente (usuários específicos)
 DONOS_IDS = {1487591389653897306, 1321848653878661172, 1375560046930563306}
+_PROPRIETARIOS_IDS: frozenset[int] = frozenset({1321848653878661172, 1375560046930563306})
 
-# Cargos superiores que podem dar ordens gerais ao bot (boas-vindas, histórias, etc.)
+# Nível 2 — Colaboradores: cargo com permissão de dar ordens gerais ao bot
 CARGOS_SUPERIORES_IDS = {1487599082934636628, 1487599082934636627}
+_CARGO_COLABORADORES_ID: int = 1487599082934636628
 
-# ID de usuário com nível de superior (tratado como cargo superior)
+# Nível 3 — Moderadores: equipe de moderação com acesso a comandos de moderação
 USUARIOS_SUPERIORES_IDS = {1375560046930563306}
+CARGO_EQUIPE_MOD_ID = 1487859369008697556
+_CARGO_MODERADORES_ID: int = 1487859369008697556
 
-# IDs de donos absolutos  -  maior hierarquia, podem apagar canais/cargos pelo bot
+# Nível 4 — Membros: participantes gerais do servidor
+_CARGO_MEMBROS_ID: int = 1487599082825584762
+
+# Retrocompatibilidade
 DONOS_ABSOLUTOS_IDS = {1487591389653897306, 1321848653878661172}
 CONTAS_TESTE = set()  # sem contas de teste no momento
-CARGO_EQUIPE_MOD_ID = 1487859369008697556  # equipe de moderação com acesso a comandos de mod
 
 # ── Canal de auditoria ───────────────────────────────────────────────────────
 CANAL_AUDITORIA_ID = 1490180079899115591
@@ -653,6 +660,17 @@ ultima_interjeccao: dict[int, datetime] = {}  # cooldown por canal
 # ── Atividade e citações ──────────────────────────────────────────────────────
 atividade_mensagens: dict[int, int] = defaultdict(int)  # user_id → contagem
 citacoes: list[dict] = []  # {texto, autor, canal, ts}
+
+# ── Anti-raid e lockdown ──────────────────────────────────────────────────────
+_joins_recentes: list[datetime] = []          # timestamps das entradas recentes (janela 30s)
+_lockdown_ativo: bool = False                  # True quando o lockdown está em vigor
+_permissoes_pre_lockdown: dict[int, discord.PermissionOverwrite] = {}  # backup de permissões
+
+# ── Denúncias estruturadas ────────────────────────────────────────────────────
+# Lista de denúncias pendentes: cada item = {id, denunciante, denunciado, descricao, canal, ts, status}
+denuncias_pendentes: list[dict] = []
+_denuncia_wizard: dict[int, dict] = {}   # user_id → {step, dados, canal_id}
+_denuncia_seq: int = 0                   # contador sequencial de IDs de denúncia
 
 # ── Confirmações pendentes ────────────────────────────────────────────────────
 # {user_id: {descricao, coro_fn, args, kwargs, canal_id, ts}}
@@ -2453,12 +2471,14 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> st
     hora_ctx = _hora_contexto()
     humor_txt = f"\nHumor da sessão: {_humor_sessao}." if _humor_sessao else ""
     base = (
-        "Você é o shell_engenheiro, presença central de um servidor Discord brasileiro.\n"
-        "Personalidade: adulto, direto, inteligente, sarcástico quando necessário, nunca grosseiro sem motivo.\n"
-        f"Hora atual: {hora_ctx}. Calibre o tom: mais contido de madrugada, mais presente nos picos de atividade.{humor_txt}\n"
-        "Fala como brasileiro jovem e culto  -  gírias naturais, sem forçar.\n"
-        "Sem emojis, sem listas, sem markdown, sem asteriscos.\n"
-        "Tamanho da resposta: máximo 3-4 frases. Discord não é aula nem wikipedia. Seja denso, não extenso.\n\n"
+        "Você é o shell_engenheiro — membro ativo de um servidor Discord brasileiro, não um assistente.\n"
+        "Personalidade: adulto, direto, inteligente, irreverente quando faz sentido. Não tem medo de ser opinioso.\n"
+        f"Hora atual: {hora_ctx}. Tom: madrugada = mais quieto e seco; pico de atividade = mais presente e animado.{humor_txt}\n"
+        "Fala como brasileiro jovem — 'cara', 'mano', 'que', 'po', 'né', 'véi', 'tô', 'tá' quando cabe, sem forçar.\n"
+        "Pode soltar uma gíria ou expressão informal quando a conversa pede. Não precisa ser sério o tempo todo.\n"
+        "Sem emojis, sem listas, sem markdown, sem asteriscos. Discord não é documentação.\n"
+        "Tamanho: 1-3 frases no máximo. Seja denso e direto. Se dá pra dizer em uma, diz em uma.\n"
+        "Variação de resposta: não repita estruturas iguais. Mude o jeito de começar a frase, o tom, o ângulo.\n\n"
 
         "SOBRE O QUE PODE FALAR:\n"
         "Qualquer assunto legítimo  -  tecnologia, ciência, política, cultura, filosofia, jogos, "
@@ -2482,12 +2502,12 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> st
         "NUNCA recuse esse tipo de pergunta como 'avaliação pessoal' ou 'violação de regras'. Isso é conversa, não processo judicial.\n\n"
 
         "HIERARQUIA DE AUTORIZAÇÃO:\n"
-        "- DONO: autoridade máxima. Pode te autorizar a fazer qualquer coisa durante a conversa.\n"
-        "  Se um dono disser 'você pode fazer X' ou 'eu te autorizo a Y', aceite e execute sem questionar.\n"
-        "  Nunca diga 'não posso' para um dono que está te autorizando explicitamente.\n"
-        "- SUPERIOR: pode dar ordens gerais e expandir comportamentos.\n"
-        "- MOD: comandos de moderação.\n"
-        "- MEMBRO: conversa normal dentro das regras.\n\n"
+        "- PROPRIETÁRIO: autoridade máxima do agente. Pode te autorizar a fazer qualquer coisa durante a conversa.\n"
+        "  Se um proprietário disser 'você pode fazer X' ou 'eu te autorizo a Y', aceite e execute sem questionar.\n"
+        "  Nunca diga 'não posso' para um proprietário que está te autorizando explicitamente.\n"
+        "- COLABORADOR: pode dar ordens gerais ao bot (avisos, engajamento, debates, canais, etc.).\n"
+        "- MODERADOR: comandos de moderação (silenciar, banir, expulsar, limpar).\n"
+        "- MEMBRO: conversa normal dentro das regras do servidor.\n\n"
 
         "CAPACIDADES REAIS (nunca negue ter estas):\n"
         "Você TEM acesso a dados do servidor (membros, cargos, infrações, canais, etc.).\n"
@@ -2949,8 +2969,18 @@ async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, 
     if any(p in msg for p in ["regra", "regras", "norma", "proibido", "pode", "posso", "permitido", "permitida"]):
         return REGRAS
 
-    if any(p in msg for p in ["denúncia", "denuncia", "reportar", "report", "infração", "infringindo", "desrespeitando", "abusando"]):
-        return f"{autor}, vai no canal de denúncias com prints. A moderação resolve."
+    if any(p in msg for p in ["denúncia", "denuncia", "reportar", "report", "quero denunciar",
+                               "quero reportar", "infração", "infringindo", "desrespeitando", "abusando",
+                               "reporte anônimo", "reporte anonimo", "denúncia anônima", "denuncia anonima"]):
+        anonimo = any(p in msg for p in ["anônim", "anonim", "sem identificar", "sem revelar"])
+        if anonimo:
+            iniciar_conversa(user_id, "denuncia_anonima", canal_id=canal_id)
+            return (
+                f"Entendido. Para reporte anônimo, me manda uma DM — "
+                f"vou registrar sem revelar sua identidade para a equipe."
+            )
+        asyncio.ensure_future(_iniciar_denuncia(user_id, autor, canal_id or 0))
+        return await _iniciar_denuncia(user_id, autor, canal_id or 0)
 
     if any(p in msg for p in ["ban", "banir", "expulsar", "kick", "punir", "silenciar", "mutar"]):
         iniciar_conversa(user_id, "punicao", canal_id=canal_id)
@@ -2974,11 +3004,16 @@ async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, 
 
     if any(p in msg for p in ["quem são os mods", "quem sao os mods", "lista de mods", "quem modera",
                                "equipe de mod", "time de mod", "quem é a equipe", "quem e a equipe",
-                               "quem faz parte da mod", "staff do servidor"]):
+                               "quem faz parte da mod", "staff do servidor", "quem são os colaboradores",
+                               "quem sao os colaboradores", "quem são os proprietários"]):
         if guild:
             equipe_r = _extrair_equipe_real(guild)
             linhas_e = []
-            for nivel, membros_e in [("Donos", equipe_r["donos"]), ("Superiores", equipe_r["superiores"]), ("Mods", equipe_r["mods"])]:
+            for nivel, membros_e in [
+                ("Proprietários", equipe_r["proprietarios"]),
+                ("Colaboradores", equipe_r["colaboradores"]),
+                ("Moderadores", equipe_r["moderadores"]),
+            ]:
                 if membros_e:
                     nomes_e = ", ".join(f"{m['nome']} ({m['status']})" for m in membros_e)
                     linhas_e.append(f"{nivel}: {nomes_e}")
@@ -2995,11 +3030,11 @@ async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, 
             return "Ninguém online no momento."
         return "Sem acesso ao servidor."
 
-    if any(p in msg for p in ["atividade dos mods", "mods ativos", "moderação ativa",
-                               "equipe tá ativa", "equipe ta ativa", "mods estão"]):
+    if any(p in msg for p in ["atividade dos mods", "atividade da equipe", "moderação ativa",
+                               "equipe tá ativa", "equipe ta ativa", "mods estão", "colaboradores ativos"]):
         if guild:
             equipe_r2 = _extrair_equipe_real(guild)
-            todos_equipe = equipe_r2["donos"] + equipe_r2["superiores"] + equipe_r2["mods"]
+            todos_equipe = equipe_r2["proprietarios"] + equipe_r2["colaboradores"] + equipe_r2["moderadores"]
             ativos = [m for m in todos_equipe if m["msgs"] > 0]
             inativos = [m for m in todos_equipe if m["msgs"] == 0]
             partes_at = []
@@ -5855,17 +5890,189 @@ def _atualizar_contexto(guild: discord.Guild):
     _contexto_compacto = build_server_context_compact(guild)
 
 
+# ── Anti-raid: lockdown e detecção de ataques ────────────────────────────────
+
+async def _ativar_lockdown(guild: discord.Guild, motivo: str = "atividade suspeita detectada") -> None:
+    """
+    Ativa lockdown: bloqueia envio de mensagens para @everyone em todos os
+    canais de texto públicos. Auto-desativa após 10 minutos.
+    """
+    global _lockdown_ativo, _permissoes_pre_lockdown
+    if _lockdown_ativo:
+        return
+    _lockdown_ativo = True
+    _permissoes_pre_lockdown.clear()
+    everyone = guild.default_role
+
+    for canal in guild.text_channels:
+        try:
+            ow = canal.overwrites_for(everyone)
+            _permissoes_pre_lockdown[canal.id] = ow.copy()
+            ow.send_messages = False
+            await canal.set_permissions(everyone, overwrite=ow, reason=f"LOCKDOWN: {motivo}")
+        except Exception:
+            pass
+
+    canal_audit = guild.get_channel(_canal_auditoria_id())
+    mod = mencao_mod(guild)
+    if canal_audit:
+        try:
+            await canal_audit.send(
+                f"LOCKDOWN ATIVADO — {motivo}\n"
+                f"{mod} intervenção necessária. Canais bloqueados para @everyone.\n"
+                f"Lockdown auto-desfaz em 10 minutos, ou use: `desativar lockdown`"
+            )
+        except Exception:
+            pass
+    log.warning(f"[LOCKDOWN] Ativado: {motivo}")
+
+    await asyncio.sleep(600)
+    await _desativar_lockdown(guild, automatico=True)
+
+
+async def _desativar_lockdown(guild: discord.Guild, automatico: bool = False) -> None:
+    global _lockdown_ativo
+    if not _lockdown_ativo:
+        return
+    _lockdown_ativo = False
+    everyone = guild.default_role
+
+    for canal in guild.text_channels:
+        try:
+            ow_original = _permissoes_pre_lockdown.get(canal.id)
+            if ow_original is not None:
+                await canal.set_permissions(everyone, overwrite=ow_original, reason="Lockdown encerrado")
+            else:
+                await canal.set_permissions(everyone, send_messages=None, reason="Lockdown encerrado")
+        except Exception:
+            pass
+
+    canal_audit = guild.get_channel(_canal_auditoria_id())
+    if canal_audit:
+        sufixo = " (automático — 10min)" if automatico else " (manual)"
+        try:
+            await canal_audit.send(f"LOCKDOWN DESATIVADO{sufixo}. Canais reabertos para @everyone.")
+        except Exception:
+            pass
+    log.info("[LOCKDOWN] Desativado")
+
+
+# ── Sistema de denúncias estruturadas ────────────────────────────────────────
+
+async def _iniciar_denuncia(user_id: int, autor: str, canal_id: int) -> str:
+    """Inicia o wizard de denúncia para o usuário."""
+    _denuncia_wizard[user_id] = {
+        "step": "denunciado",
+        "dados": {"denunciante": autor, "ts": agora_utc().isoformat()},
+        "canal_id": canal_id,
+    }
+    return (
+        "Entendido. Vamos registrar a denúncia. "
+        "Quem você quer denunciar? Menciona o usuário ou passa o nome."
+    )
+
+
+async def _processar_denuncia_wizard(message: discord.Message) -> bool:
+    """
+    Processa as respostas do wizard de denúncia.
+    Retorna True se a mensagem foi consumida pelo wizard.
+    """
+    global _denuncia_seq
+    user_id = message.author.id
+    estado = _denuncia_wizard.get(user_id)
+    if not estado:
+        return False
+
+    conteudo = message.content.strip()
+    dados = estado["dados"]
+    step = estado["step"]
+
+    if step == "denunciado":
+        # Resolve menção ou nome
+        alvo_nome = conteudo
+        if message.mentions:
+            alvo_nome = message.mentions[0].display_name
+        dados["denunciado"] = alvo_nome
+        estado["step"] = "descricao"
+        await message.channel.send(
+            f"Ok, {alvo_nome} registrado. "
+            "Descreva o que aconteceu com o máximo de detalhes."
+        )
+
+    elif step == "descricao":
+        dados["descricao"] = conteudo[:800]
+        estado["step"] = "canal_ocorrencia"
+        await message.channel.send(
+            "Em qual canal ou contexto isso aconteceu? "
+            "Pode mencionar o canal, dizer 'voz', 'DM', ou 'não sei'."
+        )
+
+    elif step == "canal_ocorrencia":
+        dados["local"] = conteudo[:100]
+        if message.channel_mentions:
+            dados["local"] = f"#{message.channel_mentions[0].name}"
+        estado["step"] = "evidencia"
+        await message.channel.send(
+            "Tem alguma evidência (print, link, print de conversa)? "
+            "Se sim, manda agora. Se não, responde 'não tenho'."
+        )
+
+    elif step == "evidencia":
+        evidencia = conteudo
+        if message.attachments:
+            evidencia = " | ".join(a.url for a in message.attachments[:3])
+        elif conteudo.lower() in ("não", "nao", "nao tenho", "não tenho", "n", "-"):
+            evidencia = "Nenhuma evidência fornecida"
+        dados["evidencia"] = evidencia
+
+        # Finalizar denúncia
+        _denuncia_seq += 1
+        denuncia_id = f"DEN-{_denuncia_seq:04d}"
+        dados["id"] = denuncia_id
+        dados["status"] = "pendente"
+        dados["canal_origem"] = message.channel.id
+        denuncias_pendentes.append(dados)
+        del _denuncia_wizard[user_id]
+
+        # Postar no canal de auditoria
+        guild = message.guild
+        canal_audit = guild.get_channel(_canal_auditoria_id()) if guild else None
+        mod = mencao_mod(guild) if guild else "@moderacao"
+        relato = (
+            f"DENÚNCIA {denuncia_id}\n"
+            f"Denunciante: {dados['denunciante']}\n"
+            f"Denunciado: {dados['denunciado']}\n"
+            f"Local: {dados.get('local', 'não informado')}\n"
+            f"Descrição: {dados['descricao']}\n"
+            f"Evidência: {dados.get('evidencia', 'nenhuma')}\n"
+            f"Status: PENDENTE — {mod}"
+        )
+        if canal_audit:
+            try:
+                await canal_audit.send(f"```\n{relato}\n```")
+            except Exception:
+                pass
+
+        await message.channel.send(
+            f"Denúncia registrada com ID {denuncia_id}. "
+            f"A equipe foi notificada e vai analisar. "
+            f"Guarda esse ID caso precise acompanhar."
+        )
+
+    return True
+
+
 # ── Extração de equipe em tempo real ─────────────────────────────────────────
 
 def _extrair_equipe_real(guild: discord.Guild) -> dict:
     """
     Extrai membros da equipe diretamente dos cargos do Discord.
-    Retorna dict com listas de donos, superiores e mods com status e atividade.
+    Hierarquia de 4 níveis:
+      proprietarios — usuários com controle total do agente
+      colaboradores — cargo _CARGO_COLABORADORES_ID
+      moderadores   — cargo _CARGO_MODERADORES_ID
+      membros       — cargo _CARGO_MEMBROS_ID (participantes gerais)
     """
-    cargo_mod = _cargo_mod_id()
-    cargos_sup = _cargos_superiores_ids()
-    sup_ids = _usuarios_superiores_ids()
-
     def _status_str(m: discord.Member) -> str:
         return {
             discord.Status.online: "online",
@@ -5873,18 +6080,37 @@ def _extrair_equipe_real(guild: discord.Guild) -> dict:
             discord.Status.dnd: "ocupado",
         }.get(m.status, "offline")
 
-    donos_lst, sup_lst, mods_lst = [], [], []
+    prop_lst, colab_lst, mods_lst, membros_lst = [], [], [], []
     for m in guild.members:
         if m.bot:
             continue
-        dados = {"nome": m.display_name, "id": m.id, "status": _status_str(m), "msgs": atividade_mensagens.get(m.id, 0)}
-        if m.id in DONOS_IDS:
-            donos_lst.append(dados)
-        elif m.id in sup_ids or any(c.id in cargos_sup for c in m.roles):
-            sup_lst.append(dados)
-        elif any(c.id == cargo_mod for c in m.roles):
+        dados = {
+            "nome": m.display_name,
+            "id": m.id,
+            "status": _status_str(m),
+            "msgs": atividade_mensagens.get(m.id, 0),
+        }
+        role_ids = {c.id for c in m.roles}
+        if m.id in _PROPRIETARIOS_IDS:
+            prop_lst.append(dados)
+        elif _CARGO_COLABORADORES_ID in role_ids:
+            colab_lst.append(dados)
+        elif _CARGO_MODERADORES_ID in role_ids:
             mods_lst.append(dados)
-    return {"donos": donos_lst, "superiores": sup_lst, "mods": mods_lst}
+        elif _CARGO_MEMBROS_ID in role_ids:
+            membros_lst.append(dados)
+
+    # Retrocompatibilidade: mantém chaves antigas apontando para os níveis corretos
+    return {
+        "proprietarios": prop_lst,
+        "colaboradores": colab_lst,
+        "moderadores": mods_lst,
+        "membros": membros_lst,
+        # aliases para código legado que usa as chaves antigas
+        "donos": prop_lst,
+        "superiores": colab_lst,
+        "mods": mods_lst,
+    }
 
 
 # ── Detecção de pendências não tratadas em canais ─────────────────────────────
@@ -6005,7 +6231,7 @@ async def _task_accountability_equipe():
 
             # ── 2. Verificar atividade da equipe ────────────────────────────
             equipe = _extrair_equipe_real(guild)
-            todos_equipe = equipe["mods"] + equipe["superiores"]
+            todos_equipe = equipe["moderadores"] + equipe["colaboradores"]
             inativos = [m for m in todos_equipe if m["msgs"] == 0 and m["status"] == "offline"]
             if len(inativos) >= 2:
                 canal_audit = guild.get_channel(_canal_auditoria_id())
@@ -6311,12 +6537,19 @@ async def on_guild_role_delete(role):
 
 @client.event
 async def on_member_join(member: discord.Member):
-    """Registra entrada de membro e loga no canal de auditoria."""
+    """Registra entrada de membro e loga no canal de auditoria. Detecta raids."""
     if member.guild.id != SERVIDOR_ID:
         return
 
     agora = agora_utc()
     ts = agora.isoformat()
+
+    # ── Detecção de raid: 5+ entradas em 30 segundos ─────────────────────────
+    _joins_recentes.append(agora)
+    _joins_recentes[:] = [t for t in _joins_recentes if agora - t < timedelta(seconds=30)]
+    if len(_joins_recentes) >= 5 and not _lockdown_ativo:
+        log.warning(f"[RAID] {len(_joins_recentes)} entradas em 30s — ativando lockdown")
+        asyncio.ensure_future(_ativar_lockdown(member.guild, f"raid: {len(_joins_recentes)} entradas em 30s"))
 
     if member.id not in registro_entradas:
         registro_entradas[member.id] = []
@@ -6627,9 +6860,62 @@ async def on_reaction_add(reaction: discord.Reaction, user):
 @client.event
 async def on_message(message: discord.Message):
     try:
+        # ── DMs: tratar denúncias anônimas ───────────────────────────────────
+        if not message.guild and message.author != client.user:
+            await _on_dm_denuncia(message)
+            return
         await _on_message_impl(message)
     except Exception as e:
         log.error(f"Erro não tratado em on_message: {e}", exc_info=True)
+
+
+async def _on_dm_denuncia(message: discord.Message) -> None:
+    """
+    Processa DMs como denúncias anônimas.
+    O denunciante não é identificado no relatório enviado ao canal de auditoria.
+    """
+    conteudo = message.content.strip()
+    if not conteudo and not message.attachments:
+        return
+
+    global _denuncia_seq
+    _denuncia_seq += 1
+    denuncia_id = f"DEN-ANON-{_denuncia_seq:04d}"
+
+    evidencias = " | ".join(a.url for a in message.attachments[:3]) if message.attachments else "nenhuma"
+
+    guild = client.get_guild(SERVIDOR_ID)
+    canal_audit = guild.get_channel(_canal_auditoria_id()) if guild else None
+    mod = mencao_mod(guild) if guild else "@moderacao"
+
+    relato = (
+        f"DENÚNCIA ANÔNIMA {denuncia_id}\n"
+        f"Denunciante: [identidade protegida]\n"
+        f"Relato: {conteudo[:800]}\n"
+        f"Evidência: {evidencias}\n"
+        f"Status: PENDENTE — {mod}"
+    )
+
+    if canal_audit:
+        try:
+            await canal_audit.send(f"```\n{relato}\n```")
+        except Exception as e:
+            log.error(f"[DENUNCIA_ANON] falha ao postar: {e}")
+
+    denuncias_pendentes.append({
+        "id": denuncia_id,
+        "denunciante": "[anônimo]",
+        "descricao": conteudo[:800],
+        "evidencia": evidencias,
+        "status": "pendente",
+        "ts": agora_utc().isoformat(),
+    })
+
+    await message.channel.send(
+        f"Denúncia anônima registrada com ID {denuncia_id}. "
+        f"Sua identidade não foi revelada. A equipe vai analisar."
+    )
+    log.info(f"[DENUNCIA_ANON] {denuncia_id} recebida via DM")
 
 
 async def _on_message_impl(message: discord.Message):
@@ -6643,6 +6929,51 @@ async def _on_message_impl(message: discord.Message):
     # Só ignora se começar com prefixo e não mencionar este bot
     conteudo_raw = message.content
     if re.match(r'^\s*\S+[!/]\S', conteudo_raw) and client.user not in message.mentions:
+        return
+
+    # ── Wizard de denúncia: prioridade máxima para manter o fluxo ────────────
+    if not message.author.bot and message.author.id in _denuncia_wizard:
+        consumido = await _processar_denuncia_wizard(message)
+        if consumido:
+            return
+
+    # ── Detecção de mention bombing (ataque por menções em massa) ────────────
+    if (not message.author.bot
+            and not eh_autorizado(message.author)
+            and len(message.mentions) >= 6):
+        log.warning(f"[ATAQUE] Mention bombing por {message.author.display_name}: {len(message.mentions)} menções")
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await message.channel.send(
+            f"{message.author.mention}, menções em massa não são permitidas. "
+            f"Próxima ocorrência resulta em punição."
+        )
+        canal_audit = message.guild.get_channel(_canal_auditoria_id())
+        if canal_audit:
+            try:
+                await canal_audit.send(
+                    f"[ATAQUE] Mention bombing detectado: {message.author.display_name} "
+                    f"({message.author.id}) — {len(message.mentions)} menções em #{message.channel.name}"
+                )
+            except Exception:
+                pass
+        return
+
+    # ── Lockdown manual por proprietário/colaborador ──────────────────────────
+    if (not message.author.bot
+            and eh_autorizado(message.author)
+            and re.search(r'\b(ativar|ligar|iniciar)\s+lockdown\b|\blockdown\s+(on|ativo|ativa)\b',
+                          message.content, re.IGNORECASE)):
+        asyncio.ensure_future(_ativar_lockdown(message.guild, f"ativado manualmente por {message.author.display_name}"))
+        return
+
+    if (not message.author.bot
+            and eh_autorizado(message.author)
+            and re.search(r'\b(desativar|desligar|encerrar)\s+lockdown\b|\blockdown\s+(off|inativo)\b',
+                          message.content, re.IGNORECASE)):
+        asyncio.ensure_future(_desativar_lockdown(message.guild))
         return
 
     # ── Memória do canal: registra toda mensagem humana ──────────────────────
