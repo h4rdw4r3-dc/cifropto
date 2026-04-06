@@ -1252,17 +1252,39 @@ EXEMPLOS (siga estes padrões):
 "quando o RH entrou?" -> {"intent": "membro_info", "nome": "RH"}
 """
 
+def build_classifier_context(guild: discord.Guild) -> str:
+    """
+    Contexto compacto da estrutura do servidor para o classificador de intenção.
+    Inclui apenas o essencial: cargos com membros, lista de membros e canais.
+    """
+    linhas = [f"SERVIDOR: {guild.name}"]
+
+    # Cargos e quem os tem
+    linhas.append("CARGOS:")
+    for r in sorted([r for r in guild.roles if r.name != "@everyone"], key=lambda r: -r.position):
+        membros_r = [m.display_name for m in r.members if not m.bot]
+        linhas.append(f"  {r.name} ({len(membros_r)} membros): {', '.join(membros_r) or 'nenhum'}")
+
+    # Membros humanos
+    humanos = sorted([m for m in guild.members if not m.bot], key=lambda m: m.display_name.lower())
+    linhas.append(f"MEMBROS HUMANOS ({len(humanos)}): {', '.join(m.display_name for m in humanos)}")
+
+    # Canais
+    canais = [f"#{c.name}" for c in guild.channels if isinstance(c, discord.TextChannel)]
+    linhas.append(f"CANAIS DE TEXTO: {', '.join(canais)}")
+
+    return "\n".join(linhas)
+
+
 async def _detectar_intencao(conteudo: str, guild=None) -> dict:
     """Usa a Groq para classificar a intenção da mensagem. Retorna dict com intent."""
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return {"intent": "nao_reconhecido"}
     try:
         system = _SYSTEM_INTENT
-        if _contexto_servidor:
-            system += f"\n\n=== ESTRUTURA REAL DO SERVIDOR ===\n{_contexto_servidor[:3000]}\nUse essa estrutura para entender nomes de cargos, membros e canais ao classificar a intenção."
-        elif guild:
-            nomes_cargos = [r.name for r in guild.roles if r.name != "@everyone"]
-            system += f"\nCargos existentes no servidor: {', '.join(nomes_cargos)}"
+        if guild:
+            ctx_classificador = build_classifier_context(guild)
+            system += f"\n\n=== ESTRUTURA DO SERVIDOR ===\n{ctx_classificador}\nUse essa estrutura para identificar nomes de cargos, membros e canais corretamente."
         resp = await _groq_client().chat.completions.create(
             model="llama-3.1-8b-instant",
             max_tokens=80,
