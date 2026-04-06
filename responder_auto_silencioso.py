@@ -847,6 +847,55 @@ SYSTEM_ACAO = (
     "Sem emojis, sem asteriscos, sem markdown, sem dois pontos. Inclua os dados exatos que receber no contexto."
 )
 
+# ── Queries factuais do servidor (respondidas direto do guild, sem IA) ────────
+
+def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | None:
+    """
+    Detecta perguntas factuais sobre o servidor e responde com dados reais.
+    Retorna string com a resposta, ou None se não for uma query reconhecida.
+    """
+    c = conteudo.lower()
+
+    # ── Cargos ───────────────────────────────────────────────────────────────
+    if re.search(r'\bquantos\b.{0,20}\bcargos?\b', c):
+        cargos = [r for r in guild.roles if r.name != "@everyone"]
+        return f"O servidor tem {len(cargos)} cargos."
+
+    if re.search(r'\b(quais|liste?|mostr[ae]|list[ae])\b.{0,20}\bcargos?\b', c):
+        cargos = sorted([r for r in guild.roles if r.name != "@everyone"], key=lambda r: -r.position)
+        partes = [f"{r.name} ({len(r.members)} membro{'s' if len(r.members) != 1 else ''})" for r in cargos]
+        return "Cargos do servidor: " + ", ".join(partes) + "."
+
+    # ── Membros de um cargo específico (por ID) ───────────────────────────────
+    m = re.search(r'(\d{17,19})', conteudo)
+    if m and re.search(r'\b(membro|cargo|quem|quantos)\b', c):
+        role_id = int(m.group(1))
+        role = guild.get_role(role_id)
+        if role:
+            humanos = [mb.display_name for mb in role.members if not mb.bot]
+            if humanos:
+                return f"Cargo {role.name}: {len(humanos)} membro{'s' if len(humanos) != 1 else ''} — {', '.join(humanos)}."
+            else:
+                return f"Nenhum membro humano com o cargo {role.name}."
+
+    # ── Membros de um cargo por nome ──────────────────────────────────────────
+    m2 = re.search(r'\b(?:cargo|função|membro[s]?\s+d[ao])\s+["\']?([a-záéíóúãõâêôçüñ\w\s]{3,30})["\']?', c)
+    if m2:
+        nome_cargo = m2.group(1).strip()
+        role = discord.utils.find(
+            lambda r: nome_cargo in r.name.lower(),
+            guild.roles
+        )
+        if role:
+            humanos = [mb.display_name for mb in role.members if not mb.bot]
+            info = f"{len(humanos)} membro{'s' if len(humanos) != 1 else ''}"
+            if humanos:
+                info += f" — {', '.join(humanos)}"
+            return f"Cargo {role.name}: {info}."
+
+    return None
+
+
 # ── Conhecimento dinâmico do servidor ────────────────────────────────────────
 _contexto_servidor: str = ""  # preenchido no on_ready
 
@@ -2428,6 +2477,13 @@ async def on_message(message: discord.Message):
         await message.reply(await stats_servidor(message.guild))
         return
 
+    # ── Queries factuais do servidor (cargos, membros por cargo, etc.) ────────
+    if mencionado and message.guild:
+        resp_direta = query_servidor_direto(message.guild, message.content)
+        if resp_direta:
+            await message.reply(resp_direta)
+            return
+
     # ── Continuar conversa em andamento (mesmo canal e sem @menção nova) ────────
     estado_conv = conversas.get(user_id)
     if estado_conv and client.user not in message.mentions:
@@ -2447,6 +2503,12 @@ async def on_message(message: discord.Message):
         if estado_claude["canal"] == message.channel.id:
             tempo_ocioso = agora_utc() - estado_claude["ultima"]
             if tempo_ocioso <= TIMEOUT_CONVERSA_CLAUDE:
+                # Queries factuais respondem direto sem IA
+                if message.guild:
+                    resp_direta = query_servidor_direto(message.guild, message.content)
+                    if resp_direta:
+                        await message.reply(resp_direta)
+                        return
                 resposta = await responder_com_claude(conteudo, autor, user_id, message.guild, message.channel.id)
                 print(f"[CLAUDE CONT] {autor}: {conteudo}")
                 await message.reply(resposta)
