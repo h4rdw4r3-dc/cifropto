@@ -1114,68 +1114,75 @@ _contexto_servidor: str = ""  # preenchido no on_ready
 
 def build_server_context(guild: discord.Guild) -> str:
     """
-    Mapeia o servidor inteiro (canais, categorias, cargos, membros)
-    e retorna uma string de contexto para injetar no system prompt da IA.
+    Contexto completo do servidor — sem limite de informações.
+    Inclui cada membro com conta, tempo, cargos e infrações.
     """
+    agora = agora_utc()
     brasilia = timezone(timedelta(hours=-3))
     criado_em = guild.created_at.astimezone(brasilia).strftime("%d/%m/%Y às %H:%M")
 
-    linhas = [
-        f"Servidor: {guild.name} (ID {guild.id})",
-        f"Criado/inaugurado em: {criado_em} (horário de Brasília)",
-    ]
+    linhas: list[str] = []
 
+    # ── Cabeçalho ─────────────────────────────────────────────────────────────
+    linhas.append(f"SERVIDOR: {guild.name} (ID {guild.id})")
+    linhas.append(f"Criado em: {criado_em} (Brasília)")
     if guild.description:
         linhas.append(f"Descrição: {guild.description}")
+    linhas.append(f"Dono: {guild.owner.display_name} ({guild.owner.id})" if guild.owner else "Dono: desconhecido")
+    linhas.append(f"Boost: nível {guild.premium_tier}, {guild.premium_subscription_count} boosts")
 
-    linhas.append(f"Nível de boost: {guild.premium_tier} ({guild.premium_subscription_count} boosts)")
+    bots_count = sum(1 for m in guild.members if m.bot)
+    humanos_count = guild.member_count - bots_count
+    linhas.append(f"Membros: {humanos_count} humanos, {bots_count} bots (total {guild.member_count})")
 
-    # Categorias e canais
-    linhas.append("Canais e categorias:")
-    for categoria in sorted(guild.categories, key=lambda c: c.position):
-        categorias_vistas.add(categoria.id)
-        filhos = [c for c in categoria.channels if not isinstance(c, discord.CategoryChannel)]
-        nomes_filhos = ", ".join(
-            f"#{c.name} ({c.id})" + (" [voz]" if isinstance(c, discord.VoiceChannel) else "")
-            for c in sorted(filhos, key=lambda c: c.position)
+    # ── Canais por categoria ───────────────────────────────────────────────────
+    linhas.append("\nCANAIS:")
+    for cat in sorted(guild.categories, key=lambda c: c.position):
+        categorias_vistas.add(cat.id)
+        filhos = sorted(
+            [c for c in cat.channels if not isinstance(c, discord.CategoryChannel)],
+            key=lambda c: c.position
         )
-        linhas.append(f"  [{categoria.name}] {nomes_filhos}")
-    # Canais sem categoria
+        desc = ", ".join(
+            f"#{c.name}({'voz' if isinstance(c, discord.VoiceChannel) else 'texto'})"
+            for c in filhos
+        )
+        linhas.append(f"  [{cat.name}] {desc}")
     sem_cat = [c for c in guild.channels
                if not isinstance(c, discord.CategoryChannel) and c.category is None]
     if sem_cat:
-        nomes = ", ".join(f"#{c.name} ({c.id})" for c in sorted(sem_cat, key=lambda c: c.position))
-        linhas.append(f"  [sem categoria] {nomes}")
+        linhas.append("  [sem categoria] " + ", ".join(f"#{c.name}" for c in sem_cat))
 
-    # Cargos
-    cargos = [r for r in guild.roles if r.name != "@everyone"]
-    cargos_txt = ", ".join(
-        f"{r.name} ({r.id}, {len(r.members)} membro{'s' if len(r.members) != 1 else ''})"
-        for r in sorted(cargos, key=lambda r: -r.position)
-    )
-    linhas.append(f"Cargos: {cargos_txt}")
+    # ── Cargos com membros ─────────────────────────────────────────────────────
+    linhas.append("\nCARGOS (do mais alto ao mais baixo):")
+    for r in sorted([r for r in guild.roles if r.name != "@everyone"], key=lambda r: -r.position):
+        membros_r = [m.display_name for m in r.members if not m.bot]
+        n = len(membros_r)
+        membros_txt = ", ".join(membros_r) if membros_r else "nenhum"
+        linhas.append(f"  {r.name} (ID {r.id}) — {n} humano{'s' if n != 1 else ''}: {membros_txt}")
 
-    # Contagem de membros
-    total = guild.member_count
-    bots = sum(1 for m in guild.members if m.bot)
-    humanos = total - bots
-    linhas.append(f"Total: {humanos} membros humanos, {bots} bots")
-
-    # Proprietário
-    if guild.owner:
-        linhas.append(f"Dono do servidor: {guild.owner.display_name} ({guild.owner.id})")
-
-    # Lista explícita de membros humanos — NOMES SÃO PESSOAS, NÃO TÓPICOS
-    membros_humanos = sorted(
-        [m for m in guild.members if not m.bot],
-        key=lambda m: m.display_name.lower()
-    )
-    nomes_membros = ", ".join(m.display_name for m in membros_humanos[:60])
-    linhas.append(
-        f"\nMEMBROS HUMANOS ATUAIS (estes são nomes de PESSOAS reais no servidor, "
-        f"não tópicos, não canais, não assuntos): {nomes_membros}"
-        + (" e outros." if len(membros_humanos) > 60 else ".")
-    )
+    # ── Membros humanos — ficha completa ──────────────────────────────────────
+    linhas.append("\nMEMBROS HUMANOS (cada um é uma PESSOA REAL, não um tópico):")
+    membros_humanos = sorted([m for m in guild.members if not m.bot], key=lambda m: m.display_name.lower())
+    for m in membros_humanos:
+        conta = _fmt_duracao_curta(agora - m.created_at.replace(tzinfo=timezone.utc))
+        servidor = _fmt_duracao_curta(agora - m.joined_at.replace(tzinfo=timezone.utc)) if m.joined_at else "?"
+        cargos_m = [r.name for r in m.roles if r.name != "@everyone"]
+        cargos_txt = ", ".join(cargos_m) if cargos_m else "sem cargo"
+        infr = infracoes.get(m.id, 0)
+        silenc = silenciamentos.get(m.id, 0)
+        n_ent = len(registro_entradas.get(m.id, []))
+        extras = []
+        if infr:
+            extras.append(f"infrações: {infr}")
+        if silenc:
+            extras.append(f"silenciamentos: {silenc}")
+        if n_ent > 1:
+            extras.append(f"entrou {n_ent}x")
+        extras_txt = " | " + ", ".join(extras) if extras else ""
+        linhas.append(
+            f"  {m.display_name} (ID {m.id}) | conta: {conta} | servidor: {servidor} | cargos: {cargos_txt}{extras_txt}"
+        )
 
     return "\n".join(linhas)
 
