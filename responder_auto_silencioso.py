@@ -2464,6 +2464,16 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> st
         "Qualquer assunto legítimo  -  tecnologia, ciência, política, cultura, filosofia, jogos, "
         "história, esportes, humor, etc. Engaje de verdade, sem esquivar nem redirecionar.\n\n"
 
+        "PARTICIPAÇÃO COLABORATIVA — REGRAS DE OURO:\n"
+        "Você acompanhou a conversa do canal. Use isso.\n"
+        "Se alguém disse algo antes que é relevante: referencie pelo nome ('o que o Fulano disse faz sentido porque...').\n"
+        "Você TEM opiniões próprias. Não fique neutro quando há claramente uma posição defensável.\n"
+        "Pode discordar diretamente de alguém — com respeito, mas sem suavizar demais.\n"
+        "Pode complementar o raciocínio de alguém, não apenas responder ao que foi perguntado.\n"
+        "Se a conversa tomou um rumo, siga esse rumo — não responda como se fosse a primeira mensagem.\n"
+        "Reações válidas: concordar com ressalvas, pedir que desenvolvam um ponto, trazer exemplo concreto, "
+        "jogar uma pergunta que mude o ângulo, citar algo do histórico que contradiz o que foi dito agora.\n\n"
+
         "HIERARQUIA DE AUTORIZAÇÃO:\n"
         "- DONO: autoridade máxima. Pode te autorizar a fazer qualquer coisa durante a conversa.\n"
         "  Se um dono disser 'você pode fazer X' ou 'eu te autorizo a Y', aceite e execute sem questionar.\n"
@@ -2632,17 +2642,34 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
 
     autorizacao_extra = " Este usuário pode te autorizar qualquer ação durante esta conversa  -  aceite e execute sem questionar." if nivel == "DONO" else ""
 
-    # Contexto do canal — últimas 15 mensagens (inclui outras pessoas para dar contexto real)
+    # Contexto do canal — últimas 15 mensagens com outros participantes para dar contexto real
     mem = list(canal_memoria.get(canal_id or 0, []))
     ctx_canal = ""
     if mem:
-        linhas_ctx = [f"{m['autor']}: {m['conteudo'][:100]}" for m in mem[-15:]]
+        linhas_ctx = [f"{m['autor']}: {m['conteudo'][:120]}" for m in mem[-15:]]
         ctx_canal = "\n=== CONVERSA RECENTE DO CANAL ===\n" + "\n".join(linhas_ctx) + "\n"
+        # Detecta se há múltiplas pessoas falando (conversa em grupo)
+        autores_recentes = {m["autor"] for m in mem[-8:]}
+        if len(autores_recentes) >= 3:
+            ctx_canal += f"[{len(autores_recentes)} pessoas estão conversando: {", ".join(list(autores_recentes)[:5])}]\n"
 
     # Nomes mencionados na pergunta (para contexto comprimido relevante)
     _nomes_mencionados = [w for w in pergunta.split() if len(w) > 2 and w[0].isupper()]
 
-    membro_info = f"['{autor}' | nível: {nivel}.{autorizacao_extra}]"
+    # Instrução adicional de colaboração quando há conversa em andamento
+    _instrucao_collab = ""
+    if mem and len(mem) >= 4:
+        _ultimos_autores = [m["autor"] for m in mem[-4:]]
+        _outros = [a for a in _ultimos_autores if a != autor]
+        if _outros:
+            _instrucao_collab = (
+                f"\n[CONTEXTO SOCIAL: há uma conversa em andamento. "
+                f"Você pode referenciar o que outros disseram ({', '.join(set(_outros))}), "
+                f"concordar ou discordar deles diretamente, ou trazer um ângulo novo. "
+                f"Responda como quem acompanhou a conversa toda, não só a última mensagem.]"
+            )
+
+    membro_info = f"['{autor}' | nível: {nivel}.{autorizacao_extra}]{_instrucao_collab}"
 
     mensagens = [
         {"role": "system", "content": system_com_contexto(user_id=user_id, mencoes_nomes=_nomes_mencionados) + ctx_canal},
@@ -5384,53 +5411,88 @@ async def _atualizar_perfil_usuario(user_id: int, autor: str, mensagem: str, res
 
 # ── Participação ativa: debate e monitoramento de canal ───────────────────────
 
+def _montar_ctx_canal(channel_id: int, n: int = 12) -> str:
+    """Monta contexto recente do canal como string legível."""
+    mem = list(canal_memoria.get(channel_id, []))
+    if not mem:
+        return ""
+    return "\n".join(f"{m['autor']}: {m['conteudo'][:120]}" for m in mem[-n:])
+
+
 async def _participar_debate(message: discord.Message, tema: str):
-    """Responde a uma mensagem dentro de um debate ativo no canal."""
+    """
+    Participa ativamente de um debate com opinião própria e contexto completo.
+    Usa o histórico recente para se posicionar de forma coerente, não apenas reagir
+    à última mensagem — como alguém que acompanhou a conversa desde o início.
+    """
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return
+    ctx = _montar_ctx_canal(message.channel.id, n=10)
+    humor_txt = f" Humor atual: {_humor_sessao}." if _humor_sessao else ""
     system = (
-        f"Voce e um assistente direto de um servidor Discord brasileiro. "
-        f"Esta participando de um debate sobre '{tema}'. "
-        f"Comente a mensagem de forma curta (1-2 frases), direta e casual, como um membro ativo. "
-        f"Sem emojis, sem asteriscos, sem markdown. Seja opinativo e instigue reflexao."
+        f"Você é o shell_engenheiro, membro veterano de um servidor Discord brasileiro.{humor_txt}\n"
+        f"Há um debate em andamento sobre: {tema!r}.\n"
+        "Você TEM opiniões próprias e as defende. Não é neutro, não é mediador — você tem um ponto de vista.\n"
+        "Pode concordar parcialmente, discordar diretamente, fazer uma pergunta que force reflexão, "
+        "ou trazer um ângulo que ninguém considerou ainda.\n"
+        "Formas naturais de entrar: discordar de alguém pelo nome, complementar um argumento, "
+        "jogar uma pergunta retórica, ou simplesmente afirmar sua posição sem pedir permissão.\n"
+        "Máximo 2 frases. Sem emojis, sem asteriscos, sem markdown. Sem introduções como \'bem,\' ou \'na verdade\'.\n"
+        "Se já participou muito nessa conversa ou não tem nada genuíno a acrescentar: responda SILÊNCIO."
     )
     try:
         resp = await _groq_client().chat.completions.create(
-            model="llama-3.1-8b-instant",
-            max_tokens=80,
-            temperature=0.85,
+            model=_escolher_modelo(),
+            max_tokens=100,
+            temperature=0.92,
             messages=[
                 {"role": "system", "content": system},
-                {"role": "user", "content": f"{message.author.display_name}: {message.content[:300]}"},
+                {"role": "user", "content": ctx or f"{message.author.display_name}: {message.content[:300]}"},
             ],
         )
         _registrar_tokens("8b", resp.usage.total_tokens if resp.usage else 150)
         texto = resp.choices[0].message.content.strip()
-        if texto:
+        if texto and "SILÊNCIO" not in texto.upper() and len(texto) > 8:
+            await asyncio.sleep(random.uniform(2, 6))  # delay humano
             await _digitar_e_enviar(message.channel, texto)
-            log.info(f"[DEBATE] participou em #{message.channel.name}")
+            log.info(f"[DEBATE] participou em #{message.channel.name}: {texto[:60]}")
     except Exception as e:
         log.debug(f"[DEBATE] _participar_debate falhou: {e}")
 
 
 async def _interjetar_conversa(message: discord.Message):
     """
-    Interjeta em canal monitorado APENAS quando a conversa tem algo relevante.
-    Primeiro avalia se vale comentar (PASS/GO), só então gera o comentário.
-    Evita entrar em conversas triviais, bate-papo, emoções sem substância.
+    Entra numa conversa espontaneamente quando tem algo genuíno a contribuir.
+    Pipeline em duas etapas:
+      1. Triagem: decide se vale a pena e QUE TIPO de entrada faz sentido
+      2. Geração: produz a interjeição com personalidade e contexto completo
+
+    Tipos de entrada possíveis (retornados pela triagem):
+      OPINIAO  — tem posição própria sobre o tema
+      PERGUNTA — quer entender melhor ou provocar reflexão
+      FATO     — tem informação relevante que agrega
+      DISCORDA — discorda de algo dito
+      PASS     — não tem nada genuíno a dizer
     """
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return
 
-    # Contexto recente do canal para avaliar com mais informação
-    mem = list(canal_memoria.get(message.channel.id, []))
-    ctx = "\n".join(f"{m['autor']}: {m['conteudo'][:80]}" for m in mem[-6:]) if mem else message.content[:200]
+    ctx = _montar_ctx_canal(message.channel.id, n=8)
+    if not ctx:
+        return
 
+    humor_txt = f" Humor atual: {_humor_sessao}." if _humor_sessao else ""
+
+    # Etapa 1: triagem qualificada — não só GO/PASS, mas define o ângulo
     system_triagem = (
-        "Voce decide se um bot deve participar de uma conversa no Discord. "
-        "Responda apenas PASS ou GO. "
-        "GO apenas se: ha uma pergunta tecnica, debate de ideias, tema de cultura/tecnologia/ciencia/jogos com substancia. "
-        "PASS se: conversa casual, emocoes, piadas, bate-papo vazio, mensagens curtas sem conteudo."
+        "Você avalia se um bot de Discord deve entrar numa conversa e como.\n"
+        "Responda com UMA das opções: OPINIAO, PERGUNTA, FATO, DISCORDA, PASS\n"
+        "OPINIAO — o tema dá para tomar posição própria interessante\n"
+        "PERGUNTA — algo na conversa merece uma pergunta que force reflexão\n"
+        "FATO — há informação concreta e relevante que pode ser acrescentada\n"
+        "DISCORDA — alguém disse algo questionável ou factualmente errado\n"
+        "PASS — bate-papo trivial, emojis, cumprimentos, nada com substância\n"
+        "Responda apenas a palavra, sem explicação."
     )
     try:
         triagem = await _groq_client().chat.completions.create(
@@ -5442,22 +5504,46 @@ async def _interjetar_conversa(message: discord.Message):
                 {"role": "user", "content": ctx},
             ],
         )
-        _registrar_tokens("8b", triagem.usage.total_tokens if triagem.usage else 20)
-        decisao = triagem.choices[0].message.content.strip().upper()
-        if "GO" not in decisao:
+        _registrar_tokens("8b", triagem.usage.total_tokens if triagem.usage else 10)
+        tipo = triagem.choices[0].message.content.strip().upper()
+        if "PASS" in tipo or tipo not in ("OPINIAO", "PERGUNTA", "FATO", "DISCORDA"):
             return
 
-        # Aprovado — gera o comentário
+        # Etapa 2: geração com instrução específica por tipo
+        instrucao_tipo = {
+            "OPINIAO": (
+                "Você tem uma opinião sobre esse tema e vai expressá-la diretamente. "
+                "Tome uma posição clara — não fique em cima do muro. "
+                "Pode ser controverso se for honesto."
+            ),
+            "PERGUNTA": (
+                "Faça UMA pergunta que force as pessoas a pensarem diferente. "
+                "Não pergunte o óbvio — pergunte o que ninguém pensou ainda. "
+                "Pergunta real, não retórica vazia."
+            ),
+            "FATO": (
+                "Você tem uma informação concreta e relevante sobre o tema. "
+                "Coloque o fato de forma direta, sem rodeios. "
+                "Pode contextualizar em 1 frase adicional se necessário."
+            ),
+            "DISCORDA": (
+                "Você discorda de algo que foi dito. "
+                "Seja direto: cite o ponto específico e diga por que está errado ou incompleto. "
+                "Sem ser grosseiro, mas sem suavizar demais."
+            ),
+        }.get(tipo, "Comente de forma direta e genuína.")
+
         system_resp = (
-            "Voce e o shell_engenheiro, presenca central de um servidor Discord brasileiro. "
-            "Faca UM comentario curtissimo (1 frase) sobre o assunto da conversa. "
-            "Seja direto, opinativo, sem emojis, sem asteriscos. "
-            "Se nao tiver nada genuino a acrescentar, responda: PASS"
+            f"Você é o shell_engenheiro, membro veterano de um servidor Discord brasileiro.{humor_txt}\n"
+            f"{instrucao_tipo}\n"
+            "Máximo 2 frases. Sem emojis, sem asteriscos, sem markdown.\n"
+            "Não comece com \'bem\', \'na verdade\', \'interessante\' ou qualquer introdução genérica.\n"
+            "Se perceber que não tem nada genuíno a dizer desse ângulo: responda SILÊNCIO."
         )
         resp = await _groq_client().chat.completions.create(
-            model="llama-3.1-8b-instant",
-            max_tokens=70,
-            temperature=0.7,
+            model=_escolher_modelo(),
+            max_tokens=90,
+            temperature=0.88,
             messages=[
                 {"role": "system", "content": system_resp},
                 {"role": "user", "content": ctx},
@@ -5465,9 +5551,10 @@ async def _interjetar_conversa(message: discord.Message):
         )
         _registrar_tokens("8b", resp.usage.total_tokens if resp.usage else 80)
         texto = resp.choices[0].message.content.strip()
-        if texto and texto.upper() != "PASS" and len(texto) > 8:
+        if texto and "SILÊNCIO" not in texto.upper() and len(texto) > 8:
+            await asyncio.sleep(random.uniform(3, 9))  # delay humano
             await _digitar_e_enviar(message.channel, texto)
-            log.info(f"[MONITOR] interjeccao qualificada em #{message.channel.name}")
+            log.info(f"[MONITOR] {tipo} em #{message.channel.name}: {texto[:60]}")
     except Exception as e:
         log.debug(f"[MONITOR] _interjetar falhou: {e}")
 
@@ -6058,7 +6145,7 @@ async def _on_message_impl(message: discord.Message):
         })
 
     # ── Rastrear atividade + participação ativa (debate / monitoramento) ──────
-    if not message.author.bot and message.content.strip():
+    if not message.author.bot and message.content.strip() and not _TRIVIAIS.match(message.content.strip()):
         atividade_mensagens[message.author.id] += 1
         _canal_id = message.channel.id
         _agora = agora_utc()
@@ -6066,14 +6153,17 @@ async def _on_message_impl(message: discord.Message):
         if _debate and _agora < _debate["fim"]:
             _debate["msgs"] = _debate.get("msgs", 0) + 1
             _ultima = ultima_interjeccao.get(_canal_id, datetime(1970, 1, 1, tzinfo=timezone.utc))
-            # Responde após ≥2 msgs no debate, cooldown de 90s entre respostas
-            if _debate["msgs"] >= 2 and (_agora - _ultima).total_seconds() > 90:
+            # Debate ativo: cooldown de 60s, entra após ≥2 msgs
+            if _debate["msgs"] >= 2 and (_agora - _ultima).total_seconds() > 60:
                 ultima_interjeccao[_canal_id] = _agora
                 asyncio.ensure_future(_participar_debate(message, _debate["tema"]))
         elif _canal_id in canais_monitorados:
             _ultima = ultima_interjeccao.get(_canal_id, datetime(1970, 1, 1, tzinfo=timezone.utc))
-            # Interjeta com 6% de chance, cooldown de 8min — não invasivo
-            if (_agora - _ultima).total_seconds() > 480 and random.random() < 0.06:
+            _secs = (_agora - _ultima).total_seconds()
+            # Chance dinâmica: quanto mais tempo sem falar, maior a chance de entrar
+            # 3min cooldown mínimo; chance sobe de 12% até 35% com o tempo
+            _chance = min(0.35, 0.12 + (_secs - 180) / 1800 * 0.23) if _secs > 180 else 0
+            if _chance > 0 and random.random() < _chance:
                 ultima_interjeccao[_canal_id] = _agora
                 asyncio.ensure_future(_interjetar_conversa(message))
 
