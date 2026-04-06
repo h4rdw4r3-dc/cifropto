@@ -52,7 +52,11 @@ CANAL_AUDITORIA_ID = 1490180079899115591
 # Coloque sua chave aqui: https://www.virustotal.com/gui/my-apikey
 VIRUSTOTAL_API_KEY = "SUA_CHAVE_AQUI"
 
-client = discord.Client()
+_intents = discord.Intents.default()
+_intents.message_content = True
+_intents.members = True
+_intents.presences = False
+client = discord.Client(intents=_intents)
 
 _bot_inicio: datetime = datetime.now(timezone.utc)  # timestamp de início do processo
 
@@ -440,7 +444,7 @@ RAID_JANELA   = timedelta(minutes=2)          # janela de análise
 RAID_LIMIAR   = 5                             # joins para disparar alerta
 RAID_CONTA_NOVA_DIAS = 7                      # conta com menos de X dias = suspeita
 
-GATILHOS_NOME = re.compile(r"\bshell\b", re.IGNORECASE)
+GATILHOS_NOME = re.compile(r"\bshell\b|\bengenheir\w*", re.IGNORECASE)
 
 CANAL_REGRAS_ID = 1487599083869704326
 CANAL_REGRAS = f"<#{CANAL_REGRAS_ID}>"
@@ -3110,14 +3114,17 @@ async def on_reaction_add(reaction: discord.Reaction, user):
 
 @client.event
 async def on_message(message: discord.Message):
+    try:
+        await _on_message_impl(message)
+    except Exception as e:
+        log.error(f"Erro não tratado em on_message: {e}", exc_info=True)
+
+
+async def _on_message_impl(message: discord.Message):
     if message.author == client.user:
         return
 
     if not message.guild or message.guild.id != SERVIDOR_ID:
-        return
-
-    # Ignorar DMs completamente — o bot não age em DM
-    if not message.guild:
         return
 
     # Ignorar mensagens de outros bots com prefixo (ex: 7!afk, !cmd, /cmd)
