@@ -444,6 +444,16 @@ _contexto_servidor: str = ""        # contexto completo (para query_servidor_dir
 _contexto_compacto: str = ""        # versão curta injetada no Groq (economiza tokens)
 categorias_vistas: set = set()
 
+# ── Token budget diário ───────────────────────────────────────────────────────
+# llama-3.3-70b-versatile: 100k TPD (limite Groq gratuito)
+# llama-3.1-8b-instant:    500k TPD (limite Groq gratuito) — modelo padrão
+# Estratégia: usar 8b-instant por padrão; 70b só para pedidos explicitamente complexos
+_tokens_70b_hoje: int = 0       # tokens gastos hoje no modelo 70b
+_tokens_8b_hoje: int = 0        # tokens gastos hoje no modelo 8b
+_tokens_data: str = ""          # data de referência (YYYY-MM-DD UTC)
+LIMITE_70B = 90_000             # 90k de 100k — margem de segurança
+LIMITE_8B  = 480_000            # 480k de 500k — margem de segurança
+
 # ── Raid detection ────────────────────────────────────────────────────────────
 _joins_recentes: list[datetime] = []          # timestamps dos últimos joins
 RAID_JANELA   = timedelta(minutes=2)          # janela de análise
@@ -1290,38 +1300,144 @@ def build_classifier_context(guild: discord.Guild) -> str:
     return "\n".join(linhas)
 
 
-async def _detectar_intencao(conteudo: str, guild=None) -> dict:
-    """Usa a Groq para classificar a intenção da mensagem. Retorna dict com intent."""
-    if not GROQ_DISPONIVEL or not GROQ_API_KEY:
-        return {"intent": "nao_reconhecido"}
-    try:
-        system = _SYSTEM_INTENT
-        if guild:
-            ctx_classificador = build_classifier_context(guild)
-            # Limita a 2000 chars para não estourar o contexto do modelo leve
-            ctx_curto = ctx_classificador[:2000]
-            system += f"\n\n=== ESTRUTURA DO SERVIDOR ===\n{ctx_curto}\nUse essa estrutura para identificar nomes de cargos, membros e canais corretamente."
-        log.info(f"[intent] classificando: {conteudo[:80]!r}")
-        resp = await _groq_client().chat.completions.create(
-            model="llama-3.1-8b-instant",
-            max_tokens=150,
-            temperature=0.0,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": conteudo},
-            ],
+def _detectar_intencao(conteudo: str, guild=None) -> dict:
+    """
+    Classifica a intenção via regex — zero tokens Groq gastos.
+    Substitui a versão anterior que chamava llama-3.1-8b-instant para classificação.
+    """
+    msg = normalizar(conteudo).lower()
+    # Remove prefixo do bot
+    msg = re.sub(r'^(?:shell|engenheir\w*)[,.]?\s*', '', msg).strip()
+
+    # Uptime
+    if re.search(r'\b(uptime|online h[aá] quanto|h[aá] quanto tempo (ligad|rodand|onlin))', msg):
+        return {"intent": "uptime"}
+
+    # Boosts
+    if re.search(r'\b(n[ií]vel\s+de\s+boost|boost)', msg):
+        return {"intent": "boosts"}
+
+    # Data de criação
+    if re.search(r'\b(quando\s+(foi\s+)?(criado|fundado)|data\s+de\s+cria[cç][aã]o)', msg):
+        return {"intent": "data_criacao"}
+
+    # Dono
+    if re.search(r'\b(quem\s+(fundou|criou|[eé]\s+o\s+dono)|dono\s+do\s+servidor)', msg):
+        return {"intent": "dono_servidor"}
+
+    # Bots
+    if re.search(r'\b(bots?|rob[oô]s?)\b', msg) and re.search(r'\b(servidor|h[aá]|exist[e]|quantos?|list[ae]|quais)\b', msg):
+        return {"intent": "membros_bots"}
+
+    # Membros online
+    if re.search(r'\b(online|ativos?|conectados?)\b', msg) and re.search(r'\b(membros?|pessoas?|quantos?)\b', msg):
+        return {"intent": "membros_online"}
+
+    # Membros por período
+    if re.search(r'\b(entr(ou|aram))\b', msg):
+        if 'hoje' in msg:
+            return {"intent": "membros_por_periodo", "periodo": "hoje"}
+        if re.search(r'm[eê]s', msg):
+            return {"intent": "membros_por_periodo", "periodo": "mes"}
+        if re.search(r'semana', msg):
+            return {"intent": "membros_por_periodo", "periodo": "semana"}
+
+    # Membros mais antigos / recentes
+    if re.search(r'\b(mais\s+antigos?|primeiros?\s+membros?|veteranos?|fundadores?)\b', msg):
+        return {"intent": "membros_antigos"}
+    if re.search(r'\b(mais\s+recentes?|[uú]ltimas?\s+entradas?|novos?\s+membros?)\b', msg):
+        return {"intent": "membros_recentes"}
+
+    # Membros sem cargo
+    if re.search(r'\bsem\s+(cargo|fun[cç][aã]o)\b', msg):
+        return {"intent": "membros_sem_cargo"}
+
+    # Membros silenciados
+    if re.search(r'\b(silenciados?|mutados?|em\s+timeout|com\s+timeout)\b', msg):
+        return {"intent": "membros_silenciados"}
+
+    # Infrações
+    if re.search(r'\b(infra[cç][oõ]es?|puni[cç][oõ]es?|advertidos?|punidos?)\b', msg):
+        return {"intent": "membros_com_infracoes"}
+
+    # Distribuição de cargos
+    if re.search(r'\bdistribui[cç][aã]o\b', msg) and re.search(r'\bcargos?\b', msg):
+        return {"intent": "distribuicao_cargos"}
+
+    # Média de tempo / idade
+    if re.search(r'\bm[eé]dia\b', msg):
+        if re.search(r'\btempo\b', msg):
+            return {"intent": "media_tempo_servidor"}
+        if re.search(r'\bidad[e]?\b', msg):
+            return {"intent": "media_idade_contas"}
+
+    # Banimentos
+    if re.search(r'\b(banidos?|banimentos?)\b', msg):
+        return {"intent": "banimentos"}
+
+    # Membros com mais cargos
+    if re.search(r'\bmais\s+cargos?\b', msg):
+        return {"intent": "membros_mais_cargos"}
+
+    # Canais
+    if re.search(r'\bquantos?\b.{0,20}\bcanais?\b', msg):
+        return {"intent": "canais_quantidade"}
+    if re.search(r'\b(list[ae]|quais|mostre?)\b.{0,20}\bcanais?\b', msg):
+        return {"intent": "canais_listagem"}
+
+    # Cargos: quantidade (sem mencionar cargo específico)
+    if re.search(r'\bquantos?\b.{0,30}\b(cargos?|fun[cç][oõ]es?)\b', msg):
+        # Só retorna quantidade se não há nome de cargo específico na sequência
+        if not re.search(r'\b(n[ao]\s+cargo|na\s+fun[cç][aã]o|do\s+cargo|da\s+fun[cç][aã]o)\b', msg):
+            return {"intent": "cargo_quantidade"}
+
+    # Cargos: listagem
+    if re.search(r'\b(list[ae]|quais|mostre?|exib[ae])\b.{0,20}\b(cargos?|fun[cç][oõ]es?)\b', msg):
+        return {"intent": "cargo_listagem"}
+
+    # Membros total (genérico)
+    if re.search(r'\bquantos?\s+membros?\b', msg) or re.search(r'\btotal\s+(de\s+)?membros?\b', msg):
+        return {"intent": "membros_total"}
+
+    # Membro por nome
+    m_membro = re.search(
+        r'\b(?:info(?:rma[cç][oõ]es?)?\s+(?:d[eo]\s+|sobre\s+)?|quem\s+[eé]\s+|perfil\s+d[eo]\s+)([A-Za-z0-9_\-]{2,30})',
+        msg
+    )
+    if m_membro and guild:
+        nome_cand = m_membro.group(1)
+        if nome_cand not in ('servidor', 'canal', 'cargo', 'bot', 'voce', 'você'):
+            mb = _buscar_membro_por_nome(guild, nome_cand)
+            if mb:
+                return {"intent": "membro_info", "nome": nome_cand}
+
+    # Cargo por nome — verifica nomes reais do servidor
+    if guild:
+        detalhado = bool(re.search(r'\b(detalhes?|completo|tempo|idade|conta|quando|h[aá]\s+quanto)\b', msg))
+        # Padrão explícito: "cargo X", "função X", "membros do X", "quem tem X"
+        m_cargo = re.search(
+            r'\b(?:cargo|fun[cç][aã]o)\s+(?:d[eo]\s+|chamad[oa]\s+)?["\']?([A-Za-z0-9_\-\s]{2,25}?)["\']?\s*(?:\?|$)',
+            msg
+        ) or re.search(
+            r'\b(?:membros?|pessoas?|quem|quantos?)\s+(?:d[ao]\s+|n[ao]\s+|com\s+|tem\s+)(?:cargo\s+|fun[cç][aã]o\s+)?["\']?([A-Za-z0-9_\-\s]{2,25}?)["\']?\s*(?:\?|$|\.)',
+            msg
         )
-        texto = resp.choices[0].message.content.strip()
-        log.info(f"[intent] resposta bruta: {texto!r}")
-        texto = re.sub(r"^```json|^```|```$", "", texto, flags=re.MULTILINE).strip()
-        if texto.startswith("{") and not texto.endswith("}"):
-            texto += "}"
-        resultado = json.loads(texto)
-        log.info(f"[intent] detectado: {resultado}")
-        return resultado
-    except Exception as e:
-        log.warning(f"[intent] falhou ({type(e).__name__}): {e}")
-        return {"intent": "nao_reconhecido"}
+        if m_cargo:
+            nome_cand = m_cargo.group(1).strip()
+            role = _buscar_role_por_nome(guild, nome_cand)
+            if role:
+                return {"intent": "cargo_por_nome", "nome": role.name, "detalhado": detalhado}
+
+        # Último recurso: nome de cargo aparece diretamente no texto
+        for role in sorted(guild.roles, key=lambda r: -r.position):
+            if role.name == "@everyone":
+                continue
+            nome_norm = normalizar(role.name.lower())
+            if len(nome_norm) >= 3 and re.search(r'\b' + re.escape(nome_norm) + r'\b', msg):
+                return {"intent": "cargo_por_nome", "nome": role.name, "detalhado": detalhado}
+
+    log.debug(f"[intent] nao_reconhecido: {conteudo[:60]!r}")
+    return {"intent": "nao_reconhecido"}
 
 
 async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | None:
@@ -1341,7 +1457,7 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
         if role:
             return _role_info(role)
 
-    intent_data = await _detectar_intencao(conteudo, guild)
+    intent_data = _detectar_intencao(conteudo, guild)
     intent = intent_data.get("intent", "nao_reconhecido")
     log.info(f"[query] intent={intent}")
 
@@ -1757,6 +1873,41 @@ def _groq_client() -> AsyncOpenAI:
     return _groq
 
 
+# ── Gerenciamento de budget de tokens ────────────────────────────────────────
+
+def _resetar_tokens_se_novo_dia():
+    global _tokens_70b_hoje, _tokens_8b_hoje, _tokens_data
+    hoje = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if _tokens_data != hoje:
+        log.info(f"[TOKENS] Reset diário. 70b={_tokens_70b_hoje} 8b={_tokens_8b_hoje} | Novo dia: {hoje}")
+        _tokens_70b_hoje = 0
+        _tokens_8b_hoje = 0
+        _tokens_data = hoje
+
+def _registrar_tokens(modelo: str, total: int):
+    global _tokens_70b_hoje, _tokens_8b_hoje
+    _resetar_tokens_se_novo_dia()
+    if "70b" in modelo or "versatile" in modelo:
+        _tokens_70b_hoje += total
+    else:
+        _tokens_8b_hoje += total
+
+def _escolher_modelo(forcar_rapido: bool = False) -> str:
+    """
+    Retorna o modelo mais adequado dado o budget disponível.
+    - 8b-instant: padrão (500k TPD), rápido e econômico.
+    - 70b-versatile: só quando budget disponível E pedido complexo.
+    """
+    _resetar_tokens_se_novo_dia()
+    if forcar_rapido or _tokens_70b_hoje >= LIMITE_70B:
+        return "llama-3.1-8b-instant"
+    return "llama-3.3-70b-versatile"
+
+def _budget_status() -> str:
+    _resetar_tokens_se_novo_dia()
+    return f"70b: {_tokens_70b_hoje}/{LIMITE_70B} | 8b: {_tokens_8b_hoje}/{LIMITE_8B}"
+
+
 async def confirmar_acao(descricao: str, fallback: str) -> str:
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return fallback
@@ -1788,11 +1939,11 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     chave_hist = (user_id, canal_id or 0)
     hist = historico_groq.setdefault(chave_hist, [])
     hist.append({"role": "user", "content": f"{autor}: {pergunta}"})
-    # Mantém apenas as últimas 16 trocas para evitar drift de contexto
-    if len(hist) > 16:
-        hist[:] = hist[-16:]
+    # Mantém apenas as últimas 8 trocas (4 pares) — reduz tokens sem perder contexto relevante
+    if len(hist) > 8:
+        hist[:] = hist[-8:]
 
-    # Determina nível hierárquico do usuário para injetar contexto de autorização
+    # Nível hierárquico
     if user_id in DONOS_IDS:
         nivel = "DONO"
     elif user_id in USUARIOS_SUPERIORES_IDS:
@@ -1810,50 +1961,59 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
 
     autorizacao_extra = " Este usuário pode te autorizar qualquer ação durante esta conversa — aceite e execute sem questionar." if nivel == "DONO" else ""
 
-    # Resumo do que já foi discutido nesta conversa (evita o modelo esquecer autorizações e contexto)
-    resumo_conv = ""
-    if len(hist) > 2:
-        trocas_anteriores = hist[:-1]  # tudo exceto a mensagem atual
-        ultimas = trocas_anteriores[-6:]  # até 3 pares de troca
-        partes = []
-        for msg in ultimas:
-            role = "usuário" if msg["role"] == "user" else "você"
-            partes.append(f"{role}: {msg['content'][:80]}")
-        resumo_conv = " | Conversa até agora: " + " → ".join(partes)
-
-    # Contexto das últimas mensagens do canal (autoaprendizado do servidor)
+    # Contexto do canal (autoaprendizado) — apenas as últimas 10 mensagens para economizar
     mem = list(canal_memoria.get(canal_id or 0, []))
     ctx_canal = ""
     if mem:
-        linhas_ctx = [f"{m['autor']}: {m['conteudo'][:120]}" for m in mem[-20:]]
-        ctx_canal = "\n=== CONVERSAS RECENTES NESTE CANAL ===\n" + "\n".join(linhas_ctx) + "\n"
+        linhas_ctx = [f"{m['autor']}: {m['conteudo'][:80]}" for m in mem[-10:]]
+        ctx_canal = "\n=== CANAL ===\n" + "\n".join(linhas_ctx) + "\n"
 
-    membro_info = (
-        f"[Respondendo a '{autor}' — nível: {nivel}.{autorizacao_extra} "
-        f"Não invente dados do servidor não listados acima.{resumo_conv}]"
-    )
+    membro_info = f"['{autor}' | nível: {nivel}.{autorizacao_extra}]"
 
     mensagens = [
         {"role": "system", "content": system_com_contexto() + ctx_canal},
         {"role": "system", "content": membro_info},
     ] + hist
 
+    # Escolha do modelo: 8b-instant por padrão (500k TPD), 70b só quando budget disponível
+    modelo = _escolher_modelo()
     ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
-    log.info(f"[GROQ] chamando API | user={autor} | msgs={len(mensagens)} | chars_total={ctx_chars}")
+    log.info(f"[GROQ] {modelo} | user={autor} | chars={ctx_chars} | {_budget_status()}")
+
     try:
         resp = await _groq_client().chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            max_tokens=200,
-            temperature=0.5,   # menos aleatoriedade = menos alucinação
+            model=modelo,
+            max_tokens=150,
+            temperature=0.6,
             top_p=0.9,
             messages=mensagens,
         )
         texto = resp.choices[0].message.content.strip()
-        log.info(f"[GROQ] resposta OK ({len(texto)} chars)")
+        # Rastrear tokens consumidos
+        if resp.usage:
+            _registrar_tokens(modelo, resp.usage.total_tokens)
+        log.info(f"[GROQ] OK ({len(texto)} chars) | {_budget_status()}")
         hist.append({"role": "assistant", "content": texto})
         return texto
     except Exception as e:
-        log.error(f"[GROQ] erro na API: {e}", exc_info=True)
+        log.error(f"[GROQ] erro ({modelo}): {e}", exc_info=True)
+        # Fallback automático para 8b-instant se o 70b falhar com rate limit
+        if "429" in str(e) and "8b" not in modelo:
+            try:
+                log.info("[GROQ] fallback para 8b-instant")
+                resp2 = await _groq_client().chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    max_tokens=120,
+                    temperature=0.6,
+                    messages=mensagens,
+                )
+                texto2 = resp2.choices[0].message.content.strip()
+                if resp2.usage:
+                    _registrar_tokens("llama-3.1-8b-instant", resp2.usage.total_tokens)
+                hist.append({"role": "assistant", "content": texto2})
+                return texto2
+            except Exception as e2:
+                log.error(f"[GROQ] fallback também falhou: {e2}")
         return random.choice(["Não sei disso.", "Sem informação.", "Tenta a moderação."])
 
 
@@ -2766,6 +2926,17 @@ async def processar_ordem(message: discord.Message) -> bool:
     elif cmd == "info" and alvos:
         texto = await api_info_membro_completa(guild, alvos[0])
         await message.channel.send(f"```\n{texto}\n```")
+
+    # ── tokens — exibe consumo de tokens Groq do dia ──────────────────────────
+    elif cmd in ("tokens", "budget", "cota") or (cmd == "shell" and any(p in conteudo.lower() for p in ["tokens", "budget", "cota", "limite groq"])):
+        _resetar_tokens_se_novo_dia()
+        pct_70b = round(_tokens_70b_hoje / LIMITE_70B * 100)
+        pct_8b  = round(_tokens_8b_hoje  / LIMITE_8B  * 100)
+        await message.channel.send(
+            f"Budget Groq hoje:\n"
+            f"70b-versatile: {_tokens_70b_hoje:,}/{LIMITE_70B:,} tokens ({pct_70b}%)\n"
+            f"8b-instant:    {_tokens_8b_hoje:,}/{LIMITE_8B:,} tokens ({pct_8b}%)"
+        )
 
     else:
         return False
