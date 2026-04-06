@@ -2623,11 +2623,59 @@ async def _descrever_imagem(url: str, pedido: str = "") -> str:
         return ""
 
 
+async def _transcrever_audio(url: str, filename: str = "") -> str:
+    """
+    Baixa um arquivo de áudio e transcreve via Groq Whisper.
+    Retorna o texto transcrito ou '' em caso de erro.
+    """
+    if not GROQ_DISPONIVEL or not GROQ_API_KEY:
+        return ""
+    try:
+        import aiohttp as _ahttp
+        async with _ahttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return ""
+                audio_bytes = await resp.read()
+
+        # Groq Whisper via REST (o SDK openai não expõe audio diretamente neste client)
+        import aiohttp as _ahttp2
+        headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "mp3"
+        mime = {
+            "mp3": "audio/mpeg", "ogg": "audio/ogg", "wav": "audio/wav",
+            "webm": "audio/webm", "m4a": "audio/mp4", "flac": "audio/flac",
+            "mp4": "audio/mp4",
+        }.get(ext, "audio/mpeg")
+
+        form = _ahttp2.FormData()
+        form.add_field("file", audio_bytes, filename=filename or f"audio.{ext}", content_type=mime)
+        form.add_field("model", "whisper-large-v3-turbo")
+        form.add_field("language", "pt")
+        form.add_field("response_format", "text")
+
+        async with _ahttp2.ClientSession() as session:
+            async with session.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers=headers,
+                data=form,
+            ) as resp:
+                if resp.status != 200:
+                    log.warning(f"[AUDIO] Whisper retornou {resp.status}")
+                    return ""
+                texto = await resp.text()
+                return texto.strip()
+    except Exception as e:
+        log.warning(f"[AUDIO] erro ao transcrever {filename!r}: {e}")
+        return ""
+
+
 async def _processar_anexos_visuais(message: discord.Message) -> str:
     """
     Analisa anexos da mensagem atual e da mensagem referenciada (reply).
     - Imagens: descrição via visão (Llama 4 Scout)
-    - Outros tipos (PDF, vídeo, áudio, doc): menciona nome, tipo e tamanho
+    - Áudios/voz: transcrição via Groq Whisper
+    - Outros tipos (PDF, vídeo, doc): menciona nome, tipo e tamanho
     Retorna string formatada ou '' se não houver nenhum anexo relevante.
     """
     # Coletar todos os anexos: mensagem atual + msg referenciada (reply)
@@ -2646,27 +2694,44 @@ async def _processar_anexos_visuais(message: discord.Message) -> str:
     descricoes: list[str] = []
     n_img = 0
 
+    n_audio = 0
     for att in todos_anexos[:5]:
         ct = att.content_type or ""
+        nome = att.filename or ""
+
         if ct.startswith("image/"):
             n_img += 1
             if n_img <= 3:
                 desc = await _descrever_imagem(att.url, pedido)
                 if desc:
-                    label = f"Imagem {n_img} ({att.filename})" if len([a for a in todos_anexos if (a.content_type or "").startswith("image/")]) > 1 else f"Imagem ({att.filename})"
+                    multi = len([a for a in todos_anexos if (a.content_type or "").startswith("image/")]) > 1
+                    label = f"Imagem {n_img} ({nome})" if multi else f"Imagem ({nome})"
                     descricoes.append(f"[{label}: {desc}]")
+
+        elif ct.startswith("audio/") or ct.startswith("video/ogg") or nome.endswith(
+            (".mp3", ".ogg", ".wav", ".webm", ".m4a", ".flac", ".opus")
+        ):
+            # Áudio / mensagem de voz: transcreve via Whisper
+            n_audio += 1
+            if n_audio <= 2:
+                transcricao = await _transcrever_audio(att.url, nome)
+                if transcricao:
+                    descricoes.append(f"[Áudio ({nome}) — transcrição: {transcricao}]")
+                else:
+                    descricoes.append(f"[Áudio ({nome}) — não foi possível transcrever]")
+
         else:
-            # Não-imagem: registra tipo e tamanho para o bot poder comentar
             tam_kb = att.size // 1024
             tipo_legivel = (
                 "PDF" if "pdf" in ct else
                 "vídeo" if ct.startswith("video/") else
-                "áudio" if ct.startswith("audio/") else
                 "documento" if "word" in ct or "document" in ct else
                 "planilha" if "sheet" in ct or "excel" in ct else
                 ct.split("/")[-1].upper() if ct else "arquivo"
             )
-            descricoes.append(f"[Anexo {tipo_legivel}: {att.filename} ({tam_kb}KB) — não posso processar o conteúdo interno deste tipo de arquivo]")
+            descricoes.append(
+                f"[Anexo {tipo_legivel}: {nome} ({tam_kb}KB) — conteúdo interno não acessível]"
+            )
 
     return "\n".join(descricoes)
 
@@ -2970,17 +3035,10 @@ async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, 
         return REGRAS
 
     if any(p in msg for p in ["denúncia", "denuncia", "reportar", "report", "quero denunciar",
-                               "quero reportar", "infração", "infringindo", "desrespeitando", "abusando",
-                               "reporte anônimo", "reporte anonimo", "denúncia anônima", "denuncia anonima"]):
-        anonimo = any(p in msg for p in ["anônim", "anonim", "sem identificar", "sem revelar"])
-        if anonimo:
-            iniciar_conversa(user_id, "denuncia_anonima", canal_id=canal_id)
-            return (
-                f"Entendido. Para reporte anônimo, me manda uma DM — "
-                f"vou registrar sem revelar sua identidade para a equipe."
-            )
-        asyncio.ensure_future(_iniciar_denuncia(user_id, autor, canal_id or 0))
-        return await _iniciar_denuncia(user_id, autor, canal_id or 0)
+                               "quero reportar", "infração", "infringindo", "desrespeitando", "abusando"]):
+        # Acionamento via _on_message_impl (tem acesso ao message para criar canal privado).
+        # Aqui só cai se não houver @menção direta ao bot — informa o caminho correto.
+        return f"{autor}, me menciona diretamente para iniciar uma denúncia. Ex.: @Shell quero denunciar [nome]"
 
     if any(p in msg for p in ["ban", "banir", "expulsar", "kick", "punir", "silenciar", "mutar"]):
         iniciar_conversa(user_id, "punicao", canal_id=canal_id)
@@ -5957,25 +6015,119 @@ async def _desativar_lockdown(guild: discord.Guild, automatico: bool = False) ->
     log.info("[LOCKDOWN] Desativado")
 
 
-# ── Sistema de denúncias estruturadas ────────────────────────────────────────
+# ── Sistema de denúncias com canal privado ────────────────────────────────────
 
-async def _iniciar_denuncia(user_id: int, autor: str, canal_id: int) -> str:
-    """Inicia o wizard de denúncia para o usuário."""
-    _denuncia_wizard[user_id] = {
-        "step": "denunciado",
-        "dados": {"denunciante": autor, "ts": agora_utc().isoformat()},
-        "canal_id": canal_id,
+_GATILHO_DENUNCIA = re.compile(
+    r'\b(?:denuncia[r]?|denúncia|quero denunciar|quero reportar|reportar|reporte'
+    r'|infring[iu]|desrespeitando|abusando|t[aá] abusando|abusar)\b',
+    re.IGNORECASE,
+)
+_GATILHO_ANONIMO = re.compile(
+    r'\ban[oô]nim[ao]|sem identificar|sem revelar|em segredo|sem meu nome\b',
+    re.IGNORECASE,
+)
+
+
+async def _criar_canal_denuncia_privado(
+    guild: discord.Guild,
+    membro: discord.Member,
+    seq: int,
+) -> discord.TextChannel | None:
+    """
+    Cria canal de texto temporário e privado para coleta da denúncia.
+    Visível apenas para: membro denunciante + bot + cargo de moderação (só leitura).
+    @everyone não vê o canal.
+    """
+    cargo_mod = guild.get_role(_CARGO_MODERADORES_ID)
+    everyone = guild.default_role
+    bot_member = guild.get_member(client.user.id)
+
+    overwrites: dict = {
+        everyone: discord.PermissionOverwrite(read_messages=False, send_messages=False),
+        membro: discord.PermissionOverwrite(read_messages=True, send_messages=True),
     }
-    return (
-        "Entendido. Vamos registrar a denúncia. "
-        "Quem você quer denunciar? Menciona o usuário ou passa o nome."
+    if bot_member:
+        overwrites[bot_member] = discord.PermissionOverwrite(
+            read_messages=True, send_messages=True, manage_channels=True, manage_messages=True
+        )
+    if cargo_mod:
+        # Mods podem ler mas não intervir durante a coleta
+        overwrites[cargo_mod] = discord.PermissionOverwrite(read_messages=True, send_messages=False)
+
+    # Tenta usar categoria de moderação existente
+    categoria = (
+        discord.utils.get(guild.categories, name="Denúncias")
+        or discord.utils.get(guild.categories, name="denuncias")
+        or discord.utils.get(guild.categories, name="Moderação")
+        or discord.utils.get(guild.categories, name="Moderacao")
     )
+
+    try:
+        canal = await guild.create_text_channel(
+            f"denuncia-{seq:04d}",
+            overwrites=overwrites,
+            category=categoria,
+            topic="Canal privado temporário de denúncia — será excluído após o envio",
+            reason="Denúncia privada",
+        )
+        return canal
+    except Exception as e:
+        log.error(f"[DENUNCIA] falha ao criar canal privado: {e}")
+        return None
+
+
+async def _iniciar_denuncia(message: discord.Message, anonimo: bool = False) -> None:
+    """
+    Cria canal privado e inicia o wizard de denúncia.
+    Para denúncias anônimas o nome do denunciante NÃO aparece no relatório final.
+    """
+    global _denuncia_seq
+    user_id = message.author.id
+    autor = message.author.display_name
+    guild = message.guild
+
+    _denuncia_seq += 1
+    seq = _denuncia_seq
+
+    canal_priv = await _criar_canal_denuncia_privado(guild, message.author, seq)
+
+    if canal_priv:
+        _denuncia_wizard[user_id] = {
+            "step": "denunciado",
+            "dados": {
+                "denunciante": "[anônimo]" if anonimo else autor,
+                "anonimo": anonimo,
+                "ts": agora_utc().isoformat(),
+            },
+            "canal_privado_id": canal_priv.id,
+            "seq": seq,
+        }
+        aviso_anon = "Identidade protegida — não vai aparecer no relatório." if anonimo else ""
+        await canal_priv.send(
+            f"#{seq:04d} {aviso_anon}\nQuem vai ser denunciado?"
+        )
+        await message.channel.send(
+            f"{canal_priv.mention} — canal privado criado. Continua lá."
+        )
+    else:
+        # Fallback: wizard no canal atual
+        _denuncia_wizard[user_id] = {
+            "step": "denunciado",
+            "dados": {"denunciante": "[anônimo]" if anonimo else autor, "anonimo": anonimo, "ts": agora_utc().isoformat()},
+            "canal_privado_id": None,
+            "seq": seq,
+        }
+        await message.channel.send(
+            "Não consegui criar o canal privado (sem permissão). "
+            "Vamos registrar aqui mesmo. Quem você quer denunciar?"
+        )
 
 
 async def _processar_denuncia_wizard(message: discord.Message) -> bool:
     """
     Processa as respostas do wizard de denúncia.
-    Retorna True se a mensagem foi consumida pelo wizard.
+    Só consome mensagens se o usuário estiver no canal privado correto (ou fallback).
+    Retorna True se a mensagem foi consumida.
     """
     global _denuncia_seq
     user_id = message.author.id
@@ -5983,67 +6135,58 @@ async def _processar_denuncia_wizard(message: discord.Message) -> bool:
     if not estado:
         return False
 
+    # Verificar se a mensagem está no canal correto do wizard
+    canal_privado_id = estado.get("canal_privado_id")
+    if canal_privado_id and message.channel.id != canal_privado_id:
+        return False  # ignora mensagens fora do canal da denúncia
+
     conteudo = message.content.strip()
     dados = estado["dados"]
     step = estado["step"]
+    canal = message.channel
 
     if step == "denunciado":
-        # Resolve menção ou nome
-        alvo_nome = conteudo
-        if message.mentions:
-            alvo_nome = message.mentions[0].display_name
+        alvo_nome = message.mentions[0].display_name if message.mentions else conteudo
         dados["denunciado"] = alvo_nome
         estado["step"] = "descricao"
-        await message.channel.send(
-            f"Ok, {alvo_nome} registrado. "
-            "Descreva o que aconteceu com o máximo de detalhes."
-        )
+        await canal.send(f"{alvo_nome} anotado. O que aconteceu?")
 
     elif step == "descricao":
         dados["descricao"] = conteudo[:800]
         estado["step"] = "canal_ocorrencia"
-        await message.channel.send(
-            "Em qual canal ou contexto isso aconteceu? "
-            "Pode mencionar o canal, dizer 'voz', 'DM', ou 'não sei'."
-        )
+        await canal.send("Onde aconteceu? Canal, voz, DM.")
 
     elif step == "canal_ocorrencia":
-        dados["local"] = conteudo[:100]
-        if message.channel_mentions:
-            dados["local"] = f"#{message.channel_mentions[0].name}"
+        dados["local"] = f"#{message.channel_mentions[0].name}" if message.channel_mentions else conteudo[:100]
         estado["step"] = "evidencia"
-        await message.channel.send(
-            "Tem alguma evidência (print, link, print de conversa)? "
-            "Se sim, manda agora. Se não, responde 'não tenho'."
-        )
+        await canal.send("Tem evidência? Manda agora ou diz que não tem.")
 
     elif step == "evidencia":
-        evidencia = conteudo
         if message.attachments:
-            evidencia = " | ".join(a.url for a in message.attachments[:3])
-        elif conteudo.lower() in ("não", "nao", "nao tenho", "não tenho", "n", "-"):
-            evidencia = "Nenhuma evidência fornecida"
-        dados["evidencia"] = evidencia
+            dados["evidencia"] = " | ".join(a.url for a in message.attachments[:5])
+        elif conteudo.lower() in ("não", "nao", "nao tenho", "não tenho", "n", "-", "sem evidencia", "sem evidência"):
+            dados["evidencia"] = "nenhuma"
+        else:
+            dados["evidencia"] = conteudo[:400]
 
-        # Finalizar denúncia
-        _denuncia_seq += 1
-        denuncia_id = f"DEN-{_denuncia_seq:04d}"
-        dados["id"] = denuncia_id
-        dados["status"] = "pendente"
-        dados["canal_origem"] = message.channel.id
-        denuncias_pendentes.append(dados)
+        # ── Finalizar e publicar no canal de auditoria ────────────────────
+        seq = estado.get("seq", _denuncia_seq)
+        anonimo = dados.get("anonimo", False)
+        denuncia_id = f"DEN-{'ANON-' if anonimo else ''}{seq:04d}"
+        dados.update({"id": denuncia_id, "status": "pendente"})
+        denuncias_pendentes.append(dict(dados))
         del _denuncia_wizard[user_id]
 
-        # Postar no canal de auditoria
         guild = message.guild
         canal_audit = guild.get_channel(_canal_auditoria_id()) if guild else None
         mod = mencao_mod(guild) if guild else "@moderacao"
+
         relato = (
             f"DENÚNCIA {denuncia_id}\n"
             f"Denunciante: {dados['denunciante']}\n"
-            f"Denunciado: {dados['denunciado']}\n"
+            f"Denunciado: {dados.get('denunciado', 'não informado')}\n"
             f"Local: {dados.get('local', 'não informado')}\n"
-            f"Descrição: {dados['descricao']}\n"
+            f"Descrição: {dados.get('descricao', '')}\n"
             f"Evidência: {dados.get('evidencia', 'nenhuma')}\n"
             f"Status: PENDENTE — {mod}"
         )
@@ -6053,11 +6196,19 @@ async def _processar_denuncia_wizard(message: discord.Message) -> bool:
             except Exception:
                 pass
 
-        await message.channel.send(
-            f"Denúncia registrada com ID {denuncia_id}. "
-            f"A equipe foi notificada e vai analisar. "
-            f"Guarda esse ID caso precise acompanhar."
-        )
+        await canal.send(f"{denuncia_id} registrada. Equipe notificada. Canal some em 60s.")
+
+        # Apagar canal privado após 60s
+        if canal_privado_id and guild:
+            async def _apagar_canal_denuncia():
+                await asyncio.sleep(60)
+                try:
+                    c = guild.get_channel(canal_privado_id)
+                    if c:
+                        await c.delete(reason=f"Denúncia {denuncia_id} concluída")
+                except Exception:
+                    pass
+            asyncio.ensure_future(_apagar_canal_denuncia())
 
     return True
 
@@ -6870,52 +7021,12 @@ async def on_message(message: discord.Message):
 
 
 async def _on_dm_denuncia(message: discord.Message) -> None:
-    """
-    Processa DMs como denúncias anônimas.
-    O denunciante não é identificado no relatório enviado ao canal de auditoria.
-    """
-    conteudo = message.content.strip()
-    if not conteudo and not message.attachments:
-        return
-
-    global _denuncia_seq
-    _denuncia_seq += 1
-    denuncia_id = f"DEN-ANON-{_denuncia_seq:04d}"
-
-    evidencias = " | ".join(a.url for a in message.attachments[:3]) if message.attachments else "nenhuma"
-
-    guild = client.get_guild(SERVIDOR_ID)
-    canal_audit = guild.get_channel(_canal_auditoria_id()) if guild else None
-    mod = mencao_mod(guild) if guild else "@moderacao"
-
-    relato = (
-        f"DENÚNCIA ANÔNIMA {denuncia_id}\n"
-        f"Denunciante: [identidade protegida]\n"
-        f"Relato: {conteudo[:800]}\n"
-        f"Evidência: {evidencias}\n"
-        f"Status: PENDENTE — {mod}"
-    )
-
-    if canal_audit:
-        try:
-            await canal_audit.send(f"```\n{relato}\n```")
-        except Exception as e:
-            log.error(f"[DENUNCIA_ANON] falha ao postar: {e}")
-
-    denuncias_pendentes.append({
-        "id": denuncia_id,
-        "denunciante": "[anônimo]",
-        "descricao": conteudo[:800],
-        "evidencia": evidencias,
-        "status": "pendente",
-        "ts": agora_utc().isoformat(),
-    })
-
+    """DMs: redireciona para o servidor onde o canal privado é criado."""
     await message.channel.send(
-        f"Denúncia anônima registrada com ID {denuncia_id}. "
-        f"Sua identidade não foi revelada. A equipe vai analisar."
+        "Para denúncias, me menciona no servidor: @Shell quero denunciar [nome].\n"
+        "Para denúncia anônima: @Shell reporte anônimo.\n"
+        "Vou criar um canal privado só para você."
     )
-    log.info(f"[DENUNCIA_ANON] {denuncia_id} recebida via DM")
 
 
 async def _on_message_impl(message: discord.Message):
@@ -6936,6 +7047,14 @@ async def _on_message_impl(message: discord.Message):
         consumido = await _processar_denuncia_wizard(message)
         if consumido:
             return
+
+    # ── Gatilho de denúncia: cria canal privado e inicia coleta ─────────────
+    if (not message.author.bot
+            and client.user in message.mentions
+            and _GATILHO_DENUNCIA.search(message.content)):
+        anonimo = bool(_GATILHO_ANONIMO.search(message.content))
+        await _iniciar_denuncia(message, anonimo)
+        return
 
     # ── Detecção de mention bombing (ataque por menções em massa) ────────────
     if (not message.author.bot
@@ -6975,6 +7094,25 @@ async def _on_message_impl(message: discord.Message):
                           message.content, re.IGNORECASE)):
         asyncio.ensure_future(_desativar_lockdown(message.guild))
         return
+
+    # ── Áudio passivo: transcreve em canais monitorados mesmo sem @menção ───────
+    if (not message.author.bot
+            and message.attachments
+            and message.channel.id in canais_monitorados):
+        _audios_passivos = [
+            a for a in message.attachments
+            if (a.content_type or "").startswith("audio/")
+            or (a.filename or "").endswith((".mp3", ".ogg", ".wav", ".webm", ".m4a", ".opus"))
+        ]
+        if _audios_passivos:
+            _transcricao_passiva = await _transcrever_audio(_audios_passivos[0].url, _audios_passivos[0].filename)
+            if _transcricao_passiva:
+                # Injeta transcrição na memória do canal para contexto
+                canal_memoria[message.channel.id].append({
+                    "autor": message.author.display_name,
+                    "conteudo": f"[áudio]: {_transcricao_passiva[:300]}",
+                })
+                log.info(f"[AUDIO] transcrição passiva em #{message.channel.name}: {_transcricao_passiva[:60]}")
 
     # ── Memória do canal: registra toda mensagem humana ──────────────────────
     # Permite ao bot entender o contexto da conversa sem intervenção manual
