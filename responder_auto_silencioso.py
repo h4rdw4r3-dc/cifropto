@@ -581,6 +581,18 @@ citacoes: list[dict] = []  # {texto, autor, canal, ts}
 # {user_id: {descricao, coro_fn, args, kwargs, canal_id, ts}}
 confirmacoes_pendentes: dict[int, dict] = {}
 
+# ── Wizard de geração de arquivos ─────────────────────────────────────────────
+# {user_id: {step, tipo, formato, titulo, logo_url, extras, canal_id, guild_id,
+#            conteudo_original, ts}}
+wizard_geracao: dict[int, dict] = {}
+
+WIZARD_PASSOS = [
+    ("formato",  "Qual formato?\n**1** PDF   **2** Documento .txt   **3** Planilha .csv\nResponde o número ou o nome."),
+    ("titulo",   "Quer um **título personalizado** no arquivo? Se sim, escreve o título. Se não, responde `não`."),
+    ("logo",     "Quer adicionar um **logo/imagem** no cabeçalho? Manda a imagem (anexo) ou um link direto. Se não, responde `não`."),
+    ("extras",   "Tem algum **incremento ou observação** extra para incluir? (ex: 'adiciona nota de rodapé', 'inclui seção de avisos'). Se não, responde `não`."),
+]
+
 # ── Rastreamento de entradas e saídas ─────────────────────────────────────────
 # registro_entradas: user_id -> lista de ISO timestamps de cada entrada
 registro_entradas: dict[int, list[str]] = {}
@@ -2965,6 +2977,234 @@ async def _verificar_confirmacao_pendente(message: discord.Message) -> bool:
     return False
 
 
+# ── Wizard de geração ─────────────────────────────────────────────────────────
+
+async def _iniciar_wizard(message: discord.Message, tipo_conteudo: str):
+    """
+    Inicia o wizard de personalização antes de gerar PDF/doc/planilha.
+    tipo_conteudo: ex. 'relatorio semanal', 'membros', 'historico de canal', etc.
+    """
+    wizard_geracao[message.author.id] = {
+        "step": 0,
+        "tipo": tipo_conteudo,
+        "formato": None,
+        "titulo": None,
+        "logo_url": None,
+        "extras": None,
+        "canal_id": message.channel.id,
+        "guild_id": message.guild.id if message.guild else None,
+        "conteudo_original": message.content,
+        "canal_mentions": [c.id for c in message.channel_mentions],
+        "ts": agora_utc(),
+    }
+    _, pergunta = WIZARD_PASSOS[0]
+    await message.channel.send(
+        f"Vou preparar **{tipo_conteudo}**. Algumas perguntas rápidas antes:\n\n"
+        f"**1/4** {pergunta}"
+    )
+    return True
+
+
+async def _processar_wizard(message: discord.Message) -> bool:
+    """
+    Processa respostas do wizard passo a passo.
+    Retorna True se consumiu a mensagem.
+    """
+    user_id = message.author.id
+    estado = wizard_geracao.get(user_id)
+    if not estado:
+        return False
+    if estado["canal_id"] != message.channel.id:
+        return False
+    # Expira em 5 minutos
+    if (agora_utc() - estado["ts"]).total_seconds() > 300:
+        del wizard_geracao[user_id]
+        return False
+
+    resp = message.content.strip()
+    step = estado["step"]
+    campo, _ = WIZARD_PASSOS[step]
+
+    # ── Passo 0: formato ──────────────────────────────────────────────────────
+    if campo == "formato":
+        r = resp.lower()
+        if r in ("1", "pdf"):
+            estado["formato"] = "pdf"
+        elif r in ("2", "txt", "texto", "doc", "documento"):
+            estado["formato"] = "txt"
+        elif r in ("3", "csv", "planilha", "calc", "tabela"):
+            estado["formato"] = "csv"
+        else:
+            await message.channel.send("Não entendi. Responde **1** (PDF), **2** (TXT) ou **3** (CSV).")
+            return True
+
+    # ── Passo 1: título ───────────────────────────────────────────────────────
+    elif campo == "titulo":
+        if resp.lower() not in ("não", "nao", "n", "no", "-"):
+            estado["titulo"] = resp[:120]
+
+    # ── Passo 2: logo ─────────────────────────────────────────────────────────
+    elif campo == "logo":
+        if resp.lower() not in ("não", "nao", "n", "no", "-"):
+            # Aceita anexo de imagem ou URL
+            if message.attachments:
+                estado["logo_url"] = message.attachments[0].url
+            elif resp.startswith("http"):
+                estado["logo_url"] = resp.split()[0]
+            else:
+                await message.channel.send("Manda a imagem como anexo ou um link direto (http...). Ou responde `não` para pular.")
+                return True
+
+    # ── Passo 3: extras ───────────────────────────────────────────────────────
+    elif campo == "extras":
+        if resp.lower() not in ("não", "nao", "n", "no", "-"):
+            estado["extras"] = resp[:300]
+
+    # Avança para próximo passo
+    estado["step"] += 1
+    estado["ts"] = agora_utc()
+
+    if estado["step"] < len(WIZARD_PASSOS):
+        n, pergunta = WIZARD_PASSOS[estado["step"]]
+        await message.channel.send(f"**{estado['step']+1}/4** {pergunta}")
+        return True
+
+    # Todos os passos respondidos — gerar
+    del wizard_geracao[user_id]
+    await _executar_geracao(message, estado)
+    return True
+
+
+async def _executar_geracao(message: discord.Message, params: dict):
+    """Gera o arquivo com as opções coletadas pelo wizard e envia no canal."""
+    guild = message.guild
+    brasilia = timezone(timedelta(hours=-3))
+    tipo = params["tipo"]
+    fmt = params["formato"] or "pdf"
+    titulo = params["titulo"]
+    logo_url = params["logo_url"]
+    extras = params["extras"] or ""
+    canal_mentions = params.get("canal_mentions", [])
+
+    await message.channel.send("Gerando arquivo, aguarde...")
+
+    try:
+        # ── Coleta o conteúdo textual ─────────────────────────────────────────
+        if re.search(r'hist[oó]rico|canal', tipo):
+            canal_exp = (guild.get_channel(canal_mentions[0]) if canal_mentions
+                         else message.channel)
+            linhas = [f"Historico de #{canal_exp.name}\n"
+                      f"Data: {datetime.now(brasilia).strftime('%d/%m/%Y %H:%M')}\n\n"]
+            async for msg in canal_exp.history(limit=200, oldest_first=True):
+                ts = msg.created_at.astimezone(brasilia).strftime('%d/%m %H:%M')
+                linhas.append(f"[{ts}] {msg.author.display_name}: {msg.content[:400]}\n")
+            texto_base = "".join(linhas)
+            nome_base = f"historico-{canal_exp.name}"
+        elif re.search(r'membro', tipo):
+            linhas = [f"Membros de {guild.name} — {datetime.now(brasilia).strftime('%d/%m/%Y')}\n\n"]
+            for i, m in enumerate(sorted(guild.members, key=lambda x: x.display_name.lower()), 1):
+                joined = m.joined_at.astimezone(brasilia).strftime('%d/%m/%Y') if m.joined_at else "?"
+                cargos = ", ".join(r.name for r in m.roles[1:]) or "sem cargo"
+                linhas.append(f"{i}. {m.display_name} ({m.name}) — entrou {joined} — {cargos}\n")
+            texto_base = "".join(linhas)
+            nome_base = "membros"
+        elif re.search(r'regra', tipo):
+            texto_base = REGRAS
+            nome_base = "regras"
+        elif re.search(r'infra', tipo):
+            linhas = [f"Infracoes — {guild.name} — {datetime.now(brasilia).strftime('%d/%m/%Y')}\n\n"]
+            for uid in sorted(set(infracoes) | set(silenciamentos), key=lambda u: -infracoes.get(u, 0)):
+                m = guild.get_member(uid)
+                nome_m = m.display_name if m else nomes_historico.get(uid, f"ID {uid}")
+                linhas.append(f"{nome_m} — {infracoes.get(uid,0)} infracoes, {silenciamentos.get(uid,0)} silenciamentos\n")
+            texto_base = "".join(linhas)
+            nome_base = "infracoes"
+        elif re.search(r'atividade|ranking', tipo):
+            linhas = [f"Ranking de atividade — {datetime.now(brasilia).strftime('%d/%m/%Y')}\n\n"]
+            for i, (uid, cnt) in enumerate(sorted(atividade_mensagens.items(), key=lambda x: -x[1]), 1):
+                mb = guild.get_member(uid)
+                linhas.append(f"{i}. {mb.display_name if mb else uid} — {cnt} mensagens\n")
+            texto_base = "".join(linhas)
+            nome_base = "atividade"
+        elif re.search(r'cita', tipo):
+            linhas = [f"Citacoes — {datetime.now(brasilia).strftime('%d/%m/%Y')}\n\n"]
+            for c in citacoes:
+                linhas.append(f'[{c.get("ts","?")}] {c.get("autor","?")} em #{c.get("canal","?")}: "{c.get("texto","")}"\n')
+            texto_base = "".join(linhas)
+            nome_base = "citacoes"
+        else:
+            # relatorio
+            dias = 30 if re.search(r'mensal', tipo) else 7
+            rel = await relatorio_membros(guild, dias)
+            texto_base = (f"Servidor: {guild.name}\nData: {datetime.now(brasilia).strftime('%d/%m/%Y %H:%M')}\n\n" + rel)
+            nome_base = f"relatorio-{'mensal' if dias >= 28 else 'semanal'}"
+
+        # Adiciona extras ao final do texto
+        if extras:
+            texto_base += f"\n\n--- Observacoes ---\n{extras}\n"
+
+        titulo_final = titulo or nome_base.replace("-", " ").title()
+
+        # ── Gera no formato escolhido ─────────────────────────────────────────
+        if fmt == "pdf":
+            if not FPDF_DISPONIVEL:
+                await message.channel.send("fpdf2 nao instalado — enviando como .txt.")
+                fmt = "txt"
+            else:
+                pdf = FPDF()
+                pdf.set_auto_page_break(auto=True, margin=15)
+                pdf.add_page()
+
+                # Logo (se fornecido)
+                if logo_url:
+                    try:
+                        async with aiohttp.ClientSession() as s:
+                            async with s.get(logo_url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                                if r.status == 200:
+                                    img_bytes = await r.read()
+                                    img_buf = io.BytesIO(img_bytes)
+                                    pdf.image(img_buf, x=10, y=10, h=20)
+                                    pdf.ln(25)
+                    except Exception as e:
+                        log.warning(f"[WIZARD] logo falhou: {e}")
+
+                pdf.set_font("Helvetica", "B", 16)
+                pdf.cell(0, 10, _pdf_str(titulo_final), new_x="LMARGIN", new_y="NEXT", align="C")
+                pdf.set_font("Helvetica", size=8)
+                pdf.cell(0, 5, _pdf_str(f"Gerado em {datetime.now(brasilia).strftime('%d/%m/%Y %H:%M')} (Brasilia)"),
+                         new_x="LMARGIN", new_y="NEXT", align="C")
+                pdf.ln(4)
+                pdf.set_font("Helvetica", size=9)
+                for linha in texto_base.split("\n"):
+                    pdf.multi_cell(0, 5, _pdf_str(linha), new_x="LMARGIN", new_y="NEXT")
+                arq_bytes = bytes(pdf.output())
+                arq = discord.File(io.BytesIO(arq_bytes), filename=f"{nome_base}.pdf")
+                await message.channel.send(f"**{titulo_final}** gerado:", file=arq)
+                log.info(f"[WIZARD] {message.author.display_name} gerou {nome_base}.pdf")
+                return
+
+        if fmt == "csv":
+            import csv as _csv
+            buf = io.StringIO()
+            w = _csv.writer(buf)
+            # Escreve cada linha como coluna única (o conteúdo já é texto estruturado)
+            for linha in texto_base.split("\n"):
+                w.writerow([linha])
+            arq = discord.File(io.BytesIO(buf.getvalue().encode("utf-8-sig")), filename=f"{nome_base}.csv")
+            await message.channel.send(f"**{titulo_final}** gerado:", file=arq)
+        else:
+            # TXT
+            conteudo_txt = f"{titulo_final}\n{'=' * len(titulo_final)}\n\n{texto_base}"
+            arq = discord.File(io.BytesIO(conteudo_txt.encode("utf-8")), filename=f"{nome_base}.txt")
+            await message.channel.send(f"**{titulo_final}** gerado:", file=arq)
+
+        log.info(f"[WIZARD] {message.author.display_name} gerou {nome_base}.{fmt}")
+
+    except Exception as e:
+        await message.channel.send(f"Erro ao gerar: {e}")
+        log.error(f"[WIZARD] _executar_geracao: {e}", exc_info=True)
+
+
 async def processar_ordem(message: discord.Message) -> bool:
     """Processa comandos dos donos. Retorna True se algum comando foi executado."""
     conteudo = message.content.strip()
@@ -3690,128 +3930,24 @@ async def processar_ordem(message: discord.Message) -> bool:
         if canal_rel.id != message.channel.id:
             await message.channel.send(f"Relatório {tipo_txt} postado em {canal_rel.mention}.")
 
-    # ── gerar documento de texto (.txt) ───────────────────────────────────────
-    elif _addr and re.search(r'\b(doc|documento)\b', conteudo.lower()) and re.search(r'\b(cria[r]?|gera[r]?|manda[r]?|faz|exporta[r]?)\b', conteudo.lower()):
+    # ── gerar arquivo (PDF / doc / planilha) — inicia wizard ─────────────────
+    elif _addr and re.search(
+        r'\b(pdf|doc|documento|planilha|csv|tabela|calc|relat[oó]rio|exporta[r]?)\b',
+        conteudo.lower()
+    ) and re.search(
+        r'\b(cria[r]?|gera[r]?|manda[r]?|faz|exporta[r]?|preciso|quero|me\s+d[aá])\b',
+        conteudo.lower()
+    ):
         msg_l = conteudo.lower()
-        _nome_doc = message.author.display_name
-        brasilia = timezone(timedelta(hours=-3))
-
-        async def _exec_doc():
-            if re.search(r'\bhist[oó]rico\b|\bcanal\b|\bmensagens?\b', msg_l):
-                canal_exp = message.channel_mentions[0] if message.channel_mentions else message.channel
-                linhas = [f"Historico de #{canal_exp.name}\n"
-                          f"Exportado em {datetime.now(brasilia).strftime('%d/%m/%Y %H:%M')}\n\n"]
-                async for msg in canal_exp.history(limit=200, oldest_first=True):
-                    ts = msg.created_at.astimezone(brasilia).strftime('%d/%m %H:%M')
-                    corpo = msg.content or "[sem texto]"
-                    linhas.append(f"[{ts}] {msg.author.display_name}: {corpo[:400]}\n")
-                conteudo_doc = "".join(linhas)
-                nome_arq = f"historico-{canal_exp.name}.txt"
-            elif re.search(r'\bregra[s]?\b', msg_l):
-                conteudo_doc = REGRAS
-                nome_arq = "regras.txt"
-            else:
-                dias_doc = 30 if re.search(r'\bmensal\b|\bmes\b', msg_l) else 7
-                conteudo_doc = await relatorio_membros(guild, dias_doc)
-                conteudo_doc = (f"Servidor: {guild.name}\n"
-                                f"Data: {datetime.now(brasilia).strftime('%d/%m/%Y %H:%M')}\n\n"
-                                + conteudo_doc)
-                nome_arq = f"relatorio-{'mensal' if dias_doc >= 28 else 'semanal'}.txt"
-            arq = discord.File(io.BytesIO(conteudo_doc.encode("utf-8")), filename=nome_arq)
-            await message.channel.send("Documento gerado:", file=arq)
-            log.info(f"[DOC] {_nome_doc} gerou {nome_arq}")
-
-        tipo_doc = ("historico de canal" if re.search(r'\bhist[oó]rico\b|\bcanal\b', msg_l)
-                    else "regras" if re.search(r'\bregra[s]?\b', msg_l)
-                    else "relatorio mensal" if re.search(r'\bmensal\b|\bmes\b', msg_l)
-                    else "relatorio semanal")
-        return await _solicitar_confirmacao(message, f"documento de {tipo_doc}", _exec_doc)
-
-    # ── gerar planilha (.csv) ─────────────────────────────────────────────────
-    elif _addr and re.search(r'\b(planilha|csv|tabela|calc)\b', conteudo.lower()) and re.search(r'\b(cria[r]?|gera[r]?|manda[r]?|faz|exporta[r]?)\b', conteudo.lower()):
-        msg_l = conteudo.lower()
-        _nome_csv = message.author.display_name
-        brasilia = timezone(timedelta(hours=-3))
-
-        async def _exec_csv():
-            import csv as _csv
-            buf = io.StringIO()
-            w = _csv.writer(buf)
-            if re.search(r'\binfra[cç][aã]o|infracoes|punicao\b', msg_l):
-                w.writerow(["Usuario", "ID", "Infracoes", "Silenciamentos", "Ultimo motivo"])
-                for uid in sorted(set(infracoes) | set(silenciamentos), key=lambda u: -infracoes.get(u, 0)):
-                    m = guild.get_member(uid)
-                    nome_m = m.display_name if m else nomes_historico.get(uid, f"ID {uid}")
-                    w.writerow([nome_m, uid, infracoes.get(uid, 0), silenciamentos.get(uid, 0), ultimo_motivo.get(uid, "")])
-                nome_arq = "infracoes.csv"
-            elif re.search(r'\batividade\b|\branking\b', msg_l):
-                w.writerow(["#", "Usuario", "ID", "Mensagens (sessao)"])
-                for i, (uid, cnt) in enumerate(sorted(atividade_mensagens.items(), key=lambda x: -x[1]), 1):
-                    mb = guild.get_member(uid)
-                    w.writerow([i, mb.display_name if mb else f"ID {uid}", uid, cnt])
-                nome_arq = "atividade.csv"
-            elif re.search(r'\bcita[cç][aã]o\b', msg_l):
-                w.writerow(["#", "Autor", "Canal", "Data", "Texto"])
-                for i, c in enumerate(citacoes, 1):
-                    w.writerow([i, c.get("autor",""), c.get("canal",""), c.get("ts",""), c.get("texto","")])
-                nome_arq = "citacoes.csv"
-            else:
-                w.writerow(["#", "Nome", "Apelido", "Entrou em", "Conta criada em", "Cargos", "Bot"])
-                for i, m in enumerate(sorted(guild.members, key=lambda m: m.display_name.lower()), 1):
-                    joined = m.joined_at.astimezone(brasilia).strftime('%d/%m/%Y') if m.joined_at else "?"
-                    created = m.created_at.astimezone(brasilia).strftime('%d/%m/%Y')
-                    cargos = ", ".join(r.name for r in m.roles[1:])
-                    w.writerow([i, m.name, m.display_name, joined, created, cargos, "Sim" if m.bot else "Nao"])
-                nome_arq = "membros.csv"
-            arq = discord.File(io.BytesIO(buf.getvalue().encode("utf-8-sig")), filename=nome_arq)
-            await message.channel.send("Planilha gerada:", file=arq)
-            log.info(f"[CSV] {_nome_csv} gerou {nome_arq}")
-
-        tipo_csv = ("de infracoes" if re.search(r'\binfra[cç][aã]o\b', msg_l)
-                    else "de atividade" if re.search(r'\batividade\b|\branking\b', msg_l)
-                    else "de citacoes" if re.search(r'\bcita[cç][aã]o\b', msg_l)
-                    else "de membros")
-        return await _solicitar_confirmacao(message, f"planilha {tipo_csv}", _exec_csv)
-
-    # ── gerar PDF ─────────────────────────────────────────────────────────────
-    elif _addr and re.search(r'\bpdf\b', conteudo.lower()):
-        if not FPDF_DISPONIVEL:
-            await message.channel.send("fpdf2 não está instalado no ambiente. Adicione ao requirements.txt e redeploy.")
-            return True
-        msg_l = conteudo.lower()
-        _nome_pdf = message.author.display_name
-
-        async def _exec_pdf():
-            nome_arquivo = "relatorio.pdf"
-            if re.search(r'\bhist[oó]rico\b|\bcanal\b|\bmensagens?\b', msg_l):
-                canal_exp = message.channel_mentions[0] if message.channel_mentions else message.channel
-                pdf_bytes = await gerar_pdf_historico_canal(canal_exp, limite=150)
-                nome_arquivo = f"historico-{canal_exp.name}.pdf"
-            elif re.search(r'\bmembro[s]?\b|\blista\b', msg_l):
-                pdf_bytes = gerar_pdf_membros(guild)
-                nome_arquivo = "membros.pdf"
-            elif re.search(r'\bregra[s]?\b', msg_l):
-                pdf_bytes = gerar_pdf_regras()
-                nome_arquivo = "regras.pdf"
-            elif re.search(r'\bcita[cç][aã]o|citacoes\b', msg_l):
-                pdf_bytes = gerar_pdf_citacoes()
-                nome_arquivo = "citacoes.pdf"
-            else:
-                dias_pdf = 30 if 'mensal' in msg_l or 'mes' in msg_l else 7
-                pdf_bytes = await gerar_pdf_relatorio_servidor(guild, dias_pdf)
-                nome_arquivo = f"relatorio-{'mensal' if dias_pdf >= 28 else 'semanal'}.pdf"
-            arquivo = discord.File(io.BytesIO(pdf_bytes), filename=nome_arquivo)
-            await message.channel.send("PDF gerado:", file=arquivo)
-            log.info(f"[PDF] {_nome_pdf} gerou {nome_arquivo}")
-
-        tipo_pdf = ("historico de canal" if re.search(r'\bhist[oó]rico\b|\bcanal\b', msg_l)
-                    else "membros" if re.search(r'\bmembro[s]?\b|\blista\b', msg_l)
-                    else "regras" if re.search(r'\bregra[s]?\b', msg_l)
-                    else "citacoes" if re.search(r'\bcita[cç][aã]o\b', msg_l)
-                    else "relatorio semanal" if 'semanal' in msg_l
-                    else "relatorio mensal" if re.search(r'\bmensal\b|\bmes\b', msg_l)
-                    else "relatorio semanal")
-        return await _solicitar_confirmacao(message, f"PDF de {tipo_pdf}", _exec_pdf)
+        tipo = ("historico de canal" if re.search(r'\bhist[oó]rico\b|\bcanal\b', msg_l)
+                else "membros" if re.search(r'\bmembro[s]?\b|\blista\b', msg_l)
+                else "regras" if re.search(r'\bregra[s]?\b', msg_l)
+                else "infracoes" if re.search(r'\binfra[cç][aã]o\b', msg_l)
+                else "atividade" if re.search(r'\batividade\b|\branking\b', msg_l)
+                else "citacoes" if re.search(r'\bcita[cç][aã]o\b', msg_l)
+                else "relatorio mensal" if re.search(r'\bmensal\b|\bmes\b', msg_l)
+                else "relatorio semanal")
+        return await _iniciar_wizard(message, tipo)
 
     # ── traduzir mensagem ─────────────────────────────────────────────────────
     # Uso: "Shell traduz isso para inglês" (reply na mensagem), "Shell traduz: texto"
@@ -4963,6 +5099,8 @@ async def _on_message_impl(message: discord.Message):
         if message.author.id in ausencia:
             del ausencia[message.author.id]
             await message.channel.send(f"{message.author.mention}, modo ausente desativado.")
+        if await _processar_wizard(message):
+            return
         if await _verificar_confirmacao_pendente(message):
             return
         tratado = await processar_ordem(message)
@@ -4999,6 +5137,8 @@ async def _on_message_impl(message: discord.Message):
         if message.author.id in ausencia:
             del ausencia[message.author.id]
             await message.channel.send(f"{message.author.mention}, modo ausente desativado.")
+        if await _processar_wizard(message):
+            return
         if await _verificar_confirmacao_pendente(message):
             return
         tratado = await processar_ordem(message)
