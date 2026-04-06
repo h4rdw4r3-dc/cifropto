@@ -1719,11 +1719,63 @@ def eh_nao(msg: str) -> bool:
 
 
 SYSTEM_ACAO = (
-    "Você é o sistema de moderação de um servidor Discord brasileiro. "
-    "Acabei de executar uma ação de moderação. Gere UMA frase curta confirmando o que foi feito, "
-    "de forma direta e seca, como um brasileiro jovem falaria. "
-    "Sem emojis, sem asteriscos, sem markdown, sem dois pontos. Inclua os dados exatos que receber no contexto."
+    "Você é o shell_engenheiro, membro ativo de um servidor Discord brasileiro. "
+    "Acabou de executar uma ação. Gere UMA frase curta e direta, variada, como um membro falaria — "
+    "não como um sistema ou bot. Pode ser seco, irônico ou neutro. "
+    "Sem emojis, sem asteriscos, sem markdown. Inclua os dados concretos recebidos."
 )
+
+SYSTEM_PEDIR_ALVO = (
+    "Você é o shell_engenheiro, membro ativo de um servidor Discord brasileiro. "
+    "Precisa saber quem é o alvo de uma ação. "
+    "Gere UMA pergunta curta e natural, variada, sem ser robótico. "
+    "Sem emojis, sem asteriscos. Ex: 'Quem?', 'Fala o nome.', 'Quem vai levar?'"
+)
+
+SYSTEM_AVISO_INFRATOR = (
+    "Você é o shell_engenheiro, membro ativo de um servidor Discord brasileiro que também modera. "
+    "Um membro violou uma regra. Gere UMA frase de aviso direta, sem template, "
+    "variada a cada vez — pode ser seco, firme, ou irônico conforme a situação. "
+    "Sem emojis, sem asteriscos, sem 'Atenção' ou 'AVISO'. Só a mensagem."
+)
+
+
+async def _pedir_alvo(acao: str) -> str:
+    """Gera pergunta natural para identificar o alvo de uma ação de moderação."""
+    if not GROQ_DISPONIVEL or not GROQ_API_KEY:
+        return "Quem?"
+    try:
+        resp = await _groq_client().chat.completions.create(
+            model="llama-3.1-8b-instant",
+            max_tokens=20,
+            temperature=0.9,
+            messages=[
+                {"role": "system", "content": SYSTEM_PEDIR_ALVO},
+                {"role": "user", "content": f"Preciso saber quem vai ser alvo de: {acao}"},
+            ],
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception:
+        return "Quem?"
+
+
+async def _aviso_infrator(mencao: str, contexto: str) -> str:
+    """Gera aviso natural para infrator sem string fixa."""
+    if not GROQ_DISPONIVEL or not GROQ_API_KEY:
+        return f"{mencao} para."
+    try:
+        resp = await _groq_client().chat.completions.create(
+            model="llama-3.1-8b-instant",
+            max_tokens=40,
+            temperature=0.9,
+            messages=[
+                {"role": "system", "content": SYSTEM_AVISO_INFRATOR},
+                {"role": "user", "content": f"Usuário: {mencao} | Situação: {contexto}"},
+            ],
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception:
+        return f"{mencao} para."
 
 # ── Queries factuais do servidor (respondidas direto do guild, sem IA) ────────
 
@@ -3763,7 +3815,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         except ValueError:
             pass
         if not alvos:
-            await message.channel.send("Ei engenheiro, menciona quem deve ser silenciado ou passa o ID.")
+            await message.channel.send(await _pedir_alvo("silenciar"))
             return True
         for alvo in alvos:
             try:
@@ -3781,7 +3833,7 @@ async def processar_ordem(message: discord.Message) -> bool:
     # ── dessilenciar @user ─────────────────────────────────────────────────────
     elif cmd in ("dessilenciar", "unmute", "desmutar"):
         if not alvos:
-            await message.channel.send("Ei engenheiro, menciona quem deve ser dessilenciado ou passa o ID.")
+            await message.channel.send(await _pedir_alvo("dessilenciar"))
             return True
         for alvo in alvos:
             try:
@@ -3797,9 +3849,7 @@ async def processar_ordem(message: discord.Message) -> bool:
     # ── banir @user / ID [duração] [motivo] ───────────────────────────────────
     elif cmd in ("banir", "ban"):
         if not ids_brutos:
-            await message.channel.send(
-                "Ei engenheiro, menciona quem deve ser banido com @ ou passa o ID diretamente."
-            )
+            await message.channel.send(await _pedir_alvo("banir"))
             return True
 
         motivo_limpo = re.sub(r"(<@!?\d+>\s*)+", "", resto)
@@ -3840,10 +3890,7 @@ async def processar_ordem(message: discord.Message) -> bool:
     # ── desbanir @user / ID ────────────────────────────────────────────────────
     elif cmd in ("desbanir", "unban"):
         if not ids_brutos:
-            await message.channel.send(
-                "Ei engenheiro, passa o ID de quem quer desbanir. "
-                "Ex: desbanir seguido do ID."
-            )
+            await message.channel.send(await _pedir_alvo("desbanir"))
             return True
 
         for uid in ids_brutos:
@@ -3864,7 +3911,7 @@ async def processar_ordem(message: discord.Message) -> bool:
     # ── expulsar @user motivo ──────────────────────────────────────────────────
     elif cmd in ("expulsar", "kick"):
         if not alvos:
-            await message.channel.send("Ei engenheiro, menciona quem deve ser expulso ou passa o ID.")
+            await message.channel.send(await _pedir_alvo("expulsar"))
             return True
         motivo = re.sub(r"(<@!?\d+>\s*)+", "", resto).strip() or "Ordem do proprietário."
         for alvo in alvos:
@@ -3926,13 +3973,14 @@ async def processar_ordem(message: discord.Message) -> bool:
     elif cmd in ("avisar", "aviso", "advertir"):
         texto = re.sub(r"(<@!?\d+>\s*)+", "", resto).strip()
         if not alvos:
-            await message.channel.send("Ei engenheiro, menciona quem deve ser avisado.")
+            await message.channel.send(await _pedir_alvo("avisar"))
             return True
         if not texto:
-            await message.channel.send("Ei engenheiro, informe o conteúdo do aviso.")
+            await message.channel.send(await _pedir_alvo("conteúdo do aviso"))
             return True
         for alvo in alvos:
-            await message.channel.send(f"{alvo.mention}, aviso da administração  -  {texto}")
+            aviso_txt = await _aviso_infrator(alvo.mention, f"aviso direto da administração: {texto}")
+            await message.channel.send(aviso_txt)
 
     # ── chamar mod ─────────────────────────────────────────────────────────────
     elif cmd in ("chamar-mod", "chamarmod", "mod", "moderação", "moderacao", "chamar"):
@@ -5932,14 +5980,16 @@ async def silenciar(membro: discord.Member, canal, motivo: str):
         silenciamentos[membro.id] += 1
         infracoes[membro.id] = 0
         salvar_dados()
-        await canal.send(
-            f"{membro.mention}, você foi silenciado por {descricao}. "
-            f"Reincidências resultam em silêncios mais longos."
+        txt_sil = await confirmar_acao(
+            f"Silenciei {membro.display_name} por {descricao} (ocorrência {vez + 1}).",
+            f"{membro.mention} silenciado por {descricao}."
         )
+        await canal.send(txt_sil)
         log.info(f"Silenciado: {membro.display_name} por {descricao} (vez {vez + 1})")
     except Exception as e:
         log.error(f"Falha ao silenciar {membro.display_name}: {e}")
-        await canal.send(f"{membro.mention} atingiu o limite de infrações. {mod}, tomem providências.")
+        txt_err = await _aviso_infrator(membro.mention, "atingiu limite de infrações — intervenção da equipe necessária")
+        await canal.send(txt_err)
 
 
 def _atualizar_contexto(guild: discord.Guild):
@@ -7339,9 +7389,8 @@ async def _on_message_impl(message: discord.Message):
 
     # ── Detectar flood (membros comuns) ───────────────────────────────────────
     if detectar_flood(message.author.id, conteudo):
-        await message.channel.send(
-            f"Ei {message.author.mention}, para com o spam! Regra número 1 dos canais em {CANAL_REGRAS()}."
-        )
+        txt_flood = await _aviso_infrator(message.author.mention, "flood/spam de mensagens")
+        await message.channel.send(txt_flood)
         log.warning(f"Flood detectado: {autor}")
         return
 
@@ -7380,19 +7429,16 @@ async def _on_message_impl(message: discord.Message):
             if tem_permissao_moderacao(message.guild) and hasattr(message.author, 'timeout'):
                 await silenciar(message.author, message.channel, "discriminação  -  tolerância zero")
             else:
-                await message.channel.send(
-                    f"{message.author.mention}, mensagem removida por discriminação ou racismo. "
-                    f"Tolerância zero para esse tipo de conduta. {mencao_mod(message.guild)}, tomem providências."
-                )
+                txt_disc = await _aviso_infrator(message.author.mention, "discriminação ou racismo — tolerância zero")
+                await message.channel.send(txt_disc)
             return
 
         if count >= 3:
             if tem_permissao_moderacao(message.guild) and hasattr(message.author, 'timeout'):
                 await silenciar(message.author, message.channel, "3 infrações")
             else:
-                await message.channel.send(
-                    f"{message.author.mention} atingiu o limite de infrações. Moderador, tome providências."
-                )
+                txt_lim = await _aviso_infrator(message.author.mention, "3 infrações acumuladas")
+                await message.channel.send(txt_lim)
         elif count == 1:
             if len(violacoes) == 1:
                 desc_v, _ = violacoes[0]
