@@ -54,8 +54,9 @@ VIRUSTOTAL_API_KEY = "SUA_CHAVE_AQUI"
 
 client = discord.Client()
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# DISCORD REST API — acesso direto para dados em tempo real
+_bot_inicio: datetime = datetime.now(timezone.utc)  # timestamp de início do processo
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 
 DISCORD_API = "https://discord.com/api/v10"
@@ -1197,13 +1198,20 @@ def _buscar_role_por_nome(guild: discord.Guild, trecho: str) -> discord.Role | N
     return None
 
 
-def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | None:
+async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | None:
     """
     Detecta perguntas factuais sobre o servidor e responde com dados reais.
+    Agora assíncrona — pode consultar a REST API para dados em tempo real.
     Retorna string com a resposta, ou None se não for uma query reconhecida.
     """
     c = conteudo.lower()
+    agora = agora_utc()
     brasilia = timezone(timedelta(hours=-3))
+
+    # ── Uptime do bot ─────────────────────────────────────────────────────────
+    if re.search(r'\b(uptime|ativo\s+h[aá]|online\s+h[aá]|tempo\s+de\s+atividade|rodando\s+h[aá]|ligado\s+h[aá])\b', c):
+        delta = agora - _bot_inicio
+        return f"Estou online há {formatar_duracao(delta)}."
 
     # ── Cargos: quantidade ────────────────────────────────────────────────────
     if re.search(r'\bquantos\b.{0,25}\bcargos?\b', c):
@@ -1231,7 +1239,7 @@ def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | None:
             det = bool(re.search(r'\b(detalh|info|idad|conta|tempo|quando|quanto\s+tempo)\b', c))
             return _role_info(role, detalhado=det)
 
-    # ── Cargo por nome (função / tropa / membros de X) ────────────────────────
+    # ── Cargo por nome ────────────────────────────────────────────────────────
     m_nome = re.search(
         r'\b(?:cargo|fun[çc][aã]o|tropa|membro[s]?\s+d[ao]|quem\s+(?:tem|é|são)\s+(?:o\s+cargo\s+)?)\s*'
         r'["\']?([a-záéíóúãõâêôçüñ\w](?:[a-záéíóúãõâêôçüñ\w\s]{1,28})?)["\']?',
@@ -1291,15 +1299,20 @@ def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | None:
         return (f"O servidor está no nível {guild.premium_tier} de boost "
                 f"com {n_boost} boost{'s' if n_boost != 1 else ''}.")
 
-    # ── Membros: quantidade (fallback rápido antes de cair na IA) ────────────
+    # ── Membros: quantidade total ─────────────────────────────────────────────
     if re.search(r'\bquantos\b.{0,25}\b(membros?|pessoas?|usuários?)\b', c):
+        dados = await api_guild_info(guild.id)
+        if dados and dados.get("approximate_member_count"):
+            total = dados["approximate_member_count"]
+            online = dados.get("approximate_presence_count", "?")
+            bots = sum(1 for mb in guild.members if mb.bot)
+            return f"O servidor tem {total - bots} membros humanos ({online} online agora) e {bots} bots."
         bots = sum(1 for mb in guild.members if mb.bot)
         humanos = guild.member_count - bots
         return f"O servidor tem {humanos} membros humanos e {bots} bots."
 
     # ── Membros mais antigos no servidor ─────────────────────────────────────
     if re.search(r'\b(mais\s+antigo|primeiro[s]?\s+membro|fundador[es]?|veterano)\b', c):
-        agora = agora_utc()
         humanos = sorted(
             [m for m in guild.members if not m.bot and m.joined_at],
             key=lambda m: m.joined_at
@@ -1312,7 +1325,6 @@ def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | None:
 
     # ── Membros mais recentes ─────────────────────────────────────────────────
     if re.search(r'\b(mais\s+recente|último[s]?\s+(?:a\s+)?entrar|novato)\b', c):
-        agora = agora_utc()
         humanos = sorted(
             [m for m in guild.members if not m.bot and m.joined_at],
             key=lambda m: m.joined_at, reverse=True
@@ -1323,9 +1335,8 @@ def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | None:
             linhas.append(f"  {mb.display_name} — há {tempo}")
         return "\n".join(linhas)
 
-    # ── Contas mais novas (por data de criação, não de entrada) ──────────────
+    # ── Contas mais novas (por data de criação) ───────────────────────────────
     if re.search(r'\bconta[s]?\s+(?:mais\s+)?nova[s]?\b|\brecém[-\s]?cria\w+\b', c):
-        agora = agora_utc()
         humanos = sorted(
             [m for m in guild.members if not m.bot],
             key=lambda m: m.created_at, reverse=True
@@ -1338,7 +1349,6 @@ def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | None:
 
     # ── Lista completa de membros com detalhes ────────────────────────────────
     if re.search(r'\b(todos\s+os\s+membros|lista\s+completa|lista\s+detalhada)\b', c):
-        agora = agora_utc()
         humanos = sorted([m for m in guild.members if not m.bot], key=lambda m: m.display_name.lower())
         linhas = [f"Membros humanos ({len(humanos)}):"]
         for mb in humanos:
@@ -1347,11 +1357,213 @@ def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | None:
             cargos = [r.name for r in mb.roles if r.name != "@everyone"]
             cargos_txt = ", ".join(cargos) if cargos else "sem cargo"
             linhas.append(f"  {mb.display_name} | conta: {conta} | servidor: {servidor} | cargos: {cargos_txt}")
-        # Discord limita mensagens a 2000 chars — trunca se necessário
         resultado = "\n".join(linhas)
         if len(resultado) > 1800:
             resultado = resultado[:1800] + "\n  (...)"
         return resultado
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # QUERIES ANALÍTICAS — calculadas em tempo real sobre todos os membros
+    # ══════════════════════════════════════════════════════════════════════════
+
+    humanos_cache = [m for m in guild.members if not m.bot]
+
+    # ── Membros com idade de conta em intervalo (ex: "entre 5 e 10 dias") ─────
+    m_intervalo_conta = re.search(
+        r'(?:idade\s+(?:da\s+)?conta|conta\s+(?:com\s+)?(?:entre|de)|conta.{0,15})\s*'
+        r'(?:entre\s+)?(\d+)\s*(?:e|a|até|-)\s*(\d+)\s*(dia|semana|mes|mês|ano)\w*',
+        c
+    )
+    if m_intervalo_conta:
+        v1, v2 = int(m_intervalo_conta.group(1)), int(m_intervalo_conta.group(2))
+        unidade = m_intervalo_conta.group(3)
+        mult = {"dia": 1, "semana": 7, "mes": 30, "mês": 30, "ano": 365}.get(unidade[:3], 1)
+        dias_min, dias_max = v1 * mult, v2 * mult
+        resultado = [
+            mb for mb in humanos_cache
+            if dias_min <= (agora - mb.created_at.replace(tzinfo=timezone.utc)).days <= dias_max
+        ]
+        if not resultado:
+            return f"Nenhum membro com conta entre {v1} e {v2} {unidade}s."
+        nomes = ", ".join(mb.display_name for mb in resultado[:20])
+        sufixo = f" (e mais {len(resultado)-20})" if len(resultado) > 20 else ""
+        return f"{len(resultado)} membro{'s' if len(resultado)!=1 else ''} com conta entre {v1} e {v2} {unidade}s: {nomes}{sufixo}."
+
+    # ── Membros com conta mais antiga que X dias ──────────────────────────────
+    m_conta_maior = re.search(
+        r'conta\s+(?:com\s+)?(?:mais\s+de|acima\s+de|maior\s+que)\s+(\d+)\s*(dia|semana|mes|mês|ano)\w*',
+        c
+    )
+    if m_conta_maior:
+        v = int(m_conta_maior.group(1))
+        unidade = m_conta_maior.group(2)
+        mult = {"dia": 1, "semana": 7, "mes": 30, "mês": 30, "ano": 365}.get(unidade[:3], 1)
+        dias = v * mult
+        resultado = [mb for mb in humanos_cache if (agora - mb.created_at.replace(tzinfo=timezone.utc)).days > dias]
+        nomes = ", ".join(mb.display_name for mb in resultado[:20])
+        sufixo = f" (e mais {len(resultado)-20})" if len(resultado) > 20 else ""
+        return f"{len(resultado)} membro{'s' if len(resultado)!=1 else ''} com conta há mais de {v} {unidade}s: {nomes}{sufixo}."
+
+    # ── Membros com conta mais nova que X dias ────────────────────────────────
+    m_conta_menor = re.search(
+        r'conta\s+(?:com\s+)?(?:menos\s+de|abaixo\s+de|menor\s+que|nova[s]?\s+(?:de|com))\s+(\d+)\s*(dia|semana|mes|mês|ano)\w*',
+        c
+    )
+    if m_conta_menor:
+        v = int(m_conta_menor.group(1))
+        unidade = m_conta_menor.group(2)
+        mult = {"dia": 1, "semana": 7, "mes": 30, "mês": 30, "ano": 365}.get(unidade[:3], 1)
+        dias = v * mult
+        resultado = [mb for mb in humanos_cache if (agora - mb.created_at.replace(tzinfo=timezone.utc)).days < dias]
+        nomes = ", ".join(mb.display_name for mb in resultado[:20])
+        sufixo = f" (e mais {len(resultado)-20})" if len(resultado) > 20 else ""
+        return f"{len(resultado)} membro{'s' if len(resultado)!=1 else ''} com conta há menos de {v} {unidade}s: {nomes}{sufixo}."
+
+    # ── Membros no servidor há X tempo (intervalo) ────────────────────────────
+    m_intervalo_srv = re.search(
+        r'(?:no\s+servidor|tempo\s+de\s+servidor|servidor.{0,10})\s*'
+        r'(?:entre\s+)?(\d+)\s*(?:e|a|até|-)\s*(\d+)\s*(dia|semana|mes|mês|ano)\w*',
+        c
+    )
+    if m_intervalo_srv:
+        v1, v2 = int(m_intervalo_srv.group(1)), int(m_intervalo_srv.group(2))
+        unidade = m_intervalo_srv.group(3)
+        mult = {"dia": 1, "semana": 7, "mes": 30, "mês": 30, "ano": 365}.get(unidade[:3], 1)
+        dias_min, dias_max = v1 * mult, v2 * mult
+        resultado = [
+            mb for mb in humanos_cache
+            if mb.joined_at and dias_min <= (agora - mb.joined_at.replace(tzinfo=timezone.utc)).days <= dias_max
+        ]
+        if not resultado:
+            return f"Nenhum membro no servidor entre {v1} e {v2} {unidade}s."
+        nomes = ", ".join(mb.display_name for mb in resultado[:20])
+        sufixo = f" (e mais {len(resultado)-20})" if len(resultado) > 20 else ""
+        return f"{len(resultado)} membro{'s' if len(resultado)!=1 else ''} no servidor entre {v1} e {v2} {unidade}s: {nomes}{sufixo}."
+
+    # ── Quantos membros sem cargo ─────────────────────────────────────────────
+    if re.search(r'\b(sem\s+cargo|sem\s+fun[çc][aã]o|sem\s+role)\b', c):
+        sem_cargo = [
+            mb for mb in humanos_cache
+            if all(r.name == "@everyone" for r in mb.roles)
+        ]
+        nomes = ", ".join(mb.display_name for mb in sem_cargo[:20])
+        sufixo = f" (e mais {len(sem_cargo)-20})" if len(sem_cargo) > 20 else ""
+        return f"{len(sem_cargo)} membro{'s' if len(sem_cargo)!=1 else ''} sem cargo: {nomes}{sufixo}."
+
+    # ── Membros com infrações ─────────────────────────────────────────────────
+    if re.search(r'\b(infra[çc][oõ]es?|infrat\w+|com\s+punic[aã]o|punidos)\b', c):
+        com_infr = [(mb, infracoes[mb.id]) for mb in humanos_cache if infracoes.get(mb.id, 0) > 0]
+        com_infr.sort(key=lambda x: -x[1])
+        if not com_infr:
+            return "Nenhum membro com infrações registradas."
+        linhas = [f"Membros com infrações ({len(com_infr)}):"]
+        for mb, n in com_infr[:15]:
+            linhas.append(f"  {mb.display_name} — {n} infração{'ões' if n > 1 else ''}")
+        return "\n".join(linhas)
+
+    # ── Membros silenciados atualmente (verificado via REST) ──────────────────
+    if re.search(r'\b(silenciados?|mutados?|em\s+timeout)\b', c):
+        silenciados = []
+        for mb in humanos_cache:
+            dados = await api_membro(guild.id, mb.id)
+            if dados:
+                ts = dados.get("communication_disabled_until")
+                if ts:
+                    try:
+                        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                        if dt > agora:
+                            mins = int((dt - agora).total_seconds() / 60)
+                            silenciados.append((mb.display_name, mins))
+                    except Exception:
+                        pass
+        if not silenciados:
+            return "Nenhum membro silenciado no momento."
+        linhas = [f"Membros silenciados agora ({len(silenciados)}):"]
+        for nome, mins in silenciados:
+            linhas.append(f"  {nome} — {mins} min restantes")
+        return "\n".join(linhas)
+
+    # ── Membros com mais cargos ───────────────────────────────────────────────
+    if re.search(r'\b(mais\s+cargos?|mais\s+roles?|maior\s+hierarquia)\b', c):
+        ranking = sorted(humanos_cache, key=lambda mb: len(mb.roles), reverse=True)[:5]
+        linhas = ["Membros com mais cargos:"]
+        for mb in ranking:
+            n = len([r for r in mb.roles if r.name != "@everyone"])
+            cargos = ", ".join(r.name for r in mb.roles if r.name != "@everyone")
+            linhas.append(f"  {mb.display_name} — {n} cargo{'s' if n!=1 else ''}: {cargos}")
+        return "\n".join(linhas)
+
+    # ── Membros que entraram hoje ou esta semana ──────────────────────────────
+    if re.search(r'\b(entr(?:aram|ou)\s+(?:hoje|essa?\s+semana|esse?\s+mes|esse?\s+mês))\b', c):
+        if "hoje" in c:
+            corte = agora.replace(hour=0, minute=0, second=0, microsecond=0)
+            periodo = "hoje"
+        elif "semana" in c:
+            corte = agora - timedelta(days=7)
+            periodo = "essa semana"
+        else:
+            corte = agora - timedelta(days=30)
+            periodo = "esse mês"
+        recentes = [
+            mb for mb in humanos_cache
+            if mb.joined_at and mb.joined_at.replace(tzinfo=timezone.utc) >= corte
+        ]
+        if not recentes:
+            return f"Nenhum membro entrou {periodo}."
+        nomes = ", ".join(mb.display_name for mb in recentes)
+        return f"{len(recentes)} membro{'s' if len(recentes)!=1 else ''} entrou{'ram' if len(recentes)>1 else ''} {periodo}: {nomes}."
+
+    # ── Quantos bots há no servidor ───────────────────────────────────────────
+    if re.search(r'\bquantos\b.{0,20}\bbots?\b|\bbots?\b.{0,20}\bquantos\b', c):
+        bots = [m for m in guild.members if m.bot]
+        nomes = ", ".join(b.display_name for b in bots)
+        return f"O servidor tem {len(bots)} bot{'s' if len(bots)!=1 else ''}: {nomes}."
+
+    # ── Banimentos via REST ───────────────────────────────────────────────────
+    if re.search(r'\b(banido[s]?|ban[s]?|banimento[s]?)\b', c) and \
+       re.search(r'\b(quantos?|lista|listar|ver|quais)\b', c):
+        bans = await api_banimentos(guild.id, 50)
+        if not bans:
+            return "Nenhum banimento ativo no servidor."
+        nomes = ", ".join(b.get("user", {}).get("username", "?") for b in bans[:15])
+        sufixo = f" (e mais {len(bans)-15})" if len(bans) > 15 else ""
+        return f"{len(bans)} banimento{'s' if len(bans)!=1 else ''} ativo{'s' if len(bans)!=1 else ''}: {nomes}{sufixo}."
+
+    # ── Membros online agora (via REST presence_count) ────────────────────────
+    if re.search(r'\b(online\s+agora|quantos?\s+online|membros?\s+ativos?\s+agora)\b', c):
+        dados = await api_guild_info(guild.id)
+        if dados and dados.get("approximate_presence_count"):
+            return f"Aproximadamente {dados['approximate_presence_count']} membros online agora."
+        return "Não foi possível obter contagem de membros online no momento."
+
+    # ── Distribuição de cargos (quantos membros por cargo) ───────────────────
+    if re.search(r'\bdistribui[çc][aã]o\b.{0,25}\bcargos?\b|\bcargos?\b.{0,25}\bdistribui[çc][aã]o\b', c):
+        cargos = sorted([r for r in guild.roles if r.name != "@everyone"], key=lambda r: -r.position)
+        linhas = ["Distribuição de membros por cargo:"]
+        for r in cargos:
+            n = len([m for m in r.members if not m.bot])
+            if n > 0:
+                linhas.append(f"  {r.name}: {n} membro{'s' if n!=1 else ''}")
+        return "\n".join(linhas)
+
+    # ── Média de tempo no servidor ────────────────────────────────────────────
+    if re.search(r'\b(média|media|tempo\s+médio|médio).{0,25}\b(servidor|membros?)\b', c):
+        tempos = [
+            (agora - mb.joined_at.replace(tzinfo=timezone.utc)).days
+            for mb in humanos_cache if mb.joined_at
+        ]
+        if not tempos:
+            return "Não há dados de entrada suficientes."
+        media = sum(tempos) // len(tempos)
+        return f"Tempo médio dos membros no servidor: {_fmt_duracao_curta(timedelta(days=media))} ({len(tempos)} membros)."
+
+    # ── Média de idade das contas ─────────────────────────────────────────────
+    if re.search(r'\b(média|media|tempo\s+médio|médio).{0,25}\b(conta|discord)\b', c):
+        idades = [(agora - mb.created_at.replace(tzinfo=timezone.utc)).days for mb in humanos_cache]
+        if not idades:
+            return "Sem dados suficientes."
+        media = sum(idades) // len(idades)
+        return f"Idade média das contas dos membros: {_fmt_duracao_curta(timedelta(days=media))} ({len(idades)} membros)."
 
     return None
 
@@ -1363,7 +1575,7 @@ _contexto_servidor: str = ""  # preenchido no on_ready
 def build_server_context(guild: discord.Guild) -> str:
     """
     Contexto completo do servidor — sem limite de informações.
-    Inclui cada membro com conta, tempo, cargos e infrações.
+    Inclui cada membro com conta, tempo, cargos, infrações e estatísticas calculadas.
     """
     agora = agora_utc()
     brasilia = timezone(timedelta(hours=-3))
@@ -1382,6 +1594,25 @@ def build_server_context(guild: discord.Guild) -> str:
     bots_count = sum(1 for m in guild.members if m.bot)
     humanos_count = guild.member_count - bots_count
     linhas.append(f"Membros: {humanos_count} humanos, {bots_count} bots (total {guild.member_count})")
+    linhas.append(f"Bot online desde: {_bot_inicio.astimezone(brasilia).strftime('%d/%m/%Y %H:%M')} | Uptime: {formatar_duracao(agora - _bot_inicio)}")
+
+    # ── Estatísticas calculadas ────────────────────────────────────────────────
+    humanos = [m for m in guild.members if not m.bot]
+    if humanos:
+        idades_conta = [(agora - m.created_at.replace(tzinfo=timezone.utc)).days for m in humanos]
+        tempos_srv = [(agora - m.joined_at.replace(tzinfo=timezone.utc)).days for m in humanos if m.joined_at]
+        media_conta = sum(idades_conta) // len(idades_conta)
+        media_srv = sum(tempos_srv) // len(tempos_srv) if tempos_srv else 0
+        sem_cargo = sum(1 for m in humanos if all(r.name == "@everyone" for r in m.roles))
+        contas_novas = sum(1 for d in idades_conta if d < 30)
+        linhas.append(f"\nESTATÍSTICAS CALCULADAS:")
+        linhas.append(f"  Idade média das contas: {_fmt_duracao_curta(timedelta(days=media_conta))}")
+        linhas.append(f"  Tempo médio no servidor: {_fmt_duracao_curta(timedelta(days=media_srv))}")
+        linhas.append(f"  Membros sem cargo: {sem_cargo}")
+        linhas.append(f"  Contas com menos de 30 dias: {contas_novas}")
+        com_infr = sum(1 for m in humanos if infracoes.get(m.id, 0) > 0)
+        if com_infr:
+            linhas.append(f"  Membros com infrações: {com_infr}")
 
     # ── Canais por categoria ───────────────────────────────────────────────────
     linhas.append("\nCANAIS:")
@@ -3103,7 +3334,7 @@ async def on_message(message: discord.Message):
 
     # ── Queries factuais do servidor (cargos, membros por cargo, etc.) ────────
     if mencionado and message.guild:
-        resp_direta = query_servidor_direto(message.guild, message.content)
+        resp_direta = await query_servidor_direto(message.guild, message.content)
         if resp_direta:
             await message.reply(resp_direta)
             return
@@ -3129,7 +3360,7 @@ async def on_message(message: discord.Message):
             if tempo_ocioso <= TIMEOUT_CONVERSA_CLAUDE:
                 # Queries factuais respondem direto sem IA
                 if message.guild:
-                    resp_direta = query_servidor_direto(message.guild, message.content)
+                    resp_direta = await query_servidor_direto(message.guild, message.content)
                     if resp_direta:
                         await message.reply(resp_direta)
                         return
