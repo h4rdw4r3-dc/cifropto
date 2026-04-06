@@ -1741,7 +1741,12 @@ async def processar_ordem(message: discord.Message) -> bool:
     # ── envia mensagem em canal específico ─────────────────────────────────────
     # Só dispara se houver menção de canal <#ID> — evita falsos positivos com
     # palavras comuns como "fala", "manda", "diz" em frases normais
-    elif message.channel_mentions and any(p in conteudo.lower() for p in ["envia", "manda", "fala", "diz", "escreve"]):
+    elif message.channel_mentions and re.search(
+        r'\b(?:envi[aeo]|enviar|enviasse|enviou|mand[aeo]|mandar|mandasse|mandou'
+        r'|fal[aeo]|falar|falasse|falou|diz|diga|dizer|dissesse|disse'
+        r'|escrev[aeo]|escrever|escrevesse|escreveu)\b',
+        conteudo, re.IGNORECASE
+    ):
         canal_destino = message.channel_mentions[0] if message.channel_mentions else None
         if not canal_destino:
             await message.channel.send("Menciona o canal onde devo enviar.")
@@ -1749,9 +1754,9 @@ async def processar_ordem(message: discord.Message) -> bool:
         # Remove menções de canal e usuário
         texto_msg = re.sub(r'<#\d+>\s*', '', conteudo).strip()
         texto_msg = re.sub(r'<@!?\d+>\s*', '', texto_msg).strip()
-        # Remove tudo até o verbo inclusive (captura greedy mínimo para pegar o primeiro verbo)
+        # Remove tudo até o verbo inclusive — aceita qualquer conjugação do stem
         texto_msg = re.sub(
-            r'^.*?(?:envia|manda|fala|diz|escreve)\s+(?:uma?\s+mensagem\s+(?:de\s+)?)?',
+            r'^.*?\b(?:envi\w+|mand\w+|fal\w+|diz\w*|diga\w*|escrev\w+)\s+(?:uma?\s+mensagem\s+(?:de\s+)?)?',
             '', texto_msg, flags=re.IGNORECASE
         ).strip()
         # Remove indicador de destino que ficou no final
