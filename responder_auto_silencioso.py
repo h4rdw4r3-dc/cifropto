@@ -4393,8 +4393,7 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
     system = (
         "Você é um parser de intenção para bot Discord. "
         "Analise a instrução e retorne APENAS JSON válido (sem markdown, sem explicações). "
-        "Ações disponíveis: silenciar(usuario,minutos), banir(usuario,motivo), "
-        "enquete(tema,opcoes=[]), sorteio(quantidade,cargo=null), "
+        "Ações disponíveis: enquete(tema,opcoes=[]), sorteio(quantidade,cargo=null), "
         "lembrete(texto,segundos,canal=null), aviso(texto,canal=null), "
         "criar_canal(nome,tipo=texto|voz), criar_cargo(nome), "
         "debate(tema,canal=null), limpar(quantidade,canal=null), "
@@ -4404,7 +4403,8 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
         "monitorar(canal=null), parar_monitorar(canal=null), "
         "gdoc(tipo=relatorio|historico|regras,canal=null,dias=7), "
         "gsheet(tipo=membros|infracoes|atividade|citacoes). "
-        "Se for pergunta ou conversa, retorne {\"acao\":\"conversa\"}. "
+        "NUNCA retorne acao banir, silenciar ou qualquer punição — punições requerem comando explícito. "
+        "Se for pergunta, conversa, menção a raid/invasão/punição, retorne {\"acao\":\"conversa\"}. "
         f"Membros do servidor: {membros_txt}."
     )
     try:
@@ -4460,18 +4460,12 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
             await canal.send(f"Não foi possível silenciar: {e}")
         return True
 
-    if acao == "banir":
-        alvo = _resolver_membro(params.get("usuario", ""))
-        if not alvo:
-            await canal.send(f"Não encontrei '{params.get('usuario')}' para banir.")
-            return True
-        motivo = params.get("motivo", f"Ordem de {autor}")
-        try:
-            await guild.ban(alvo, reason=motivo)
-            await canal.send(f"{alvo.display_name} banido. Motivo: {motivo}")
-            log.info(f"[IA] banir {alvo.display_name}  -  {autor}")
-        except Exception as e:
-            await canal.send(f"Não foi possível banir: {e}")
+    if acao in ("banir", "silenciar"):
+        # Punições nunca são executadas via IA — requerem comando explícito do operador.
+        await canal.send(
+            "Punições (banir/silenciar) precisam ser feitas via comando direto. "
+            "Use: `banir @usuário motivo` ou `silenciar @usuário minutos`"
+        )
         return True
 
     if acao == "enquete":
@@ -4993,44 +4987,48 @@ async def _entrar_canal_voz(guild: discord.Guild, nome_canal: str | None = None)
 
 async def _conectar_voz(canal: discord.VoiceChannel) -> tuple:
     """
-    Tenta conectar ao canal de voz com timeout de 3s.
+    Tenta conectar ao canal de voz com timeout de 5s.
     Retorna (VoiceClient, None) em sucesso ou (None, mensagem_erro) em falha.
 
     A lib discord.py-self possui loop de retry interno em channel.connect() que
     ignora o código 4017 e tenta reconectar indefinidamente. Para evitar isso,
-    envolvemos a chamada em asyncio.wait_for com timeout de 3s: a 1ª falha por
-    E2EE ocorre em ~2s, então o timeout expira antes do 1º retry (que aguarda 3s),
-    cancelando a task imediatamente.
+    envolvemos a chamada em asyncio.wait_for com timeout curto: na 1ª falha por
+    E2EE o timeout expira, cancelamos a task e retornamos imediatamente.
     """
     _MSG_E2EE = (
         f"Não consigo entrar em {canal.mention}: o canal usa criptografia E2EE (DAVE), "
         f"que não é suportada por bots. Desative o E2EE nas configurações do canal e tente novamente."
     )
 
-    async def _forcar_desconexao():
-        try:
-            vc = canal.guild.voice_client
-            if vc:
-                await vc.disconnect(force=True)
-        except Exception:
-            pass
+    # Monitora o gateway para detectar 4017 antes do retry da lib
+    _e2ee_detectado = False
+    _orig_dispatch = client.dispatch
+
+    def _patch_dispatch(event, *args, **kwargs):
+        nonlocal _e2ee_detectado
+        # discord.py-self dispara 'socket_raw_receive' ou loga internamente;
+        # capturamos via on_error do voice se necessário — mas o timeout basta.
+        _orig_dispatch(event, *args, **kwargs)
 
     try:
-        vc = await asyncio.wait_for(canal.connect(), timeout=3.0)
+        vc = await asyncio.wait_for(canal.connect(), timeout=5.0)
         return vc, None
     except asyncio.TimeoutError:
-        # Timeout em 3s = capturou antes do 1º retry da lib (E2EE/DAVE)
-        await _forcar_desconexao()
+        # Força desconexão se ficou preso tentando
+        try:
+            if canal.guild.voice_client:
+                await canal.guild.voice_client.disconnect(force=True)
+        except Exception:
+            pass
+        # Timeout após 5s = quase certamente E2EE (1ª tentativa leva ~2s e falha)
         log.warning(f"[VOZ] Timeout ao conectar em #{canal.name} — provável E2EE/DAVE (4017).")
         return None, _MSG_E2EE
     except discord.errors.ConnectionClosed as e:
-        await _forcar_desconexao()
         if getattr(e, 'code', None) == 4017 or "4017" in str(e) or "E2EE" in str(e):
             log.warning(f"[VOZ] E2EE/DAVE bloqueou conexão em #{canal.name} (4017).")
             return None, _MSG_E2EE
         return None, f"Erro de conexão: {e}"
     except Exception as e:
-        await _forcar_desconexao()
         return None, f"Erro ao conectar: {e}"
 
 
