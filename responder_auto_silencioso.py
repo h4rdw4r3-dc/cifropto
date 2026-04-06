@@ -849,49 +849,112 @@ SYSTEM_ACAO = (
 
 # ── Queries factuais do servidor (respondidas direto do guild, sem IA) ────────
 
+def _role_info(role: discord.Role) -> str:
+    """Formata info de um cargo: nome, contagem e lista de membros humanos."""
+    humanos = [mb.display_name for mb in role.members if not mb.bot]
+    n = len(humanos)
+    base = f"Cargo {role.name}: {n} membro{'s' if n != 1 else ''}"
+    if humanos:
+        base += f" — {', '.join(humanos)}"
+    return base + "."
+
+
+def _buscar_role_por_nome(guild: discord.Guild, trecho: str) -> discord.Role | None:
+    """Busca role cujo nome contenha o trecho (case-insensitive)."""
+    trecho = trecho.strip().lower()
+    for r in guild.roles:
+        if r.name.lower() == trecho:
+            return r
+    for r in guild.roles:
+        if trecho in r.name.lower():
+            return r
+    return None
+
+
 def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | None:
     """
     Detecta perguntas factuais sobre o servidor e responde com dados reais.
     Retorna string com a resposta, ou None se não for uma query reconhecida.
     """
     c = conteudo.lower()
+    brasilia = timezone(timedelta(hours=-3))
 
-    # ── Cargos ───────────────────────────────────────────────────────────────
-    if re.search(r'\bquantos\b.{0,20}\bcargos?\b', c):
-        cargos = [r for r in guild.roles if r.name != "@everyone"]
-        return f"O servidor tem {len(cargos)} cargos."
+    # ── Cargos: quantidade ────────────────────────────────────────────────────
+    if re.search(r'\bquantos\b.{0,25}\bcargos?\b', c):
+        n = len([r for r in guild.roles if r.name != "@everyone"])
+        return f"O servidor tem {n} cargos."
 
-    if re.search(r'\b(quais|liste?|mostr[ae]|list[ae])\b.{0,20}\bcargos?\b', c):
+    # ── Cargos: listagem ──────────────────────────────────────────────────────
+    if re.search(r'\b(quais|liste?|mostr[ae]|list[ae])\b.{0,25}\bcargos?\b', c):
         cargos = sorted([r for r in guild.roles if r.name != "@everyone"], key=lambda r: -r.position)
         partes = [f"{r.name} ({len(r.members)} membro{'s' if len(r.members) != 1 else ''})" for r in cargos]
         return "Cargos do servidor: " + ", ".join(partes) + "."
 
-    # ── Membros de um cargo específico (por ID) ───────────────────────────────
-    m = re.search(r'(\d{17,19})', conteudo)
-    if m and re.search(r'\b(membro|cargo|quem|quantos)\b', c):
-        role_id = int(m.group(1))
+    # ── Cargo por ID numérico ─────────────────────────────────────────────────
+    m_id = re.search(r'(\d{17,19})', conteudo)
+    if m_id:
+        role_id = int(m_id.group(1))
         role = guild.get_role(role_id)
         if role:
-            humanos = [mb.display_name for mb in role.members if not mb.bot]
-            if humanos:
-                return f"Cargo {role.name}: {len(humanos)} membro{'s' if len(humanos) != 1 else ''} — {', '.join(humanos)}."
-            else:
-                return f"Nenhum membro humano com o cargo {role.name}."
+            return _role_info(role)
 
-    # ── Membros de um cargo por nome ──────────────────────────────────────────
-    m2 = re.search(r'\b(?:cargo|função|membro[s]?\s+d[ao])\s+["\']?([a-záéíóúãõâêôçüñ\w\s]{3,30})["\']?', c)
-    if m2:
-        nome_cargo = m2.group(1).strip()
-        role = discord.utils.find(
-            lambda r: nome_cargo in r.name.lower(),
-            guild.roles
-        )
+    # ── Moderadores / equipe mod ──────────────────────────────────────────────
+    if re.search(r'\b(mod(?:erador)?s?|equipe\s*mod|staff|tropa\s*(?:da\s*)?mod)\b', c):
+        role = guild.get_role(CARGO_EQUIPE_MOD_ID)
         if role:
-            humanos = [mb.display_name for mb in role.members if not mb.bot]
-            info = f"{len(humanos)} membro{'s' if len(humanos) != 1 else ''}"
-            if humanos:
-                info += f" — {', '.join(humanos)}"
-            return f"Cargo {role.name}: {info}."
+            return _role_info(role)
+
+    # ── Cargo por nome (função / tropa / membros de X) ────────────────────────
+    m_nome = re.search(
+        r'\b(?:cargo|fun[çc][aã]o|tropa|membro[s]?\s+d[ao]|quem\s+(?:tem|é|são)\s+(?:o\s+cargo\s+)?)\s*'
+        r'["\']?([a-záéíóúãõâêôçüñ\w](?:[a-záéíóúãõâêôçüñ\w\s]{1,28})?)["\']?',
+        c
+    )
+    if m_nome:
+        role = _buscar_role_por_nome(guild, m_nome.group(1))
+        if role:
+            return _role_info(role)
+
+    # ── Canais: quantidade ────────────────────────────────────────────────────
+    if re.search(r'\bquantos\b.{0,25}\bcanais?\b', c):
+        todos = [ch for ch in guild.channels if not isinstance(ch, discord.CategoryChannel)]
+        voz = [ch for ch in todos if isinstance(ch, discord.VoiceChannel)]
+        return f"O servidor tem {len(todos) - len(voz)} canais de texto e {len(voz)} de voz."
+
+    # ── Canais: listagem ──────────────────────────────────────────────────────
+    if re.search(r'\b(quais|liste?|mostr[ae])\b.{0,25}\bcanais?\b', c):
+        cats: dict[str, list[str]] = {}
+        for ch in sorted(guild.channels, key=lambda ch: ch.position):
+            if isinstance(ch, discord.CategoryChannel):
+                continue
+            cat_nome = ch.category.name if ch.category else "Sem categoria"
+            cats.setdefault(cat_nome, []).append(f"#{ch.name}")
+        partes = [f"[{cat}] {', '.join(nomes)}" for cat, nomes in cats.items()]
+        return "Canais: " + " | ".join(partes) + "."
+
+    # ── Dono do servidor ─────────────────────────────────────────────────────
+    if re.search(r'\b(dono|criador|fundador)\b.{0,25}\bservidor\b', c) or \
+       re.search(r'\bservidor\b.{0,25}\b(dono|criador|fundador)\b', c):
+        if guild.owner:
+            return f"O dono do servidor é {guild.owner.display_name}."
+
+    # ── Data de criação ───────────────────────────────────────────────────────
+    if re.search(r'\b(quando|data).{0,25}\b(cri(?:ou|ado)|fund(?:ou|ado)|inaugur\w+)\b', c) or \
+       re.search(r'\b(cri(?:ou|ado)|fund(?:ou|ado)).{0,25}\bservidor\b', c):
+        dt = guild.created_at.astimezone(brasilia).strftime("%d/%m/%Y às %H:%M")
+        return f"O servidor foi criado em {dt} (horário de Brasília)."
+
+    # ── Boosts ───────────────────────────────────────────────────────────────
+    if re.search(r'\bboost\w*\b', c):
+        n_boost = guild.premium_subscription_count
+        return (f"O servidor está no nível {guild.premium_tier} de boost "
+                f"com {n_boost} boost{'s' if n_boost != 1 else ''}.")
+
+    # ── Membros: quantidade (fallback rápido antes de cair na IA) ────────────
+    if re.search(r'\bquantos\b.{0,25}\b(membros?|pessoas?|usuários?)\b', c):
+        bots = sum(1 for mb in guild.members if mb.bot)
+        humanos = guild.member_count - bots
+        return f"O servidor tem {humanos} membros humanos e {bots} bots."
 
     return None
 
@@ -991,12 +1054,13 @@ def system_com_contexto() -> str:
 
         "REGRAS:\n"
         "1. Conhecimento geral (fatos, ciência, história, math): responda direto e com confiança.\n"
-        "2. Dados do servidor (membros, cargos, canais, datas): use só o contexto abaixo.\n"
-        "   Se a pergunta for sobre dado específico do servidor e não estiver no contexto: 'Não tenho esse dado.'\n"
-        "   ATENÇÃO: 'Não tenho esse dado' é EXCLUSIVO para perguntas sobre o servidor. Nunca usar para tópicos gerais.\n"
+        "2. Dados do servidor: o contexto abaixo tem TUDO que existe. Use-o.\n"
+        "   Se não estiver no contexto: responda em UMA frase que não tem esse detalhe específico.\n"
+        "   NUNCA diga 'não tenho informações sobre o servidor' — você tem, estão logo abaixo.\n"
+        "   NUNCA diga 'não tenho esse dado' para perguntas que não são sobre o servidor.\n"
         "3. Nomes de membros são PESSOAS. 'Hardware' é um usuário, não hardware de computador.\n"
-        "4. Quando não souber: UMA frase curta — sem explicar por que, sem parágrafos de justificativa.\n"
-        "5. Tópicos sensíveis (conteúdo adulto, ilegal): decline em UMA frase seca, sem explicação longa.\n\n"
+        "4. Quando não souber algo geral: UMA frase curta. Sem explicar por que, sem parágrafos.\n"
+        "5. Tópicos sensíveis: decline em UMA frase seca. Sem explicação longa, sem listar alternativas.\n\n"
 
         "Nunca explique suas limitações em parágrafos. Nunca reflita sobre sua natureza de bot.\n"
         "Nunca aja de forma infantil, exagerada ou servil. Sem exclamações forçadas, sem bajulação.\n\n"
