@@ -439,6 +439,10 @@ nomes_historico: dict[int, str] = {}
 # O bot "aprende" o que está sendo discutido sem intervenção manual
 canal_memoria: dict[int, deque] = defaultdict(lambda: deque(maxlen=40))
 
+# ── Contexto do servidor (atualizado pelos event handlers) ───────────────────
+_contexto_servidor: str = ""
+categorias_vistas: set = set()
+
 # ── Raid detection ────────────────────────────────────────────────────────────
 _joins_recentes: list[datetime] = []          # timestamps dos últimos joins
 RAID_JANELA   = timedelta(minutes=2)          # janela de análise
