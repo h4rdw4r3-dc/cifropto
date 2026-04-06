@@ -2514,6 +2514,13 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> st
         "Dúvida entre observação e instrução? Assuma observação.\n"
         "É melhor não agir do que agir com interpretação errada.\n\n"
 
+        "QUESTIONAMENTO TÉCNICO — INSTRUÇÃO AMBÍGUA:\n"
+        "Quando uma ordem de superior ou dono for imprecisa ou incompleta para execução segura:\n"
+        "Faça UMA pergunta técnica e objetiva para esclarecer antes de executar.\n"
+        "Nunca execute 'no chute'. Nunca peça desculpas por perguntar — é profissionalismo.\n"
+        "Exemplos: 'Qual canal de destino?', 'Por quanto tempo?', 'Quem especificamente?'\n"
+        "Depois de esclarecer: execute sem pedir nova confirmação, a menos que a ação seja irreversível.\n\n"
+
         "CONTINUIDADE DE CONVERSA:\n"
         "Você tem o histórico desta conversa. Use-o ativamente.\n"
         "Se o usuário já autorizou algo, explicou uma situação ou respondeu uma pergunta sua: lembre disso.\n"
@@ -2559,6 +2566,89 @@ def _groq_client() -> AsyncOpenAI:
     if _groq is None:
         _groq = AsyncOpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
     return _groq
+
+
+# ── Visão: análise de imagens via Llama 4 Scout ───────────────────────────────
+
+_MODELO_VISAO = "meta-llama/llama-4-scout-17b-16e-instruct"
+
+
+async def _descrever_imagem(url: str, pedido: str = "") -> str:
+    """Envia uma imagem ao modelo de visão e retorna descrição em português."""
+    if not GROQ_DISPONIVEL or not GROQ_API_KEY:
+        return ""
+    instrucao = (
+        pedido.strip()
+        or "Descreva esta imagem de forma objetiva e detalhada em português. "
+           "Se houver texto na imagem, transcreva-o. Seja direto, sem introduções."
+    )
+    try:
+        resp = await _groq_client().chat.completions.create(
+            model=_MODELO_VISAO,
+            max_tokens=400,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": instrucao},
+                    {"type": "image_url", "image_url": {"url": url}},
+                ],
+            }],
+        )
+        texto = resp.choices[0].message.content.strip()
+        if resp.usage:
+            _registrar_tokens(_MODELO_VISAO, resp.usage.total_tokens)
+        return texto
+    except Exception as e:
+        log.warning(f"[VISAO] erro ({url[:60]!r}): {e}")
+        return ""
+
+
+async def _processar_anexos_visuais(message: discord.Message) -> str:
+    """
+    Analisa anexos da mensagem atual e da mensagem referenciada (reply).
+    - Imagens: descrição via visão (Llama 4 Scout)
+    - Outros tipos (PDF, vídeo, áudio, doc): menciona nome, tipo e tamanho
+    Retorna string formatada ou '' se não houver nenhum anexo relevante.
+    """
+    # Coletar todos os anexos: mensagem atual + msg referenciada (reply)
+    todos_anexos: list[discord.Attachment] = list(message.attachments)
+    ref_msg: discord.Message | None = None
+    if message.reference:
+        ref_resolvida = getattr(message.reference, "resolved", None)
+        if isinstance(ref_resolvida, discord.Message) and ref_resolvida.attachments:
+            ref_msg = ref_resolvida
+            todos_anexos = list(ref_msg.attachments) + todos_anexos
+
+    if not todos_anexos:
+        return ""
+
+    pedido = message.content.strip() if message.content.strip() else ""
+    descricoes: list[str] = []
+    n_img = 0
+
+    for att in todos_anexos[:5]:
+        ct = att.content_type or ""
+        if ct.startswith("image/"):
+            n_img += 1
+            if n_img <= 3:
+                desc = await _descrever_imagem(att.url, pedido)
+                if desc:
+                    label = f"Imagem {n_img} ({att.filename})" if len([a for a in todos_anexos if (a.content_type or "").startswith("image/")]) > 1 else f"Imagem ({att.filename})"
+                    descricoes.append(f"[{label}: {desc}]")
+        else:
+            # Não-imagem: registra tipo e tamanho para o bot poder comentar
+            tam_kb = att.size // 1024
+            tipo_legivel = (
+                "PDF" if "pdf" in ct else
+                "vídeo" if ct.startswith("video/") else
+                "áudio" if ct.startswith("audio/") else
+                "documento" if "word" in ct or "document" in ct else
+                "planilha" if "sheet" in ct or "excel" in ct else
+                ct.split("/")[-1].upper() if ct else "arquivo"
+            )
+            descricoes.append(f"[Anexo {tipo_legivel}: {att.filename} ({tam_kb}KB) — não posso processar o conteúdo interno deste tipo de arquivo]")
+
+    return "\n".join(descricoes)
 
 
 # ── Gerenciamento de budget de tokens ────────────────────────────────────────
@@ -2881,6 +2971,44 @@ async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, 
             iniciar_conversa(user_id, "opiniao_noticia", {"noticia": n["titulo"]}, canal_id)
             return f"{n['fonte']}: {n['titulo']}. Sabia disso?"
         return f"Sem acesso a notícias agora."
+
+    if any(p in msg for p in ["quem são os mods", "quem sao os mods", "lista de mods", "quem modera",
+                               "equipe de mod", "time de mod", "quem é a equipe", "quem e a equipe",
+                               "quem faz parte da mod", "staff do servidor"]):
+        if guild:
+            equipe_r = _extrair_equipe_real(guild)
+            linhas_e = []
+            for nivel, membros_e in [("Donos", equipe_r["donos"]), ("Superiores", equipe_r["superiores"]), ("Mods", equipe_r["mods"])]:
+                if membros_e:
+                    nomes_e = ", ".join(f"{m['nome']} ({m['status']})" for m in membros_e)
+                    linhas_e.append(f"{nivel}: {nomes_e}")
+            return "\n".join(linhas_e) if linhas_e else "Não há equipe com cargos registrados agora."
+        return "Sem acesso ao servidor."
+
+    if any(p in msg for p in ["quem tá online", "quem ta online", "quem está online", "online agora",
+                               "quem tá ativo", "quem ta ativo", "membros ativos agora"]):
+        if guild:
+            online_now = [m for m in guild.members if not m.bot and m.status in (discord.Status.online, discord.Status.idle, discord.Status.dnd)]
+            if online_now:
+                nomes_on = ", ".join(m.display_name for m in online_now[:15])
+                return f"{len(online_now)} membro{'s' if len(online_now) != 1 else ''} online: {nomes_on}{'...' if len(online_now) > 15 else ''}."
+            return "Ninguém online no momento."
+        return "Sem acesso ao servidor."
+
+    if any(p in msg for p in ["atividade dos mods", "mods ativos", "moderação ativa",
+                               "equipe tá ativa", "equipe ta ativa", "mods estão"]):
+        if guild:
+            equipe_r2 = _extrair_equipe_real(guild)
+            todos_equipe = equipe_r2["donos"] + equipe_r2["superiores"] + equipe_r2["mods"]
+            ativos = [m for m in todos_equipe if m["msgs"] > 0]
+            inativos = [m for m in todos_equipe if m["msgs"] == 0]
+            partes_at = []
+            if ativos:
+                partes_at.append("Ativos: " + ", ".join(f"{m['nome']} ({m['msgs']} msgs)" for m in ativos))
+            if inativos:
+                partes_at.append("Sem atividade: " + ", ".join(m["nome"] for m in inativos))
+            return "\n".join(partes_at) if partes_at else "Sem dados de atividade disponíveis."
+        return "Sem acesso ao servidor."
 
     if any(p in msg for p in ["estatística", "estatistica", "quantos membros", "quantos são", "quantos tem", "membros do servidor", "quem está"]):
         if guild:
@@ -4791,7 +4919,9 @@ def _tem_intencao_de_acao(conteudo: str) -> bool:
         r'|bota[r]?|add|adiciona[r]?|remove[r]?|deleta[r]?|apaga[r]?'
         r'|ban[e]?|kick|expuls[ae]|silencia[r]?|muta[r]?'
         r'|posta[r]?|escreve[r]?|coloca[r]?|configura[r]?'
-        r'|ativa[r]?|desativa[r]?|abre[r]?|fecha[r]?|lista[r]?|mostra[r]?)\b',
+        r'|ativa[r]?|desativa[r]?|abre[r]?|fecha[r]?|lista[r]?|mostra[r]?'
+        r'|encaminha[r]?|reencaminha[r]?|repassa[r]?|forward'
+        r'|compartilha[r]?)\b',
         msg,
     ):
         return True
@@ -4837,7 +4967,9 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
         "dm(usuario,texto), citacao_aleatoria(), ranking(), "
         "monitorar(canal=null), parar_monitorar(canal=null), "
         "gdoc(tipo=relatorio|historico|regras,canal=null,dias=7), "
-        "gsheet(tipo=membros|infracoes|atividade|citacoes). "
+        "gsheet(tipo=membros|infracoes|atividade|citacoes), "
+        "enviar_canal(texto,canal) — envia uma mensagem específica em um canal (ex: 'manda X no #geral'), "
+        "encaminhar(canal) — encaminha a mensagem referenciada para outro canal (ex: 'encaminha isso pro #anuncios'). "
         "NUNCA retorne acao banir, silenciar ou qualquer punição — punições requerem comando explícito. "
         "Se for pergunta, conversa, menção a raid/invasão/punição, retorne {\"acao\":\"conversa\"}. "
         f"Membros do servidor: {membros_txt}."
@@ -4911,6 +5043,73 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
             "Punições (banir/silenciar) precisam ser feitas via comando direto. "
             "Use: `banir @usuário motivo` ou `silenciar @usuário minutos`"
         )
+        return True
+
+    if acao == "enviar_canal":
+        texto_env = params.get("texto", "").strip()
+        canal_nome_env = params.get("canal", "").strip().lstrip("#")
+        if not texto_env:
+            await canal.send("Qual é o texto que devo enviar?")
+            return True
+        if not canal_nome_env:
+            await canal.send("Em qual canal devo enviar? Menciona o canal.")
+            return True
+        dest_env = discord.utils.get(guild.text_channels, name=canal_nome_env) if guild else None
+        if not dest_env:
+            # Tenta por ID se o nome vier como <#ID>
+            m_id = re.search(r'<#(\d+)>', canal_nome_env)
+            if m_id and guild:
+                dest_env = guild.get_channel(int(m_id.group(1)))
+        if not dest_env:
+            await canal.send(f"Canal '{canal_nome_env}' não encontrado.")
+            return True
+        try:
+            await dest_env.send(texto_env)
+            if dest_env.id != canal.id:
+                await canal.send(f"Mensagem enviada em {dest_env.mention}.")
+            log.info(f"[IA] enviar_canal #{dest_env.name} | {autor}")
+        except Exception as e:
+            await canal.send(f"Não consegui enviar em {dest_env.mention}: {e}")
+        return True
+
+    if acao == "encaminhar":
+        canal_nome_enc = params.get("canal", "").strip().lstrip("#")
+        # Mensagem a encaminhar: referência direta ou última mensagem relevante
+        ref_enc: discord.Message | None = None
+        if message.reference and isinstance(getattr(message.reference, "resolved", None), discord.Message):
+            ref_enc = message.reference.resolved
+        if not ref_enc:
+            await canal.send("Responde à mensagem que quer encaminhar.")
+            return True
+        dest_enc = None
+        if canal_nome_enc and guild:
+            dest_enc = discord.utils.get(guild.text_channels, name=canal_nome_enc)
+            if not dest_enc:
+                m_id = re.search(r'<#(\d+)>', canal_nome_enc)
+                if m_id:
+                    dest_enc = guild.get_channel(int(m_id.group(1)))
+        if not dest_enc:
+            # Tenta encontrar canal mencionado na mensagem original (<#ID>)
+            if message.channel_mentions:
+                dest_enc = message.channel_mentions[0]
+        if not dest_enc:
+            await canal.send("Indica o canal de destino. Ex.: encaminha isso pro #anuncios")
+            return True
+        corpo_enc = ref_enc.content or ""
+        anexos_enc = [a.url for a in ref_enc.attachments]
+        if not corpo_enc and not anexos_enc:
+            await canal.send("A mensagem referenciada está vazia.")
+            return True
+        cabecalho = f"[Encaminhado de #{ref_enc.channel.name} | {ref_enc.author.display_name}]"
+        try:
+            await dest_enc.send(f"{cabecalho}\n{corpo_enc}".strip())
+            for url_att in anexos_enc[:3]:
+                await dest_enc.send(url_att)
+            if dest_enc.id != canal.id:
+                await canal.send(f"Encaminhado para {dest_enc.mention}.")
+            log.info(f"[IA] encaminhar #{ref_enc.channel.name} → #{dest_enc.name} | {autor}")
+        except Exception as e:
+            await canal.send(f"Não consegui encaminhar para {dest_enc.mention}: {e}")
         return True
 
     if acao == "enquete":
@@ -5436,8 +5635,10 @@ async def _participar_debate(message: discord.Message, tema: str):
         return
     ctx = _montar_ctx_canal(message.channel.id, n=10)
     humor_txt = f" Humor atual: {_humor_sessao}." if _humor_sessao else ""
+    perfil_autor = _contexto_usuario(message.author.id)
+    perfil_txt = f"\n{perfil_autor}" if perfil_autor else ""
     system = (
-        f"Você é o shell_engenheiro, membro veterano de um servidor Discord brasileiro.{humor_txt}\n"
+        f"Você é o shell_engenheiro, membro veterano de um servidor Discord brasileiro.{humor_txt}{perfil_txt}\n"
         f"Há um debate em andamento sobre: {tema!r}.\n"
         "Você TEM opiniões próprias e as defende. Não é neutro, não é mediador — você tem um ponto de vista.\n"
         "Pode concordar parcialmente, discordar diretamente, fazer uma pergunta que force reflexão, "
@@ -5489,6 +5690,8 @@ async def _interjetar_conversa(message: discord.Message):
         return
 
     humor_txt = f" Humor atual: {_humor_sessao}." if _humor_sessao else ""
+    perfil_autor = _contexto_usuario(message.author.id)
+    perfil_txt = f"\n{perfil_autor}" if perfil_autor else ""
 
     # Etapa 1: triagem qualificada — não só GO/PASS, mas define o ângulo
     system_triagem = (
@@ -5541,7 +5744,7 @@ async def _interjetar_conversa(message: discord.Message):
         }.get(tipo, "Comente de forma direta e genuína.")
 
         system_resp = (
-            f"Você é o shell_engenheiro, membro veterano de um servidor Discord brasileiro.{humor_txt}\n"
+            f"Você é o shell_engenheiro, membro veterano de um servidor Discord brasileiro.{humor_txt}{perfil_txt}\n"
             f"{instrucao_tipo}\n"
             "Máximo 2 frases. Sem emojis, sem asteriscos, sem markdown.\n"
             "Não comece com \'bem\', \'na verdade\', \'interessante\' ou qualquer introdução genérica.\n"
@@ -5650,6 +5853,226 @@ def _atualizar_contexto(guild: discord.Guild):
     global _contexto_servidor, _contexto_compacto
     _contexto_servidor = build_server_context(guild)
     _contexto_compacto = build_server_context_compact(guild)
+
+
+# ── Extração de equipe em tempo real ─────────────────────────────────────────
+
+def _extrair_equipe_real(guild: discord.Guild) -> dict:
+    """
+    Extrai membros da equipe diretamente dos cargos do Discord.
+    Retorna dict com listas de donos, superiores e mods com status e atividade.
+    """
+    cargo_mod = _cargo_mod_id()
+    cargos_sup = _cargos_superiores_ids()
+    sup_ids = _usuarios_superiores_ids()
+
+    def _status_str(m: discord.Member) -> str:
+        return {
+            discord.Status.online: "online",
+            discord.Status.idle: "ausente",
+            discord.Status.dnd: "ocupado",
+        }.get(m.status, "offline")
+
+    donos_lst, sup_lst, mods_lst = [], [], []
+    for m in guild.members:
+        if m.bot:
+            continue
+        dados = {"nome": m.display_name, "id": m.id, "status": _status_str(m), "msgs": atividade_mensagens.get(m.id, 0)}
+        if m.id in DONOS_IDS:
+            donos_lst.append(dados)
+        elif m.id in sup_ids or any(c.id in cargos_sup for c in m.roles):
+            sup_lst.append(dados)
+        elif any(c.id == cargo_mod for c in m.roles):
+            mods_lst.append(dados)
+    return {"donos": donos_lst, "superiores": sup_lst, "mods": mods_lst}
+
+
+# ── Detecção de pendências não tratadas em canais ─────────────────────────────
+
+_SINAIS_AJUDA = re.compile(
+    r'\b(?:ajuda|preciso de ajuda|socorro|algu[eé]m pode|como fa[cç]o|n[aã]o consigo'
+    r'|n[aã]o funciona|deu erro|t[aá] dando erro|problema|bug|quebrou|travou'
+    r'|n[aã]o entendo|tem como|algu[eé]m sabe|o que fazer|como resolvo'
+    r'|me ajudem|me ajuda|preciso de suporte)\b',
+    re.IGNORECASE,
+)
+
+async def _detectar_pendencias_canal(canal: discord.TextChannel, limite: int = 40) -> list[dict]:
+    """
+    Varre as últimas mensagens do canal em busca de sinais de ajuda/problema
+    sem resposta da equipe ou do bot nos últimos 10-90 minutos.
+    """
+    cargo_mod = _cargo_mod_id()
+    cargos_sup = _cargos_superiores_ids()
+    agora = agora_utc()
+    msgs: list[discord.Message] = []
+    try:
+        async for m in canal.history(limit=limite):
+            msgs.append(m)
+    except Exception:
+        return []
+    msgs.reverse()
+    pendencias: list[dict] = []
+    for i, m in enumerate(msgs):
+        if m.author.bot or not m.content:
+            continue
+        if not _SINAIS_AJUDA.search(m.content):
+            continue
+        delta_min = (agora - m.created_at.replace(tzinfo=timezone.utc)).total_seconds() / 60
+        if delta_min < 10 or delta_min > 90:
+            continue
+        respondido = any(
+            j > i and (
+                msgs[j].author == client.user
+                or msgs[j].author.id in DONOS_IDS
+                or any(c.id == cargo_mod or c.id in cargos_sup for c in getattr(msgs[j].author, "roles", []))
+            )
+            for j in range(i + 1, len(msgs))
+        )
+        if not respondido:
+            pendencias.append({"msg": m, "conteudo": m.content[:200], "autor": m.author.display_name, "min_atras": int(delta_min)})
+    return pendencias
+
+
+# ── Task: accountability e participação autônoma da equipe ────────────────────
+
+async def _task_accountability_equipe():
+    """
+    Task em background (ciclo de 3h):
+    1. Varre canais monitorados + canais de suporte/geral por pendências sem resposta.
+       Para cada uma: bot responde diretamente com informação útil ou aciona equipe.
+    2. Verifica atividade dos mods. Se 2+ mods estiverem offline/inativos, posta
+       nota discreta no canal de auditoria.
+    3. Participa autonomamente em canal quieto dos monitorados (sem depender de pedido).
+    """
+    await client.wait_until_ready()
+    await asyncio.sleep(900)  # 15min após iniciar
+
+    while not client.is_closed():
+        await asyncio.sleep(10800)  # 3 horas
+        if not GROQ_API_KEY:
+            continue
+        try:
+            guild = client.get_guild(SERVIDOR_ID)
+            if not guild:
+                continue
+            agora = agora_utc()
+
+            # ── 1. Pendências sem resposta ──────────────────────────────────
+            ids_verificar: set[int] = set(canais_monitorados)
+            for c in guild.text_channels:
+                if any(kw in c.name.lower() for kw in ("geral", "ajuda", "suporte", "duvida", "dúvida", "chat")):
+                    ids_verificar.add(c.id)
+
+            respondidos = 0
+            for cid in ids_verificar:
+                if respondidos >= 3:
+                    break
+                canal_obj = guild.get_channel(cid)
+                if not isinstance(canal_obj, discord.TextChannel):
+                    continue
+                pends = await _detectar_pendencias_canal(canal_obj)
+                for p in pends:
+                    if respondidos >= 3:
+                        break
+                    ctx_mem = list(canal_memoria.get(cid, []))
+                    ctx_txt = "\n".join(f"{m['autor']}: {m['conteudo'][:100]}" for m in ctx_mem[-6:])
+                    try:
+                        r = await _groq_client().chat.completions.create(
+                            model="llama-3.1-8b-instant",
+                            max_tokens=120,
+                            temperature=0.5,
+                            messages=[
+                                {"role": "system", "content":
+                                 f"{system_com_contexto()}\n"
+                                 "Um membro fez uma pergunta ou relatou um problema sem resposta. "
+                                 "Responda de forma útil e precisa. Se não souber, diga e indique onde buscar. "
+                                 "Se exigir intervenção humana da equipe, diga que vai acionar. Sem emojis."},
+                                {"role": "user", "content":
+                                 f"Contexto recente:\n{ctx_txt}\n\n"
+                                 f"Pendência de {p['autor']} há {p['min_atras']}min:\n{p['conteudo']}"},
+                            ],
+                        )
+                        texto_r = r.choices[0].message.content.strip()
+                        _registrar_tokens("8b", r.usage.total_tokens if r.usage else 120)
+                        if texto_r and "SILÊNCIO" not in texto_r.upper():
+                            await p["msg"].reply(texto_r, mention_author=False)
+                            respondidos += 1
+                            log.info(f"[ACCOUNT] pendência de {p['autor']} em #{canal_obj.name} respondida")
+                            await asyncio.sleep(4)
+                    except Exception as e:
+                        log.debug(f"[ACCOUNT] falha ao responder pendência: {e}")
+
+            # ── 2. Verificar atividade da equipe ────────────────────────────
+            equipe = _extrair_equipe_real(guild)
+            todos_equipe = equipe["mods"] + equipe["superiores"]
+            inativos = [m for m in todos_equipe if m["msgs"] == 0 and m["status"] == "offline"]
+            if len(inativos) >= 2:
+                canal_audit = guild.get_channel(_canal_auditoria_id())
+                if canal_audit:
+                    nomes_in = ", ".join(m["nome"] for m in inativos[:5])
+                    try:
+                        await canal_audit.send(
+                            f"[Accountability] {len(inativos)} membro{'s' if len(inativos) != 1 else ''} "
+                            f"da equipe sem atividade nesta sessão: {nomes_in}. "
+                            f"Considere verificar a presença da moderação."
+                        )
+                        log.info(f"[ACCOUNT] notificou inatividade de {len(inativos)} mods")
+                    except Exception:
+                        pass
+
+            # ── 3. Participação autônoma em canal quieto ────────────────────
+            # Posta algo relevante em um canal monitorado que ficou quieto por 45-180min
+            for cid in list(canais_monitorados):
+                canal_q = guild.get_channel(cid)
+                if not isinstance(canal_q, discord.TextChannel):
+                    continue
+                ultimo_post = _ultima_iniciativa.get(cid)
+                if ultimo_post and (agora - ultimo_post) < timedelta(hours=2):
+                    continue
+                mem_canal = list(canal_memoria.get(cid, []))
+                if not mem_canal:
+                    continue
+                ultima_msg_tempo = None
+                try:
+                    async for m in canal_q.history(limit=1):
+                        ultima_msg_tempo = m.created_at.replace(tzinfo=timezone.utc)
+                except Exception:
+                    continue
+                if not ultima_msg_tempo:
+                    continue
+                silencio_min = (agora - ultima_msg_tempo).total_seconds() / 60
+                if not (45 <= silencio_min <= 180):
+                    continue
+                ctx_q = "\n".join(f"{m['autor']}: {m['conteudo'][:100]}" for m in mem_canal[-8:])
+                try:
+                    rq = await _groq_client().chat.completions.create(
+                        model="llama-3.1-8b-instant",
+                        max_tokens=70,
+                        temperature=0.9,
+                        messages=[
+                            {"role": "system", "content":
+                             f"{system_com_contexto()}\n"
+                             "O canal está quieto. Você pode postar algo como membro normal: uma pergunta provocativa, "
+                             "uma observação sobre o que foi discutido, uma notícia de tech, ou retomar um ponto interessante. "
+                             "Só poste se tiver algo genuinamente interessante a dizer. "
+                             "Se não há nada relevante, responda exatamente: SILÊNCIO"},
+                            {"role": "user", "content":
+                             f"Canal quieto há {int(silencio_min)}min. Histórico recente:\n{ctx_q}"},
+                        ],
+                    )
+                    txt_q = rq.choices[0].message.content.strip()
+                    _registrar_tokens("8b", rq.usage.total_tokens if rq.usage else 70)
+                    if txt_q and "SILÊNCIO" not in txt_q.upper():
+                        await canal_q.send(txt_q)
+                        _ultima_iniciativa[cid] = agora
+                        log.info(f"[ACCOUNT] participação autônoma em #{canal_q.name}: {txt_q[:50]}")
+                    break  # só um canal por ciclo
+                except Exception as e:
+                    log.debug(f"[ACCOUNT] falha participação autônoma: {e}")
+
+        except Exception as e:
+            log.debug(f"[ACCOUNT] erro no ciclo principal: {e}")
 
 
 async def _task_relatorio_semanal():
@@ -5859,6 +6282,7 @@ async def on_ready():
 
     asyncio.ensure_future(_task_relatorio_semanal())
     asyncio.ensure_future(_task_iniciativa_proativa())
+    asyncio.ensure_future(_task_accountability_equipe())
 
 
 @client.event
@@ -6050,6 +6474,84 @@ async def on_member_remove(member: discord.Member):
             pass
 
 
+@client.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    """Reage organicamente a mudanças de cargo e apelido."""
+    if after.guild.id != SERVIDOR_ID:
+        return
+    if after == client.user:
+        return
+
+    guild = after.guild
+    canal_geral = (
+        discord.utils.get(guild.text_channels, name="geral")
+        or discord.utils.get(guild.text_channels, name="chat")
+        or guild.system_channel
+    )
+    if not canal_geral or not GROQ_API_KEY:
+        return
+
+    # ── Mudança de cargo ───────────────────────────────────────────────────────
+    cargos_antes = set(before.roles)
+    cargos_depois = set(after.roles)
+    ganhou = cargos_depois - cargos_antes
+    perdeu = cargos_antes - cargos_depois
+
+    for cargo in ganhou:
+        if cargo.is_default():
+            continue
+        # Não comenta em cargos internos de bot/sistema
+        if cargo.managed:
+            continue
+        if random.random() > 0.45:
+            continue
+        try:
+            r = await _groq_client().chat.completions.create(
+                model="llama-3.1-8b-instant",
+                max_tokens=30,
+                temperature=0.9,
+                messages=[
+                    {"role": "system", "content":
+                     "Você é um membro veterano de Discord. Comente brevemente (1 frase) "
+                     "sobre um membro receber um novo cargo. Pode ser receptivo, irônico ou neutro. "
+                     "Sem emojis. Sem parabéns forçado."},
+                    {"role": "user", "content":
+                     f"{after.display_name} recebeu o cargo '{cargo.name}'."},
+                ],
+            )
+            _registrar_tokens("8b", r.usage.total_tokens if r.usage else 30)
+            txt = r.choices[0].message.content.strip()
+            if txt:
+                await asyncio.sleep(random.uniform(4, 15))
+                await canal_geral.send(txt)
+        except Exception:
+            pass
+        break  # comenta só o primeiro cargo ganho
+
+    # ── Mudança de apelido ─────────────────────────────────────────────────────
+    if before.display_name != after.display_name and random.random() < 0.3:
+        try:
+            r = await _groq_client().chat.completions.create(
+                model="llama-3.1-8b-instant",
+                max_tokens=25,
+                temperature=0.9,
+                messages=[
+                    {"role": "system", "content":
+                     "Você é um membro de Discord. Comente em 1 frase curta sobre alguém ter mudado o apelido. "
+                     "Seja casual, pode ser levemente irônico ou apenas observar. Sem emojis."},
+                    {"role": "user", "content":
+                     f"{before.display_name} virou {after.display_name}."},
+                ],
+            )
+            _registrar_tokens("8b", r.usage.total_tokens if r.usage else 25)
+            txt = r.choices[0].message.content.strip()
+            if txt:
+                await asyncio.sleep(random.uniform(3, 12))
+                await canal_geral.send(txt)
+        except Exception:
+            pass
+
+
 # Palavras-chave ofensivas em nomes de emoji customizado do servidor
 # (emojis Unicode são ambíguos demais para filtrar  -  muitos usos legítimos)
 NOMES_EMOJI_OFENSIVOS = [
@@ -6145,10 +6647,14 @@ async def _on_message_impl(message: discord.Message):
 
     # ── Memória do canal: registra toda mensagem humana ──────────────────────
     # Permite ao bot entender o contexto da conversa sem intervenção manual
-    if not message.author.bot and message.content.strip():
+    if not message.author.bot and (message.content.strip() or message.attachments):
+        _conteudo_mem = message.content[:300]
+        if message.attachments:
+            _nomes_mem = ", ".join(a.filename for a in message.attachments[:3])
+            _conteudo_mem = (_conteudo_mem + f" [anexo: {_nomes_mem}]").strip() if _conteudo_mem else f"[anexo: {_nomes_mem}]"
         canal_memoria[message.channel.id].append({
             "autor": message.author.display_name,
-            "conteudo": message.content[:300],
+            "conteudo": _conteudo_mem,
         })
 
     # ── Rastrear atividade + participação ativa (debate / monitoramento) ──────
@@ -6211,6 +6717,23 @@ async def _on_message_impl(message: discord.Message):
         or _gatilho_nome
         or eh_resposta_ao_bot
     )
+
+    # ── Visão: processar anexos quando o bot é acionado ──────────────────────
+    # Verifica anexos na mensagem atual E na mensagem referenciada (reply)
+    _ref_resolvida = (
+        getattr(message.reference, "resolved", None)
+        if message.reference else None
+    )
+    _tem_anexo = bool(
+        message.attachments
+        or (isinstance(_ref_resolvida, discord.Message) and _ref_resolvida.attachments)
+    )
+    if mencionado and not _e_trivial and _tem_anexo:
+        _desc_visual = await _processar_anexos_visuais(message)
+        if _desc_visual:
+            conteudo = (conteudo + "\n" + _desc_visual).strip() if conteudo.strip() else _desc_visual
+            _n_total = len(message.attachments) + (len(_ref_resolvida.attachments) if isinstance(_ref_resolvida, discord.Message) else 0)
+            log.info(f"[VISAO] {_n_total} anexo(s) processado(s) para {autor}")
 
     # ── AFK: se alguém marca o próprio usuário que está AFK, responde no canal ─
     if message.mentions:
