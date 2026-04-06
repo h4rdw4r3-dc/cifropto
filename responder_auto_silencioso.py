@@ -1287,7 +1287,7 @@ async def _detectar_intencao(conteudo: str, guild=None) -> dict:
             system += f"\n\n=== ESTRUTURA DO SERVIDOR ===\n{ctx_classificador}\nUse essa estrutura para identificar nomes de cargos, membros e canais corretamente."
         resp = await _groq_client().chat.completions.create(
             model="llama-3.1-8b-instant",
-            max_tokens=80,
+            max_tokens=150,
             temperature=0.0,
             messages=[
                 {"role": "system", "content": system},
@@ -1295,7 +1295,10 @@ async def _detectar_intencao(conteudo: str, guild=None) -> dict:
             ],
         )
         texto = resp.choices[0].message.content.strip()
-        texto = re.sub(r"^```json|^```|```$", "", texto).strip()
+        texto = re.sub(r"^```json|^```|```$", "", texto, flags=re.MULTILINE).strip()
+        # Garante que o JSON está fechado caso venha truncado
+        if texto.startswith("{") and not texto.endswith("}"):
+            texto += "}"
         return json.loads(texto)
     except Exception as e:
         log.warning(f"_detectar_intencao falhou: {e}")
@@ -3309,11 +3312,6 @@ async def on_message(message: discord.Message):
             texto = await api_info_membro_completa(message.guild, alvos_info[0])
             await message.reply(texto)
             return
-
-    # ── Stats do servidor (dados em tempo real via REST) ──────────────────────
-    if mencionado and any(p in conteudo.lower() for p in ["quantos membros", "membros do servidor", "estatística", "estatistica", "quem está no servidor", "resumo do servidor", "info do servidor"]):
-        await message.reply(await api_resumo_servidor(message.guild))
-        return
 
     # ── Queries factuais do servidor (cargos, membros por cargo, etc.) ────────
     if mencionado and message.guild:
