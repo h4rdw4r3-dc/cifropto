@@ -2303,8 +2303,16 @@ def system_com_contexto() -> str:
         "Você TEM acesso a dados do servidor (membros, cargos, infrações, canais, etc.).\n"
         "Você TEM funções de moderação: silenciar, banir, expulsar, avisar membros.\n"
         "Você TEM permissão de administrador no servidor para executar essas ações.\n"
+        "Você TEM capacidade de entrar em canais de voz e falar via TTS.\n"
         "NUNCA diga 'não tenho informações sobre os usuários do servidor'  -  você tem, no contexto abaixo.\n"
         "NUNCA diga 'não tenho informações sobre o servidor'  -  você tem, no contexto abaixo.\n\n"
+
+        "HONESTIDADE ABSOLUTA  -  REGRAS INVIOLÁVEIS:\n"
+        "NUNCA diga que vai 'simular', 'fingir' ou 'fazer como se' tivesse executado algo.\n"
+        "NUNCA diga 'vou apenas simular a interação' ou similar  -  você age de verdade ou não age.\n"
+        "NUNCA diga 'como estou em um ambiente de texto não posso...'  -  você não está limitado a texto.\n"
+        "Se não conseguir fazer algo: diga em UMA frase curta que não consegue. Ponto. Sem elaborar.\n"
+        "Se consegue fazer: faça. Não anuncie que vai fazer, não descreva a ação  -  execute.\n\n"
 
         "CONTINUIDADE DE CONVERSA:\n"
         "Você tem o histórico desta conversa. Use-o ativamente.\n"
@@ -4007,6 +4015,70 @@ async def processar_ordem(message: discord.Message) -> bool:
                 else "relatorio semanal")
         return await _iniciar_wizard(message, tipo)
 
+    # ── comandos de voz ───────────────────────────────────────────────────────
+    elif _addr and re.search(
+        r'\b(entr[ae][r]?\s+(?:n[ao]\s+)?(?:call|canal\s+de\s+voz|voz)|'
+        r'vai?\s+(?:para?\s+)?(?:call|voz)|'
+        r'se\s+junt[ae]\s+(?:n[ao]\s+)?(?:call|voz))\b',
+        conteudo.lower()
+    ):
+        if not guild:
+            return False
+        _nome_voz = re.search(
+            r'\b(?:call|canal|voz)\s+(?:de\s+voz\s+)?([A-Za-z0-9_\-\s]+)', conteudo, re.IGNORECASE
+        )
+        _nome_str = _nome_voz.group(1).strip() if _nome_voz else None
+        _canal_voz = await _entrar_canal_voz(guild, _nome_str)
+        if not _canal_voz:
+            await message.channel.send("Nao encontrei nenhum canal de voz no servidor.")
+            return True
+        try:
+            await _canal_voz.connect()
+            await message.channel.send(f"Entrei em {_canal_voz.mention}.")
+        except Exception as _e:
+            await message.channel.send(f"Nao consegui entrar: {_e}")
+        return True
+
+    elif _addr and re.search(
+        r'\b(sa[ií][r]?\s+(?:d[ao]\s+)?(?:call|voz|canal)|'
+        r'desconect[ae][r]?\s+(?:d[ao]\s+)?(?:voz|call)|'
+        r'larg[ae][r]?\s+(?:a\s+)?(?:call|voz))\b',
+        conteudo.lower()
+    ):
+        if guild and guild.voice_client:
+            await guild.voice_client.disconnect(force=True)
+            await message.channel.send("Sai do canal de voz.")
+        else:
+            await message.channel.send("Nao estou em nenhum canal de voz.")
+        return True
+
+    elif _addr and re.search(
+        r'\b(fal[ae][r]?\s+(?:n[ao]\s+)?(?:call|voz|canal)|'
+        r'diz[er]?\s+(?:n[ao]\s+)?(?:call|voz)|'
+        r'mand[ae][r]?\s+(?:audio|voz)\s+(?:n[ao]|falando))\b',
+        conteudo.lower()
+    ):
+        if not guild:
+            return False
+        # Extrai o texto a falar
+        _texto_voz = re.sub(
+            r'(?i).*?\b(?:fala[r]?|diz(?:er)?|manda[r]?(?:\s+(?:audio|voz))?)'
+            r'(?:\s+n[ao](?:\s+call|\s+canal|\s+voz)?)?\s*:?\s*',
+            '', conteudo
+        ).strip()
+        if not _texto_voz:
+            await message.channel.send("O que eu falo? Manda o texto depois do comando.")
+            return True
+        _canal_voz = await _entrar_canal_voz(guild)
+        if not _canal_voz:
+            await message.channel.send("Nao tem canal de voz disponivel.")
+            return True
+        await message.channel.send(f"Falando em {_canal_voz.mention}...")
+        ok = await _falar_em_voz(_canal_voz, _texto_voz)
+        if not ok:
+            await message.channel.send("Nao consegui falar. Verifique se o FFmpeg esta instalado no servidor.")
+        return True
+
     # ── traduzir mensagem ─────────────────────────────────────────────────────
     # Uso: "Shell traduz isso para inglês" (reply na mensagem), "Shell traduz: texto"
     elif _addr and re.search(r'\btraduz[ir]?\b|\btranslat[e]?\b', conteudo.lower()):
@@ -4850,6 +4922,72 @@ async def _task_relatorio_semanal():
             log.error(f"[SEMANAL] Falha: {e}")
 
 
+# ── Suporte a canais de voz ───────────────────────────────────────────────────
+
+import tempfile, os as _os
+
+def _tts_disponivel() -> bool:
+    try:
+        import gtts  # noqa
+        import discord.opus  # noqa
+        return True
+    except Exception:
+        return False
+
+
+async def _falar_em_voz(canal_voz: discord.VoiceChannel, texto: str) -> bool:
+    """Entra no canal, fala o texto via TTS e sai. Retorna True se ok."""
+    try:
+        from gtts import gTTS
+    except ImportError:
+        log.warning("[VOZ] gTTS nao instalado.")
+        return False
+
+    try:
+        vc = canal_voz.guild.voice_client
+        if vc and vc.channel.id != canal_voz.id:
+            await vc.disconnect(force=True)
+            vc = None
+
+        if not vc:
+            vc = await canal_voz.connect()
+
+        # Gera audio TTS em arquivo temporario
+        tts = gTTS(text=texto, lang="pt", slow=False)
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            tmp_path = tmp.name
+        tts.save(tmp_path)
+
+        # Toca o audio
+        source = discord.FFmpegPCMAudio(tmp_path)
+        vc.play(source)
+        while vc.is_playing():
+            await asyncio.sleep(0.5)
+
+        await vc.disconnect()
+        _os.unlink(tmp_path)
+        return True
+    except Exception as e:
+        log.error(f"[VOZ] Erro ao falar: {e}", exc_info=True)
+        return False
+
+
+async def _entrar_canal_voz(guild: discord.Guild, nome_canal: str | None = None) -> discord.VoiceChannel | None:
+    """Encontra e entra em um canal de voz. Retorna o canal ou None."""
+    canais = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
+    if not canais:
+        return None
+    if nome_canal:
+        canal = next(
+            (c for c in canais if nome_canal.lower() in c.name.lower()),
+            None
+        )
+    else:
+        # Canal com mais membros ou primeiro disponível
+        canal = max(canais, key=lambda c: len(c.members)) if canais else None
+    return canal
+
+
 @client.event
 async def on_ready():
     carregar_dados()
@@ -5007,6 +5145,28 @@ NOMES_EMOJI_OFENSIVOS = [
     "retardado",
     "nazi", "hitler", "kkk",
 ]
+
+
+@client.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    """Monitora entradas e saidas de canais de voz."""
+    if not member.guild or member.guild.id != SERVIDOR_ID:
+        return
+    if member == client.user:
+        return
+
+    # Notifica no canal de auditoria quando membros entram/saem
+    canal_audit = member.guild.get_channel(CANAL_AUDITORIA_ID)
+    if not canal_audit:
+        return
+
+    entrou = after.channel and (not before.channel or before.channel.id != after.channel.id)
+    saiu = before.channel and (not after.channel or before.channel.id != after.channel.id)
+
+    if entrou:
+        log.info(f"[VOZ] {member.display_name} entrou em #{after.channel.name}")
+    elif saiu:
+        log.info(f"[VOZ] {member.display_name} saiu de #{before.channel.name}")
 
 
 @client.event
