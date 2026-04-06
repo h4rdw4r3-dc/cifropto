@@ -54,6 +54,254 @@ VIRUSTOTAL_API_KEY = "SUA_CHAVE_AQUI"
 
 client = discord.Client()
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# DISCORD REST API — acesso direto para dados em tempo real
+# ═══════════════════════════════════════════════════════════════════════════════
+
+DISCORD_API = "https://discord.com/api/v10"
+
+
+def _headers_discord() -> dict:
+    return {"Authorization": TOKEN, "Content-Type": "application/json"}
+
+
+async def api_get(endpoint: str) -> dict | list | None:
+    """GET genérico na API REST do Discord. Retorna JSON ou None em erro."""
+    url = f"{DISCORD_API}{endpoint}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=_headers_discord()) as r:
+                if r.status == 200:
+                    return await r.json()
+                log.warning(f"Discord API GET {endpoint} → HTTP {r.status}")
+                return None
+    except Exception as e:
+        log.error(f"api_get {endpoint}: {e}")
+        return None
+
+
+async def api_get_paginado(endpoint: str, limite: int = 100) -> list:
+    """GET paginado usando cursor `after`. Retorna lista com até `limite` itens."""
+    resultados = []
+    after = None
+    while len(resultados) < limite:
+        params = f"?limit={min(100, limite - len(resultados))}"
+        if after:
+            params += f"&after={after}"
+        dados = await api_get(f"{endpoint}{params}")
+        if not dados:
+            break
+        itens = dados if isinstance(dados, list) else []
+        if not itens:
+            break
+        resultados.extend(itens)
+        after = itens[-1].get("id") if isinstance(itens[-1], dict) else None
+        if len(itens) < 100:
+            break
+    return resultados[:limite]
+
+
+async def api_membro(guild_id: int, user_id: int) -> dict | None:
+    """Dados frescos de membro via REST (inclui communication_disabled_until)."""
+    return await api_get(f"/guilds/{guild_id}/members/{user_id}")
+
+
+async def api_ban_entry(guild_id: int, user_id: int) -> dict | None:
+    """Verifica se usuário está banido e retorna a entrada."""
+    return await api_get(f"/guilds/{guild_id}/bans/{user_id}")
+
+
+async def api_banimentos(guild_id: int, limite: int = 50) -> list[dict]:
+    """Lista de banimentos do servidor."""
+    dados = await api_get(f"/guilds/{guild_id}/bans?limit={min(limite, 1000)}")
+    return dados if isinstance(dados, list) else []
+
+
+async def api_audit_log(guild_id: int, tipo: int = None, limite: int = 25) -> list[dict]:
+    """
+    Audit log do servidor.
+    Tipos: 20=BAN | 22=UNBAN | 24=KICK | 25=MEMBER_UPDATE(timeout) | 26=MEMBER_ROLE_UPDATE
+    """
+    endpoint = f"/guilds/{guild_id}/audit-logs?limit={min(limite, 100)}"
+    if tipo:
+        endpoint += f"&action_type={tipo}"
+    dados = await api_get(endpoint)
+    return dados.get("audit_log_entries", []) if dados else []
+
+
+async def api_mensagens_canal(canal_id: int, limite: int = 50) -> list[dict]:
+    """Últimas mensagens de um canal via REST."""
+    dados = await api_get(f"/channels/{canal_id}/messages?limit={min(limite, 100)}")
+    return dados if isinstance(dados, list) else []
+
+
+async def api_guild_info(guild_id: int) -> dict | None:
+    """Info completa do servidor incluindo approximate_member_count e presence_count."""
+    return await api_get(f"/guilds/{guild_id}?with_counts=true")
+
+
+async def api_membros_todos(guild_id: int, limite: int = 1000) -> list[dict]:
+    """Lista todos os membros via REST paginada."""
+    return await api_get_paginado(f"/guilds/{guild_id}/members", limite)
+
+
+# ── Funções de análise usando a API REST ─────────────────────────────────────
+
+async def api_info_membro_completa(guild: discord.Guild, membro: discord.Member) -> str:
+    """
+    Info completa combinando cache discord.py + REST em tempo real.
+    Inclui timeout ativo, cargos atualizados, infrações locais.
+    """
+    agora = agora_utc()
+    dados_api = await api_membro(guild.id, membro.id)
+
+    # Timeout ativo via REST (campo communication_disabled_until)
+    timeout_ativo = ""
+    if dados_api:
+        ts_timeout = dados_api.get("communication_disabled_until")
+        if ts_timeout:
+            try:
+                timeout_dt = datetime.fromisoformat(ts_timeout.replace("Z", "+00:00"))
+                if timeout_dt > agora:
+                    mins = int((timeout_dt - agora).total_seconds() / 60)
+                    timeout_ativo = f" | SILENCIADO — {mins} min restantes"
+            except Exception:
+                pass
+
+    # Datas
+    conta_criada = membro.created_at.replace(tzinfo=timezone.utc)
+    entrou = membro.joined_at.replace(tzinfo=timezone.utc) if membro.joined_at else None
+    idade_conta = formatar_duracao(agora - conta_criada)
+    tempo_servidor = formatar_duracao(agora - entrou) if entrou else "desconhecido"
+
+    # Cargos (API REST > cache)
+    if dados_api and "roles" in dados_api:
+        cargos_nomes = []
+        for rid in dados_api["roles"]:
+            role = guild.get_role(int(rid))
+            if role and role.name != "@everyone":
+                cargos_nomes.append(role.name)
+        cargos_txt = ", ".join(cargos_nomes) if cargos_nomes else "nenhum"
+    else:
+        cargos_txt = ", ".join(r.name for r in membro.roles if r.name != "@everyone") or "nenhum"
+
+    # Dados locais
+    infr = infracoes.get(membro.id, 0)
+    silenc = silenciamentos.get(membro.id, 0)
+    n_ent = len(registro_entradas.get(membro.id, []))
+    extras = []
+    if infr:
+        extras.append(f"infrações: {infr}")
+    if silenc:
+        extras.append(f"silenciamentos locais: {silenc}")
+    if n_ent > 1:
+        extras.append(f"entrou {n_ent}x")
+    extras_txt = " | " + ", ".join(extras) if extras else ""
+
+    return (
+        f"{membro.display_name} (ID {membro.id}){timeout_ativo}\n"
+        f"  Conta criada há {idade_conta} | No servidor há {tempo_servidor}\n"
+        f"  Cargos: {cargos_txt}{extras_txt}"
+    )
+
+
+async def api_resumo_servidor(guild: discord.Guild) -> str:
+    """Resumo do servidor com dados em tempo real via REST."""
+    dados = await api_guild_info(guild.id)
+    brasilia = timezone(timedelta(hours=-3))
+    criado_em = guild.created_at.astimezone(brasilia).strftime("%d/%m/%Y")
+
+    if dados:
+        total = dados.get("approximate_member_count", guild.member_count)
+        online = dados.get("approximate_presence_count", "?")
+        boost_nivel = dados.get("premium_tier", guild.premium_tier)
+        boost_count = dados.get("premium_subscription_count", guild.premium_subscription_count)
+    else:
+        total = guild.member_count
+        online = "?"
+        boost_nivel = guild.premium_tier
+        boost_count = guild.premium_subscription_count
+
+    bots = sum(1 for m in guild.members if m.bot)
+    humanos = total - bots
+    canais_texto = len([c for c in guild.channels if isinstance(c, discord.TextChannel)])
+    canais_voz = len([c for c in guild.channels if isinstance(c, discord.VoiceChannel)])
+    n_cargos = len([r for r in guild.roles if r.name != "@everyone"])
+
+    return (
+        f"**{guild.name}** — criado em {criado_em}\n"
+        f"Membros: {humanos} humanos + {bots} bots = {total} total | online agora: {online}\n"
+        f"Canais: {canais_texto} texto, {canais_voz} voz | Cargos: {n_cargos}\n"
+        f"Boost: nível {boost_nivel} ({boost_count} boosts)"
+    )
+
+
+async def api_historico_punicoes(guild: discord.Guild, alvo: discord.Member | None = None) -> str:
+    """
+    Busca punições no audit log do servidor.
+    Tipos cobertos: BAN (20), UNBAN (22), KICK (24), MEMBER_UPDATE/timeout (25).
+    """
+    brasilia = timezone(timedelta(hours=-3))
+    linhas = []
+
+    for tipo, nome in [(20, "BAN"), (22, "UNBAN"), (24, "KICK"), (25, "TIMEOUT")]:
+        entradas = await api_audit_log(guild.id, tipo=tipo, limite=15)
+        for e in entradas:
+            alvo_id = int(e.get("target_id", 0))
+            if alvo and alvo_id != alvo.id:
+                continue
+            resp_id = e.get("user_id", "?")
+            motivo = e.get("reason") or "sem motivo"
+            # Converte snowflake em timestamp
+            ts_ms = (int(e["id"]) >> 22) + 1420070400000
+            dt = datetime.fromtimestamp(ts_ms / 1000, tz=brasilia)
+            alvo_nome = alvo.display_name if alvo else str(alvo_id)
+            # Tenta nome do executor via cache
+            resp_membro = guild.get_member(int(resp_id)) if resp_id != "?" else None
+            resp_nome = resp_membro.display_name if resp_membro else f"ID {resp_id}"
+            linhas.append(f"  [{nome}] {alvo_nome} | por {resp_nome} | {dt.strftime('%d/%m/%Y %H:%M')} | {motivo}")
+
+    if not linhas:
+        return "Nenhuma punição encontrada no audit log."
+    return "\n".join(linhas)
+
+
+async def api_banimentos_formatado(guild: discord.Guild, limite: int = 20) -> str:
+    """Lista os banimentos ativos do servidor com motivo."""
+    bans = await api_banimentos(guild.id, limite)
+    if not bans:
+        return "Nenhum banimento ativo no servidor."
+    linhas = [f"Banimentos ativos ({len(bans)} mostrados):"]
+    for b in bans:
+        user = b.get("user", {})
+        nome = user.get("username", "?")
+        uid = user.get("id", "?")
+        motivo = b.get("reason") or "sem motivo"
+        linhas.append(f"  {nome} ({uid}) — {motivo}")
+    return "\n".join(linhas)
+
+
+async def api_ultimas_mensagens(guild: discord.Guild, canal_id: int, limite: int = 20) -> str:
+    """Últimas mensagens de um canal via REST."""
+    brasilia = timezone(timedelta(hours=-3))
+    msgs = await api_mensagens_canal(canal_id, limite)
+    if not msgs:
+        return "Não foi possível buscar mensagens desse canal."
+    canal = guild.get_channel(canal_id)
+    nome_canal = f"#{canal.name}" if canal else f"canal {canal_id}"
+    linhas = [f"Últimas {len(msgs)} mensagens de {nome_canal}:"]
+    for m in reversed(msgs):
+        autor_nome = m.get("author", {}).get("username", "?")
+        conteudo = m.get("content", "") or "[sem texto]"
+        ts_str = m.get("timestamp", "")
+        try:
+            dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).astimezone(brasilia)
+            hora = dt.strftime("%H:%M")
+        except Exception:
+            hora = "?"
+        linhas.append(f"  [{hora}] {autor_nome}: {conteudo[:80]}")
+    return "\n".join(linhas)
+
 
 def tem_permissao_moderacao(guild: discord.Guild) -> bool:
     """Verifica se a conta tem permissão de administrador ou moderação no servidor."""
@@ -2188,10 +2436,99 @@ async def processar_ordem(message: discord.Message) -> bool:
             "Para ativar ausência diga ausente ou afk com motivo opcional, e para voltar diga voltei."
         )
 
+    # ── punicoes [@user] — audit log de punições via REST ─────────────────────
+    elif cmd in ("punicoes", "punições", "punicao", "punição", "audit", "log"):
+        alvo_audit = alvos[0] if alvos else None
+        resultado = await api_historico_punicoes(guild, alvo_audit)
+        blocos = [resultado[i:i+1900] for i in range(0, len(resultado), 1900)]
+        for bloco in blocos:
+            await message.channel.send(f"```\n{bloco}\n```")
+
+    # ── banidos — lista de banimentos via REST ─────────────────────────────────
+    elif cmd in ("banidos", "bans", "banimentos"):
+        resultado = await api_banimentos_formatado(guild)
+        blocos = [resultado[i:i+1900] for i in range(0, len(resultado), 1900)]
+        for bloco in blocos:
+            await message.channel.send(f"```\n{bloco}\n```")
+
+    # ── mensagens #canal [n] — últimas mensagens de um canal via REST ──────────
+    elif cmd in ("mensagens", "msgs") and message.channel_mentions:
+        canal_alvo = message.channel_mentions[0]
+        qtd = 20
+        m_qtd = re.search(r'\b(\d+)\b', re.sub(r'<#\d+>', '', conteudo))
+        if m_qtd:
+            qtd = min(int(m_qtd.group(1)), 50)
+        resultado = await api_ultimas_mensagens(guild, canal_alvo.id, qtd)
+        blocos = [resultado[i:i+1900] for i in range(0, len(resultado), 1900)]
+        for bloco in blocos:
+            await message.channel.send(f"```\n{bloco}\n```")
+
+    # ── servidor / info servidor — resumo em tempo real via REST ───────────────
+    elif cmd in ("servidor", "server") and any(p in conteudo.lower() for p in ["info", "resumo", "stats", "status"]):
+        resultado = await api_resumo_servidor(guild)
+        await message.channel.send(resultado)
+
+    # ── info @membro — dados completos via REST ────────────────────────────────
+    elif cmd == "info" and alvos:
+        texto = await api_info_membro_completa(guild, alvos[0])
+        await message.channel.send(f"```\n{texto}\n```")
+
     else:
         return False
 
     return True
+
+
+async def _gerar_aviso_afk_ia(membro: discord.Member, motivo: str, ate) -> str:
+    """Gera aviso de AFK inteligente via IA. Fallback para texto fixo."""
+    nome = membro.mention
+    tempo_txt = ""
+    if ate:
+        diff = ate - agora_utc()
+        mins = int(diff.total_seconds() / 60)
+        if mins >= 60:
+            horas = mins // 60
+            resto = mins % 60
+            tempo_txt = f"por umas {horas}h{f'{resto}min' if resto else ''}"
+        elif mins > 0:
+            tempo_txt = f"por mais uns {mins} minuto{'s' if mins != 1 else ''}"
+
+    if not GROQ_DISPONIVEL or not GROQ_API_KEY:
+        if motivo:
+            return f"Eae, {nome} está AFK no momento — {motivo}" + (f", {tempo_txt}." if tempo_txt else ".")
+        return f"Eae, {nome} está AFK no momento." + (f" Volta em {tempo_txt}." if tempo_txt else "")
+
+    partes = []
+    if motivo:
+        partes.append(f"motivo: {motivo}")
+    if tempo_txt:
+        partes.append(f"tempo restante: {tempo_txt}")
+    ctx = ", ".join(partes) or "ausente sem motivo informado"
+
+    prompt = (
+        f"Gere UMA frase curta e casual avisando que {membro.display_name} está AFK. "
+        f"Contexto: {ctx}. Use a menção exata: {nome}. "
+        f"Estilo: brasileiro jovem, sem emojis, sem asteriscos. Máximo 15 palavras."
+    )
+    try:
+        resp = await _groq_client().chat.completions.create(
+            model="llama-3.1-8b-instant",
+            max_tokens=60,
+            temperature=0.7,
+            messages=[
+                {"role": "system", "content": "Você gera avisos curtos e naturais de AFK para um servidor Discord brasileiro. Sem emojis, sem markdown, sem aspas."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        texto = resp.choices[0].message.content.strip().strip('"').strip("'")
+        if nome not in texto:
+            texto = f"Eae, {nome} está AFK — {motivo or 'ausente no momento'}."
+        return texto
+    except Exception as e:
+        log.error(f"_gerar_aviso_afk_ia: {e}")
+        if motivo:
+            return f"Eae, {nome} está AFK no momento — {motivo}" + (f", {tempo_txt}." if tempo_txt else ".")
+        return f"Eae, {nome} está AFK no momento." + (f" Volta em {tempo_txt}." if tempo_txt else "")
 
 
 async def processar_ordem_mod(message: discord.Message) -> bool:
@@ -2601,10 +2938,8 @@ async def on_message(message: discord.Message):
             estado_afk = ausencia.get(mencionado_user.id)
             if estado_afk:
                 motivo_afk = estado_afk.get("motivo", "")
-                if motivo_afk:
-                    msg_afk = f"Eae, {mencionado_user.mention} está AFK no momento — {motivo_afk}"
-                else:
-                    msg_afk = f"Eae, {mencionado_user.mention} está AFK no momento."
+                ate_afk = estado_afk.get("ate")
+                msg_afk = await _gerar_aviso_afk_ia(mencionado_user, motivo_afk, ate_afk)
                 await message.channel.send(msg_afk)
 
     # ── Desativar AFK quando o próprio usuário manda mensagem ─────────────────
@@ -2623,6 +2958,7 @@ async def on_message(message: discord.Message):
     if _eh_dono:
         if message.author.id in ausencia:
             del ausencia[message.author.id]
+            await message.channel.send(f"{message.author.mention}, modo ausente desativado.")
         tratado = await processar_ordem(message)
         if not tratado and mencionado:
             # Continua conversa ativa antes de cair em resposta_inicial_superior
@@ -2642,6 +2978,7 @@ async def on_message(message: discord.Message):
     if _eh_superior_:
         if message.author.id in ausencia:
             del ausencia[message.author.id]
+            await message.channel.send(f"{message.author.mention}, modo ausente desativado.")
         tratado = await processar_ordem(message)
         if not tratado and mencionado:
             # Continua conversa ativa antes de cair em resposta_inicial_superior
@@ -2754,14 +3091,14 @@ async def on_message(message: discord.Message):
     # ── Info de membro via menção ─────────────────────────────────────────────
     if mencionado and message.mentions:
         alvos_info = [m for m in message.mentions if m != client.user]
-        if alvos_info and any(p in conteudo.lower() for p in ["info", "informação", "quem é", "tempo no", "quando entrou", "idade"]):
-            texto = await info_membro(alvos_info[0])
+        if alvos_info and any(p in conteudo.lower() for p in ["info", "informação", "quem é", "tempo no", "quando entrou", "idade", "silenciado", "timeout", "punição", "punicao"]):
+            texto = await api_info_membro_completa(message.guild, alvos_info[0])
             await message.reply(texto)
             return
 
-    # ── Stats do servidor ─────────────────────────────────────────────────────
-    if mencionado and any(p in conteudo.lower() for p in ["quantos membros", "membros do servidor", "estatística", "estatistica", "quem está no servidor"]):
-        await message.reply(await stats_servidor(message.guild))
+    # ── Stats do servidor (dados em tempo real via REST) ──────────────────────
+    if mencionado and any(p in conteudo.lower() for p in ["quantos membros", "membros do servidor", "estatística", "estatistica", "quem está no servidor", "resumo do servidor", "info do servidor"]):
+        await message.reply(await api_resumo_servidor(message.guild))
         return
 
     # ── Queries factuais do servidor (cargos, membros por cargo, etc.) ────────
