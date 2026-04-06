@@ -4823,6 +4823,19 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
 
 # ── Simulação de digitação humana ────────────────────────────────────────────
 
+async def _manter_digitando(channel: discord.TextChannel, parar: asyncio.Event) -> None:
+    """Background task: renova o indicador 'digitando...' até parar ser setado."""
+    while not parar.is_set():
+        try:
+            await channel.trigger_typing()
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(asyncio.shield(parar.wait()), timeout=7.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
+
+
 async def _digitar_e_enviar(
     channel: discord.TextChannel,
     texto: str,
@@ -4830,20 +4843,48 @@ async def _digitar_e_enviar(
 ) -> None:
     """
     Exibe o indicador 'digitando...' por um tempo proporcional ao texto
-    antes de enviar, simulando comportamento humano real.
+    antes de enviar — chamado APÓS a resposta já estar pronta.
     """
     palavras = max(len(texto.split()), 1)
-    # ~170 palavras/min digitação casual; adiciona leve variação aleatória
-    delay = min(0.6 + palavras * 0.22 + random.uniform(-0.15, 0.35), 6.0)
-    delay = max(delay, 0.5)
+    # Pequeno delay natural após ter o texto pronto (simula releitura/correção)
+    delay = min(0.4 + palavras * 0.07 + random.uniform(0.0, 0.35), 2.5)
+    delay = max(delay, 0.4)
 
-    async with channel.typing():
+    parar = asyncio.Event()
+    task = asyncio.ensure_future(_manter_digitando(channel, parar))
+    try:
         await asyncio.sleep(delay)
+    finally:
+        parar.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     if reply_msg is not None:
         await reply_msg.reply(texto)
     else:
         await channel.send(texto)
+
+
+async def _iniciar_typing_antes(channel: discord.TextChannel) -> tuple[asyncio.Event, asyncio.Task]:
+    """
+    Inicia o indicador 'digitando...' ANTES da chamada à IA.
+    Retorna (parar, task) — chame parar.set() + task.cancel() após enviar.
+    """
+    parar = asyncio.Event()
+    task = asyncio.ensure_future(_manter_digitando(channel, parar))
+    return parar, task
+
+
+async def _parar_typing(parar: asyncio.Event, task: asyncio.Task) -> None:
+    parar.set()
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 # ── Participação ativa: debate e monitoramento de canal ───────────────────────
@@ -5473,24 +5514,31 @@ async def _on_message_impl(message: discord.Message):
         tratado = await processar_ordem(message)
         log.info(f"[DONO] processar_ordem retornou {tratado}")
         if not tratado and mencionado:
-            # Só interpreta como instrução quando há intenção clara de ação
-            if _tem_intencao_de_acao(conteudo):
-                intencao_ia = await _ia_parsear_instrucao(conteudo, message.guild)
-                if intencao_ia:
-                    log.info(f"[DONO] IA interpretou: {intencao_ia.get('acao')}")
-                    tratado_ia = await _ia_executar(intencao_ia, message, message.guild)
-                    if tratado_ia:
+            _tp, _tt = await _iniciar_typing_antes(message.channel)
+            try:
+                # Só interpreta como instrução quando há intenção clara de ação
+                if _tem_intencao_de_acao(conteudo):
+                    intencao_ia = await _ia_parsear_instrucao(conteudo, message.guild)
+                    if intencao_ia:
+                        log.info(f"[DONO] IA interpretou: {intencao_ia.get('acao')}")
+                        await _parar_typing(_tp, _tt)
+                        tratado_ia = await _ia_executar(intencao_ia, message, message.guild)
+                        if tratado_ia:
+                            return
+                        _tp, _tt = await _iniciar_typing_antes(message.channel)
+                # Continua conversa ativa antes de cair em resposta_inicial_superior
+                estado_conv = conversas.get(user_id)
+                if estado_conv and (estado_conv.get("canal") is None or estado_conv["canal"] == message.channel.id):
+                    resp_conv = await continuar_conversa(user_id, conteudo, autor, message.guild)
+                    if resp_conv:
+                        await _parar_typing(_tp, _tt)
+                        await _digitar_e_enviar(message.channel, resp_conv, message)
                         return
-            # Continua conversa ativa antes de cair em resposta_inicial_superior
-            estado_conv = conversas.get(user_id)
-            if estado_conv and (estado_conv.get("canal") is None or estado_conv["canal"] == message.channel.id):
-                resp_conv = await continuar_conversa(user_id, conteudo, autor, message.guild)
-                if resp_conv:
-                    await _digitar_e_enviar(message.channel, resp_conv, message)
-                    return
-            log.info(f"[DONO] chamando resposta_inicial_superior para {autor}")
-            resposta = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
-            log.info(f"[DONO] resposta obtida ({len(resposta)} chars): {resposta[:60]!r}")
+                log.info(f"[DONO] chamando resposta_inicial_superior para {autor}")
+                resposta = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
+                log.info(f"[DONO] resposta obtida ({len(resposta)} chars): {resposta[:60]!r}")
+            finally:
+                await _parar_typing(_tp, _tt)
             if resposta:
                 await _digitar_e_enviar(message.channel, resposta, message)
             else:
@@ -5511,22 +5559,27 @@ async def _on_message_impl(message: discord.Message):
             return
         tratado = await processar_ordem(message)
         if not tratado and mencionado:
-            # Só interpreta como instrução quando há intenção clara de ação
-            if _tem_intencao_de_acao(conteudo):
-                intencao_ia = await _ia_parsear_instrucao(conteudo, message.guild)
-                if intencao_ia:
-                    log.info(f"[SUP] IA interpretou: {intencao_ia.get('acao')}")
-                    tratado_ia = await _ia_executar(intencao_ia, message, message.guild)
-                    if tratado_ia:
+            _tp, _tt = await _iniciar_typing_antes(message.channel)
+            try:
+                if _tem_intencao_de_acao(conteudo):
+                    intencao_ia = await _ia_parsear_instrucao(conteudo, message.guild)
+                    if intencao_ia:
+                        log.info(f"[SUP] IA interpretou: {intencao_ia.get('acao')}")
+                        await _parar_typing(_tp, _tt)
+                        tratado_ia = await _ia_executar(intencao_ia, message, message.guild)
+                        if tratado_ia:
+                            return
+                        _tp, _tt = await _iniciar_typing_antes(message.channel)
+                estado_conv = conversas.get(user_id)
+                if estado_conv and (estado_conv.get("canal") is None or estado_conv["canal"] == message.channel.id):
+                    resp_conv = await continuar_conversa(user_id, conteudo, autor, message.guild)
+                    if resp_conv:
+                        await _parar_typing(_tp, _tt)
+                        await _digitar_e_enviar(message.channel, resp_conv, message)
                         return
-            # Continua conversa ativa antes de cair em resposta_inicial_superior
-            estado_conv = conversas.get(user_id)
-            if estado_conv and (estado_conv.get("canal") is None or estado_conv["canal"] == message.channel.id):
-                resp_conv = await continuar_conversa(user_id, conteudo, autor, message.guild)
-                if resp_conv:
-                    await _digitar_e_enviar(message.channel, resp_conv, message)
-                    return
-            resposta = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
+                resposta = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
+            finally:
+                await _parar_typing(_tp, _tt)
             await _digitar_e_enviar(message.channel, resposta, message)
         elif not tratado:
             await processar_links(message)
@@ -5536,7 +5589,11 @@ async def _on_message_impl(message: discord.Message):
     if _eh_mod_:
         tratado = await processar_ordem_mod(message)
         if not tratado and mencionado:
-            resposta = await resposta_inicial(conteudo, autor, user_id, message.guild, message.author, message.channel.id)
+            _tp, _tt = await _iniciar_typing_antes(message.channel)
+            try:
+                resposta = await resposta_inicial(conteudo, autor, user_id, message.guild, message.author, message.channel.id)
+            finally:
+                await _parar_typing(_tp, _tt)
             await _digitar_e_enviar(message.channel, resposta, message)
         return  # mods nunca são punidos
 
@@ -5646,7 +5703,11 @@ async def _on_message_impl(message: discord.Message):
     if estado_conv and client.user not in message.mentions:
         canal_conv = estado_conv.get("canal")
         if canal_conv is None or canal_conv == message.channel.id:
-            resposta = await continuar_conversa(user_id, conteudo, autor, message.guild)
+            _tp, _tt = await _iniciar_typing_antes(message.channel)
+            try:
+                resposta = await continuar_conversa(user_id, conteudo, autor, message.guild)
+            finally:
+                await _parar_typing(_tp, _tt)
             if resposta:
                 log.info(f"Conversa: {autor}: {conteudo}")
                 await _digitar_e_enviar(message.channel, resposta, message)
@@ -5666,7 +5727,11 @@ async def _on_message_impl(message: discord.Message):
                     if resp_direta:
                         await message.reply(resp_direta)
                         return
-                resposta = await responder_com_groq(conteudo, autor, user_id, message.guild, message.channel.id)
+                _tp, _tt = await _iniciar_typing_antes(message.channel)
+                try:
+                    resposta = await responder_com_groq(conteudo, autor, user_id, message.guild, message.channel.id)
+                finally:
+                    await _parar_typing(_tp, _tt)
                 log.info(f"Claude cont: {autor}: {conteudo}")
                 await _digitar_e_enviar(message.channel, resposta, message)
                 return
@@ -5692,7 +5757,11 @@ async def _on_message_impl(message: discord.Message):
                     await message.reply(mensagem_ausencia(estado, autor))
                     return
 
-        resposta = await resposta_inicial(conteudo, autor, user_id, message.guild, message.author, message.channel.id)
+        _tp, _tt = await _iniciar_typing_antes(message.channel)
+        try:
+            resposta = await resposta_inicial(conteudo, autor, user_id, message.guild, message.author, message.channel.id)
+        finally:
+            await _parar_typing(_tp, _tt)
         log.info(f"Menção de {autor}: {conteudo[:80]}")
         await _digitar_e_enviar(message.channel, resposta, message)
         log.info(f"Respondido: {autor}")
