@@ -52,11 +52,7 @@ CANAL_AUDITORIA_ID = 1490180079899115591
 # Coloque sua chave aqui: https://www.virustotal.com/gui/my-apikey
 VIRUSTOTAL_API_KEY = "SUA_CHAVE_AQUI"
 
-_intents = discord.Intents.default()
-_intents.message_content = True
-_intents.members = True
-_intents.presences = False
-client = discord.Client(intents=_intents)
+client = discord.Client()
 
 _bot_inicio: datetime = datetime.now(timezone.utc)  # timestamp de início do processo
 
