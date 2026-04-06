@@ -1258,9 +1258,11 @@ async def _detectar_intencao(conteudo: str, guild=None) -> dict:
         return {"intent": "nao_reconhecido"}
     try:
         system = _SYSTEM_INTENT
-        if guild:
+        if _contexto_servidor:
+            system += f"\n\n=== ESTRUTURA REAL DO SERVIDOR ===\n{_contexto_servidor[:3000]}\nUse essa estrutura para entender nomes de cargos, membros e canais ao classificar a intenção."
+        elif guild:
             nomes_cargos = [r.name for r in guild.roles if r.name != "@everyone"]
-            system += f"\nCargos existentes no servidor: {', '.join(nomes_cargos)}\nUse esses nomes como referência ao extrair o campo 'nome' em cargo_por_nome."
+            system += f"\nCargos existentes no servidor: {', '.join(nomes_cargos)}"
         resp = await _groq_client().chat.completions.create(
             model="llama-3.1-8b-instant",
             max_tokens=80,
