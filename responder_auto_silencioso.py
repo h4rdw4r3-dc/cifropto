@@ -453,29 +453,101 @@ def tem_permissao_moderacao(guild: discord.Guild) -> bool:
 
 def eh_autorizado(member: discord.Member) -> bool:
     """Retorna True se o membro é dono, superior ou pertence à equipe de moderação."""
-    if member.id in DONOS_IDS or member.id in CONTAS_TESTE:
+    if member.id in DONOS_IDS or member.id in _contas_teste_ids():
         return True
-    if member.id in USUARIOS_SUPERIORES_IDS:
+    if member.id in _usuarios_superiores_ids():
         return True
-    return any(cargo.id in CARGOS_SUPERIORES_IDS or cargo.id == CARGO_EQUIPE_MOD_ID for cargo in member.roles)
+    _sup = _cargos_superiores_ids()
+    _mod = _cargo_mod_id()
+    return any(cargo.id in _sup or cargo.id == _mod for cargo in member.roles)
 
 
 def eh_superior(member: discord.Member) -> bool:
     """Retorna True se o membro é dono ou tem cargo superior (pode dar ordens gerais ao bot)."""
-    if member.id in DONOS_IDS or member.id in USUARIOS_SUPERIORES_IDS:
+    if member.id in DONOS_IDS or member.id in _usuarios_superiores_ids():
         return True
-    return any(cargo.id in CARGOS_SUPERIORES_IDS for cargo in member.roles)
+    _sup = _cargos_superiores_ids()
+    return any(cargo.id in _sup for cargo in member.roles)
 
 
 def eh_mod_exclusivo(member: discord.Member) -> bool:
     """Retorna True se membro tem cargo de moderação (mas não é superior nem dono)."""
-    if member.id in DONOS_IDS or member.id in USUARIOS_SUPERIORES_IDS:
+    if member.id in DONOS_IDS or member.id in _usuarios_superiores_ids():
         return False
-    if any(cargo.id in CARGOS_SUPERIORES_IDS for cargo in member.roles):
+    _sup = _cargos_superiores_ids()
+    if any(cargo.id in _sup for cargo in member.roles):
         return False
-    return any(cargo.id == CARGO_EQUIPE_MOD_ID for cargo in member.roles)
+    return any(cargo.id == _cargo_mod_id() for cargo in member.roles)
 
 DADOS_PATH = "dados.json"
+CONFIG_PATH = "config.json"
+
+# ── Configuração dinâmica ─────────────────────────────────────────────────────
+# Valores iniciais = defaults hardcoded; sobrescritos pelo config.json em disco.
+_cfg: dict = {}
+
+_CFG_DEFAULTS: dict = {
+    "canal_auditoria_id":      CANAL_AUDITORIA_ID,
+    "canal_regras_id":         CANAL_REGRAS_ID,
+    "canal_bem_vindo_id":      None,
+    "canal_logs_id":           None,
+    "cargo_mod_id":            CARGO_EQUIPE_MOD_ID,
+    "cargos_superiores_ids":   list(CARGOS_SUPERIORES_IDS),
+    "usuarios_superiores_ids": list(USUARIOS_SUPERIORES_IDS),
+    "contas_teste_ids":        [],
+}
+
+def cfg(chave: str):
+    """Lê valor de configuração com fallback ao default."""
+    return _cfg.get(chave, _CFG_DEFAULTS.get(chave))
+
+def carregar_config():
+    global _cfg
+    if not os.path.exists(CONFIG_PATH):
+        _cfg = dict(_CFG_DEFAULTS)
+        return
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            dados = json.load(f)
+        _cfg = {**_CFG_DEFAULTS, **dados}
+        log.info(f"[CONFIG] Carregado: {list(_cfg.keys())}")
+    except Exception as e:
+        _cfg = dict(_CFG_DEFAULTS)
+        log.error(f"[CONFIG] Erro ao carregar: {e}")
+
+def salvar_config():
+    try:
+        import tempfile
+        dir_ = os.path.dirname(os.path.abspath(CONFIG_PATH)) or "."
+        fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(_cfg, f, indent=2)
+            os.replace(tmp, CONFIG_PATH)
+        except Exception:
+            os.unlink(tmp)
+            raise
+    except Exception as e:
+        log.error(f"[CONFIG] Erro ao salvar: {e}")
+
+# Aliases para compatibilidade retroativa — lidos dinamicamente
+def _canal_auditoria_id() -> int:
+    return cfg("canal_auditoria_id") or CANAL_AUDITORIA_ID
+
+def _canal_regras_id() -> int:
+    return cfg("canal_regras_id") or CANAL_REGRAS_ID
+
+def _cargo_mod_id() -> int:
+    return cfg("cargo_mod_id") or CARGO_EQUIPE_MOD_ID
+
+def _cargos_superiores_ids() -> set:
+    return set(cfg("cargos_superiores_ids") or CARGOS_SUPERIORES_IDS)
+
+def _usuarios_superiores_ids() -> set:
+    return set(cfg("usuarios_superiores_ids") or USUARIOS_SUPERIORES_IDS)
+
+def _contas_teste_ids() -> set:
+    return set(cfg("contas_teste_ids") or [])
 
 # Palavras customizadas adicionadas pelos donos em tempo real
 palavras_custom: dict[str, list[str]] = {
@@ -673,7 +745,10 @@ _GATILHO_NEGATIVO = re.compile(
 )
 
 CANAL_REGRAS_ID = 1487599083869704326
-CANAL_REGRAS = f"<#{CANAL_REGRAS_ID}>"
+def _canal_regras_mention() -> str:
+    return f"<#{_canal_regras_id()}>"
+
+CANAL_REGRAS = _canal_regras_mention  # callable — use CANAL_REGRAS() nos f-strings
 
 REGRAS = f"""**REGRAS GERAIS**
 1. Respeite os membros.
@@ -692,7 +767,7 @@ REGRAS = f"""**REGRAS GERAIS**
 1. Siga os termos do Discord.
 2. Siga as diretrizes do Discord.
 
-Regras completas em {CANAL_REGRAS}."""
+Regras completas em {CANAL_REGRAS()}."""
 
 # ── Cache de notícias ─────────────────────────────────────────────────────────
 _cache_noticias: list[dict] = []       # [{titulo, link, fonte}]
@@ -1402,14 +1477,14 @@ def detectar_violacoes(mensagem: str) -> list[tuple[str, str]]:
             else contem_fuzzy(msg_norm, palavra)
         )
         if hit:
-            violacoes.append((f"vocabulário vulgar, regra número 5 dos canais em {CANAL_REGRAS}", palavra))
+            violacoes.append((f"vocabulário vulgar, regra número 5 dos canais em {CANAL_REGRAS()}", palavra))
             break
 
     # Palavrões compostos + customizados compostos
     if not violacoes:
         for sub in COMPOSTOS_VULGARES + palavras_custom["compostos"]:
             if normalizar(sub) in msg_norm:
-                violacoes.append((f"vocabulário vulgar, regra número 5 dos canais em {CANAL_REGRAS}", sub))
+                violacoes.append((f"vocabulário vulgar, regra número 5 dos canais em {CANAL_REGRAS()}", sub))
                 break
 
     # Conteúdo sexual: sempre proibido
@@ -1423,19 +1498,19 @@ def detectar_violacoes(mensagem: str) -> list[tuple[str, str]]:
         if hit and termo in AMBIGUAS and _CONTEXTO_LEGIT.search(texto_limpo):
             hit = False
         if hit:
-            violacoes.append((f"conteúdo adulto ou explícito, regra número 2 dos canais em {CANAL_REGRAS}", termo))
+            violacoes.append((f"conteúdo adulto ou explícito, regra número 2 dos canais em {CANAL_REGRAS()}", termo))
             break
 
     # Discriminação: tolerância estrita + customizadas
     for termo in DISCRIMINACAO + palavras_custom["discriminacao"]:
         if contem_fuzzy_estrito(msg_norm, termo):
-            violacoes.append((f"discriminação ou bullying, regra número 4 dos canais em {CANAL_REGRAS}", termo))
+            violacoes.append((f"discriminação ou bullying, regra número 4 dos canais em {CANAL_REGRAS()}", termo))
             break
 
     # Convites não autorizados
     if DISCORD_INVITE.search(mensagem):
         m = DISCORD_INVITE.search(mensagem)
-        violacoes.append((f"divulgação de servidor sem permissão, regra número 3 dos canais em {CANAL_REGRAS}", m.group(0)))
+        violacoes.append((f"divulgação de servidor sem permissão, regra número 3 dos canais em {CANAL_REGRAS()}", m.group(0)))
 
     return violacoes
 
@@ -1544,9 +1619,9 @@ async def processar_links(message: discord.Message):
 
 async def enviar_auditoria(guild: discord.Guild, membro: discord.Member, violacoes: list[str], msg_id: int):
     """Envia log da ofensa apagada para o canal de auditoria como arquivo .txt."""
-    canal_audit = guild.get_channel(CANAL_AUDITORIA_ID)
+    canal_audit = guild.get_channel(_canal_auditoria_id())
     if not canal_audit:
-        log.error(f"Canal de auditoria {CANAL_AUDITORIA_ID} não encontrado.")
+        log.error(f"Canal de auditoria {_canal_auditoria_id()} não encontrado.")
         return
 
     brasilia = timezone(timedelta(hours=-3))
@@ -2440,13 +2515,13 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     # Nível hierárquico
     if user_id in DONOS_IDS:
         nivel = "DONO"
-    elif user_id in USUARIOS_SUPERIORES_IDS:
+    elif user_id in _usuarios_superiores_ids():
         nivel = "SUPERIOR"
     elif guild:
         _m = guild.get_member(user_id)
-        if _m and any(c.id in CARGOS_SUPERIORES_IDS for c in _m.roles):
+        if _m and any(c.id in _cargos_superiores_ids() for c in _m.roles):
             nivel = "SUPERIOR"
-        elif _m and any(c.id == CARGO_EQUIPE_MOD_ID for c in _m.roles):
+        elif _m and any(c.id == _cargo_mod_id() for c in _m.roles):
             nivel = "MOD"
         else:
             nivel = "MEMBRO"
@@ -2764,7 +2839,7 @@ def mensagem_ausencia(estado: dict, mencionador: str) -> str:
 
 
 def mencao_mod(guild: discord.Guild) -> str:
-    cargo = guild.get_role(CARGO_EQUIPE_MOD_ID)
+    cargo = guild.get_role(_cargo_mod_id())
     return cargo.mention if cargo else "@moderacao"
 
 
@@ -4095,6 +4170,159 @@ async def processar_ordem(message: discord.Message) -> bool:
             await message.channel.send("Nao consegui falar. Verifique se o FFmpeg esta instalado no servidor.")
         return True
 
+    # ── configuração dinâmica ─────────────────────────────────────────────────
+    # Somente donos absolutos podem alterar configurações
+    elif _addr and re.search(r'\b(config(?:ura(?:r|cao|ção)?)?|defin[ei][r]?|set[a]?)\b', conteudo.lower()):
+        if message.author.id not in DONOS_ABSOLUTOS_IDS:
+            await message.channel.send("Apenas donos absolutos podem alterar configurações.")
+            return True
+
+        _cfg_msg = conteudo.lower()
+
+        # ── mostrar config ────────────────────────────────────────────────────
+        if re.search(r'\b(mostr[ae][r]?|ver?|list[ae][r]?|atual|config(?:urações?)?)\b', _cfg_msg) and not re.search(r'\b(define|set|configura[r]?)\b', _cfg_msg):
+            linhas = ["**Configurações atuais:**"]
+            _nomes = {
+                "canal_auditoria_id":      "Canal de auditoria",
+                "canal_regras_id":         "Canal de regras",
+                "canal_bem_vindo_id":      "Canal de boas-vindas",
+                "canal_logs_id":           "Canal de logs",
+                "cargo_mod_id":            "Cargo de moderação",
+                "cargos_superiores_ids":   "Cargos superiores",
+                "usuarios_superiores_ids": "Usuarios superiores",
+                "contas_teste_ids":        "Contas de teste",
+            }
+            for chave, nome in _nomes.items():
+                val = cfg(chave)
+                if isinstance(val, list):
+                    val_str = ", ".join(f"<@&{v}>" if "cargo" in chave else f"<@{v}>" for v in val) if val else "nenhum"
+                elif val and "canal" in chave:
+                    val_str = f"<#{val}>"
+                elif val and "cargo" in chave:
+                    val_str = f"<@&{val}>"
+                elif val and "usuario" in chave or val and "conta" in chave:
+                    val_str = f"<@{val}>"
+                else:
+                    val_str = str(val) if val else "não definido"
+                linhas.append(f"**{nome}:** {val_str}")
+            await message.channel.send("\n".join(linhas))
+            return True
+
+        # ── definir canal ─────────────────────────────────────────────────────
+        _m_canal = re.search(r'\bcanal\s+(de\s+)?(auditoria|regras?|boas.?vindas?|bem.?vindo|logs?)', _cfg_msg)
+        if _m_canal and message.channel_mentions:
+            _tipo_canal = _m_canal.group(2).lower().replace(" ", "").replace("-", "")
+            _chave_canal = {
+                "auditoria": "canal_auditoria_id",
+                "regras":    "canal_regras_id",
+                "regra":     "canal_regras_id",
+                "boasvindas":"canal_bem_vindo_id",
+                "bemvindo":  "canal_bem_vindo_id",
+                "logs":      "canal_logs_id",
+                "log":       "canal_logs_id",
+            }.get(_tipo_canal)
+            if _chave_canal:
+                _canal_novo = message.channel_mentions[0]
+                _cfg[_chave_canal] = _canal_novo.id
+                salvar_config()
+                await message.channel.send(f"Canal de {_m_canal.group(2)} definido como {_canal_novo.mention}.")
+                return True
+
+        # ── definir cargo ─────────────────────────────────────────────────────
+        _m_cargo_tipo = re.search(r'\bcargo\s+(de\s+)?(mod(?:eração?|eracao?)?|superior)', _cfg_msg)
+        if _m_cargo_tipo and message.role_mentions:
+            _tipo_cargo = _m_cargo_tipo.group(2).lower()
+            _cargo_novo = message.role_mentions[0]
+            if "mod" in _tipo_cargo:
+                _cfg["cargo_mod_id"] = _cargo_novo.id
+                salvar_config()
+                await message.channel.send(f"Cargo de moderação definido como {_cargo_novo.mention}.")
+            elif "superior" in _tipo_cargo:
+                _lista = _cfg.get("cargos_superiores_ids", list(CARGOS_SUPERIORES_IDS))
+                if _cargo_novo.id not in _lista:
+                    _lista.append(_cargo_novo.id)
+                    _cfg["cargos_superiores_ids"] = _lista
+                    salvar_config()
+                    await message.channel.send(f"Cargo {_cargo_novo.mention} adicionado aos superiores.")
+                else:
+                    await message.channel.send(f"Cargo {_cargo_novo.mention} ja esta na lista de superiores.")
+            return True
+
+        # ── remover cargo superior ────────────────────────────────────────────
+        if re.search(r'\b(remov[ae][r]?|tira[r]?)\b.*\bcargo\s+superior\b', _cfg_msg) and message.role_mentions:
+            _cargo_rm = message.role_mentions[0]
+            _lista = _cfg.get("cargos_superiores_ids", list(CARGOS_SUPERIORES_IDS))
+            if _cargo_rm.id in _lista:
+                _lista.remove(_cargo_rm.id)
+                _cfg["cargos_superiores_ids"] = _lista
+                salvar_config()
+                await message.channel.send(f"Cargo {_cargo_rm.mention} removido dos superiores.")
+            else:
+                await message.channel.send(f"Cargo {_cargo_rm.mention} nao estava na lista.")
+            return True
+
+        # ── adicionar/remover usuário superior ────────────────────────────────
+        _add_sup = re.search(r'\b(add|adicion[ae][r]?)\b.*\busuario\s+superior\b', _cfg_msg)
+        _rm_sup = re.search(r'\b(remov[ae][r]?|tira[r]?)\b.*\busuario\s+superior\b', _cfg_msg)
+        if (_add_sup or _rm_sup) and message.mentions:
+            _user_cfg = [m for m in message.mentions if m != client.user][0] if message.mentions else None
+            if _user_cfg:
+                _lista_u = _cfg.get("usuarios_superiores_ids", list(USUARIOS_SUPERIORES_IDS))
+                if _add_sup:
+                    if _user_cfg.id not in _lista_u:
+                        _lista_u.append(_user_cfg.id)
+                        _cfg["usuarios_superiores_ids"] = _lista_u
+                        salvar_config()
+                        await message.channel.send(f"{_user_cfg.mention} adicionado como usuario superior.")
+                    else:
+                        await message.channel.send(f"{_user_cfg.mention} ja e superior.")
+                else:
+                    if _user_cfg.id in _lista_u:
+                        _lista_u.remove(_user_cfg.id)
+                        _cfg["usuarios_superiores_ids"] = _lista_u
+                        salvar_config()
+                        await message.channel.send(f"{_user_cfg.mention} removido dos superiores.")
+                    else:
+                        await message.channel.send(f"{_user_cfg.mention} nao estava na lista.")
+            return True
+
+        # ── adicionar/remover conta de teste ──────────────────────────────────
+        _add_teste = re.search(r'\b(add|adicion[ae][r]?)\b.*\bteste\b', _cfg_msg)
+        _rm_teste = re.search(r'\b(remov[ae][r]?|tira[r]?)\b.*\bteste\b', _cfg_msg)
+        if (_add_teste or _rm_teste) and message.mentions:
+            _user_t = [m for m in message.mentions if m != client.user][0] if message.mentions else None
+            if _user_t:
+                _lista_t = _cfg.get("contas_teste_ids", [])
+                if _add_teste:
+                    if _user_t.id not in _lista_t:
+                        _lista_t.append(_user_t.id)
+                        _cfg["contas_teste_ids"] = _lista_t
+                        salvar_config()
+                        await message.channel.send(f"{_user_t.mention} adicionado como conta de teste.")
+                    else:
+                        await message.channel.send(f"{_user_t.mention} ja esta na lista.")
+                else:
+                    if _user_t.id in _lista_t:
+                        _lista_t.remove(_user_t.id)
+                        _cfg["contas_teste_ids"] = _lista_t
+                        salvar_config()
+                        await message.channel.send(f"{_user_t.mention} removido das contas de teste.")
+                    else:
+                        await message.channel.send(f"{_user_t.mention} nao estava na lista.")
+            return True
+
+        await message.channel.send(
+            "Nao entendi o que configurar. Exemplos:\n"
+            "- `Shell configura canal de auditoria #canal`\n"
+            "- `Shell configura canal de regras #canal`\n"
+            "- `Shell configura cargo de mod @cargo`\n"
+            "- `Shell configura cargo superior @cargo`\n"
+            "- `Shell remove cargo superior @cargo`\n"
+            "- `Shell adiciona usuario superior @user`\n"
+            "- `Shell mostra config`"
+        )
+        return True
+
     # ── traduzir mensagem ─────────────────────────────────────────────────────
     # Uso: "Shell traduz isso para inglês" (reply na mensagem), "Shell traduz: texto"
     elif _addr and re.search(r'\btraduz[ir]?\b|\btranslat[e]?\b', conteudo.lower()):
@@ -4313,9 +4541,9 @@ async def resposta_inicial_superior(conteudo: str, autor: str, user_id: int, gui
 
         if alvos:
             nomes = " ".join(m.mention for m in alvos[:5])
-            texto_bv = f"Sejam bem-vindos ao servidor {nomes}. Leiam as regras em {CANAL_REGRAS} e bom aprendizado."
+            texto_bv = f"Sejam bem-vindos ao servidor {nomes}. Leiam as regras em {CANAL_REGRAS()} e bom aprendizado."
         else:
-            texto_bv = f"Bem-vindos ao servidor. Leiam as regras em {CANAL_REGRAS} e aproveitem."
+            texto_bv = f"Bem-vindos ao servidor. Leiam as regras em {CANAL_REGRAS()} e aproveitem."
 
         # Se o superior especificou um canal diferente do atual, envia lá
         if canal_alvo and message and canal_alvo.id != message.channel.id:
@@ -5047,7 +5275,7 @@ async def _task_relatorio_semanal():
         guild = client.get_guild(SERVIDOR_ID)
         if not guild:
             continue
-        canal = guild.get_channel(CANAL_AUDITORIA_ID)
+        canal = guild.get_channel(_canal_auditoria_id())
         if not canal:
             continue
         try:
@@ -5176,6 +5404,7 @@ async def _conectar_voz(canal: discord.VoiceChannel) -> tuple:
 
 @client.event
 async def on_ready():
+    carregar_config()
     carregar_dados()
     print(f"Conectado como {client.user}")
     guild = client.get_guild(SERVIDOR_ID)
@@ -5232,7 +5461,7 @@ async def on_member_join(member: discord.Member):
     conta_nova = idade_conta.days < 7
     vezes = len(registro_entradas[member.id])
 
-    canal_audit = member.guild.get_channel(CANAL_AUDITORIA_ID)
+    canal_audit = member.guild.get_channel(_canal_auditoria_id())
     if canal_audit:
         aviso = " | CONTA NOVA" if conta_nova else ""
         reentrada = f" | Reentrada n.{vezes}" if vezes > 1 else ""
@@ -5250,9 +5479,9 @@ async def on_member_join(member: discord.Member):
         if vezes > 1:
             bv = f"Eae {member.mention}, voltou por aqui. Seja bem-vindo de volta."
         elif conta_nova:
-            bv = f"Eae {member.mention}, conta nova em folha. Leia as regras em {CANAL_REGRAS} antes de qualquer coisa."
+            bv = f"Eae {member.mention}, conta nova em folha. Leia as regras em {CANAL_REGRAS()} antes de qualquer coisa."
         else:
-            bv = f"Eae {member.mention}, bem-vindo ao servidor. Leia as regras em {CANAL_REGRAS} e aproveita."
+            bv = f"Eae {member.mention}, bem-vindo ao servidor. Leia as regras em {CANAL_REGRAS()} e aproveita."
         try:
             await canal_geral.send(bv)
         except Exception:
@@ -5274,7 +5503,7 @@ async def on_member_join(member: discord.Member):
             1 for m in member.guild.members
             if not m.bot and (agora - m.created_at.replace(tzinfo=timezone.utc)).days < RAID_CONTA_NOVA_DIAS
         )
-        canal_audit = member.guild.get_channel(CANAL_AUDITORIA_ID)
+        canal_audit = member.guild.get_channel(_canal_auditoria_id())
         if canal_audit:
             mod = mencao_mod(member.guild)
             await canal_audit.send(
@@ -5312,7 +5541,7 @@ async def on_member_remove(member: discord.Member):
     nomes_historico[member.id] = member.display_name
     salvar_dados()
 
-    canal_audit = member.guild.get_channel(CANAL_AUDITORIA_ID)
+    canal_audit = member.guild.get_channel(_canal_auditoria_id())
     if canal_audit:
         await canal_audit.send(
             f"[SAÍDA] {member.display_name} ({member.id}) saiu. "
@@ -5342,7 +5571,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         return
 
     # Notifica no canal de auditoria quando membros entram/saem
-    canal_audit = member.guild.get_channel(CANAL_AUDITORIA_ID)
+    canal_audit = member.guild.get_channel(_canal_auditoria_id())
     if not canal_audit:
         return
 
@@ -5385,7 +5614,7 @@ async def on_reaction_add(reaction: discord.Reaction, user):
             try:
                 await reaction.message.channel.send(
                     f"{membro.mention}, emojis com esse nome não são permitidos aqui. "
-                    f"Leia as regras em {CANAL_REGRAS}."
+                    f"Leia as regras em {CANAL_REGRAS()}."
                 )
             except Exception:
                 pass
@@ -5451,7 +5680,7 @@ async def _on_message_impl(message: discord.Message):
     _eh_dono = message.author.id in DONOS_IDS
     _eh_superior_ = eh_superior(message.author)   # donos + cargos superiores
     _eh_mod_ = eh_mod_exclusivo(message.author)    # só moderação (não superiores)
-    eh_teste = message.author.id in CONTAS_TESTE
+    eh_teste = message.author.id in _contas_teste_ids()
 
     # ── Verificar menção/gatilho ───────────────────────────────────────────────
     ids_mencionados = {m.id for m in message.mentions} | {
@@ -5600,7 +5829,7 @@ async def _on_message_impl(message: discord.Message):
     # ── Detectar flood (membros comuns) ───────────────────────────────────────
     if detectar_flood(message.author.id, conteudo):
         await message.channel.send(
-            f"Ei {message.author.mention}, para com o spam! Regra número 1 dos canais em {CANAL_REGRAS}."
+            f"Ei {message.author.mention}, para com o spam! Regra número 1 dos canais em {CANAL_REGRAS()}."
         )
         log.warning(f"Flood detectado: {autor}")
         return
@@ -5667,7 +5896,7 @@ async def _on_message_impl(message: discord.Message):
                     num_m = re.search(r'número (\d+)', partes[1]) if len(partes) > 1 else None
                     num = num_m.group(1) if num_m else "?"
                     itens.append(f"{partes[0]} (regra número {num})")
-                corpo = f"por se referir de {' e '.join(itens)}, conforme os termos em {CANAL_REGRAS}"
+                corpo = f"por se referir de {' e '.join(itens)}, conforme os termos em {CANAL_REGRAS()}"
 
             await message.channel.send(
                 f"Ei {message.author.mention}, sua mensagem foi removida {corpo}. "
