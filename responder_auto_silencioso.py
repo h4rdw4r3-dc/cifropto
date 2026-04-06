@@ -122,19 +122,60 @@ def _svc_drive():
 def _google_ok() -> bool:
     return GOOGLE_DISPONIVEL and bool(GOOGLE_CREDENTIALS_JSON) and _google_creds() is not None
 
-def _mover_para_pasta(drive, file_id: str):
-    """Move arquivo para GDRIVE_FOLDER_ID se definido."""
+# Cache de subpastas já criadas: nome → folder_id
+_gdrive_subpastas: dict[str, str] = {}
+
+def _obter_ou_criar_subpasta(drive, nome: str, parent_id: str) -> str:
+    """
+    Retorna o ID de uma subpasta dentro de parent_id, criando-a se não existir.
+    Usa cache em memória para evitar buscas repetidas.
+    """
+    if nome in _gdrive_subpastas:
+        return _gdrive_subpastas[nome]
+    # Busca existente
+    query = (
+        f"name='{nome}' and mimeType='application/vnd.google-apps.folder'"
+        f" and '{parent_id}' in parents and trashed=false"
+    )
+    resultado = drive.files().list(q=query, fields="files(id,name)").execute()
+    arquivos = resultado.get("files", [])
+    if arquivos:
+        fid = arquivos[0]["id"]
+    else:
+        pasta = drive.files().create(
+            body={
+                "name": nome,
+                "mimeType": "application/vnd.google-apps.folder",
+                "parents": [parent_id],
+            },
+            fields="id"
+        ).execute()
+        fid = pasta["id"]
+    _gdrive_subpastas[nome] = fid
+    return fid
+
+def _mover_para_subpasta(drive, file_id: str, subfolder_name: str):
+    """
+    Move arquivo para subpasta dentro de GDRIVE_FOLDER_ID.
+    Estrutura: Shell Bot/ → PDFs/ | Docs/ | Planilhas/
+    Cria a subpasta automaticamente se não existir.
+    """
     if not GDRIVE_FOLDER_ID:
         return
     try:
+        subfolder_id = _obter_ou_criar_subpasta(drive, subfolder_name, GDRIVE_FOLDER_ID)
         f = drive.files().get(fileId=file_id, fields="parents").execute()
         prev = ",".join(f.get("parents", []))
         drive.files().update(
-            fileId=file_id, addParents=GDRIVE_FOLDER_ID,
+            fileId=file_id, addParents=subfolder_id,
             removeParents=prev, fields="id,parents"
         ).execute()
     except Exception as e:
-        log.warning(f"[GOOGLE] mover pasta: {e}")
+        log.warning(f"[GOOGLE] mover subpasta '{subfolder_name}': {e}")
+
+# Mantém _mover_para_pasta para compatibilidade
+def _mover_para_pasta(drive, file_id: str):
+    _mover_para_subpasta(drive, file_id, "Geral")
 
 def _tornar_publico(drive, file_id: str):
     """Concede leitura pública ao arquivo."""
@@ -3649,71 +3690,88 @@ async def processar_ordem(message: discord.Message) -> bool:
         if canal_rel.id != message.channel.id:
             await message.channel.send(f"Relatório {tipo_txt} postado em {canal_rel.mention}.")
 
-    # ── Google Docs ────────────────────────────────────────────────────────────
-    elif _addr and re.search(r'\b(doc|documento|google\s*doc)\b', conteudo.lower()) and re.search(r'\b(cria[r]?|gera[r]?|abre[r]?|manda[r]?|faz)\b', conteudo.lower()):
-        if not _google_ok():
-            await message.channel.send(
-                "Google API não configurada. Configure `GOOGLE_CREDENTIALS_JSON` no Railway."
-            )
-            return True
+    # ── gerar documento de texto (.txt) ───────────────────────────────────────
+    elif _addr and re.search(r'\b(doc|documento)\b', conteudo.lower()) and re.search(r'\b(cria[r]?|gera[r]?|manda[r]?|faz|exporta[r]?)\b', conteudo.lower()):
         msg_l = conteudo.lower()
         _nome_doc = message.author.display_name
+        brasilia = timezone(timedelta(hours=-3))
 
-        async def _exec_gdoc():
+        async def _exec_doc():
             if re.search(r'\bhist[oó]rico\b|\bcanal\b|\bmensagens?\b', msg_l):
                 canal_exp = message.channel_mentions[0] if message.channel_mentions else message.channel
-                await message.channel.send(f"Criando documento no Google Docs, aguarde...")
-                url = await gdoc_historico_canal(canal_exp, 200)
-                await message.channel.send(f"Historico de {canal_exp.mention} no Google Docs: {url}")
+                linhas = [f"Historico de #{canal_exp.name}\n"
+                          f"Exportado em {datetime.now(brasilia).strftime('%d/%m/%Y %H:%M')}\n\n"]
+                async for msg in canal_exp.history(limit=200, oldest_first=True):
+                    ts = msg.created_at.astimezone(brasilia).strftime('%d/%m %H:%M')
+                    corpo = msg.content or "[sem texto]"
+                    linhas.append(f"[{ts}] {msg.author.display_name}: {corpo[:400]}\n")
+                conteudo_doc = "".join(linhas)
+                nome_arq = f"historico-{canal_exp.name}.txt"
             elif re.search(r'\bregra[s]?\b', msg_l):
-                await message.channel.send("Criando documento no Google Docs, aguarde...")
-                url = await gdoc_regras()
-                await message.channel.send(f"Regras no Google Docs: {url}")
+                conteudo_doc = REGRAS
+                nome_arq = "regras.txt"
             else:
                 dias_doc = 30 if re.search(r'\bmensal\b|\bmes\b', msg_l) else 7
-                await message.channel.send("Criando documento no Google Docs, aguarde...")
-                url = await gdoc_relatorio(guild, dias_doc)
-                await message.channel.send(f"Relatorio no Google Docs: {url}")
-            log.info(f"[GDOC] {_nome_doc} criou documento")
+                conteudo_doc = await relatorio_membros(guild, dias_doc)
+                conteudo_doc = (f"Servidor: {guild.name}\n"
+                                f"Data: {datetime.now(brasilia).strftime('%d/%m/%Y %H:%M')}\n\n"
+                                + conteudo_doc)
+                nome_arq = f"relatorio-{'mensal' if dias_doc >= 28 else 'semanal'}.txt"
+            arq = discord.File(io.BytesIO(conteudo_doc.encode("utf-8")), filename=nome_arq)
+            await message.channel.send("Documento gerado:", file=arq)
+            log.info(f"[DOC] {_nome_doc} gerou {nome_arq}")
 
-        tipo_gdoc = ("historico de canal" if re.search(r'\bhist[oó]rico\b|\bcanal\b', msg_l)
-                     else "regras" if re.search(r'\bregra[s]?\b', msg_l)
-                     else "relatorio semanal" if "semanal" in msg_l
-                     else "relatorio mensal" if re.search(r'\bmensal\b|\bmes\b', msg_l)
-                     else "relatorio semanal")
-        return await _solicitar_confirmacao(message, f"Google Doc de {tipo_gdoc}", _exec_gdoc)
+        tipo_doc = ("historico de canal" if re.search(r'\bhist[oó]rico\b|\bcanal\b', msg_l)
+                    else "regras" if re.search(r'\bregra[s]?\b', msg_l)
+                    else "relatorio mensal" if re.search(r'\bmensal\b|\bmes\b', msg_l)
+                    else "relatorio semanal")
+        return await _solicitar_confirmacao(message, f"documento de {tipo_doc}", _exec_doc)
 
-    # ── Google Sheets ──────────────────────────────────────────────────────────
-    elif _addr and re.search(r'\b(planilha|sheet|google\s*sheet[s]?|calc|spreadsheet)\b', conteudo.lower()) and re.search(r'\b(cria[r]?|gera[r]?|abre[r]?|manda[r]?|faz)\b', conteudo.lower()):
-        if not _google_ok():
-            await message.channel.send(
-                "Google API não configurada. Configure `GOOGLE_CREDENTIALS_JSON` no Railway."
-            )
-            return True
+    # ── gerar planilha (.csv) ─────────────────────────────────────────────────
+    elif _addr and re.search(r'\b(planilha|csv|tabela|calc)\b', conteudo.lower()) and re.search(r'\b(cria[r]?|gera[r]?|manda[r]?|faz|exporta[r]?)\b', conteudo.lower()):
         msg_l = conteudo.lower()
-        _nome_sheet = message.author.display_name
+        _nome_csv = message.author.display_name
+        brasilia = timezone(timedelta(hours=-3))
 
-        async def _exec_gsheet():
-            await message.channel.send("Criando planilha no Google Sheets, aguarde...")
-            if re.search(r'\binfra[cç][aã]o|infracoes|punicao|punicoes\b', msg_l):
-                url = await gsheet_infracoes(guild)
-                await message.channel.send(f"Planilha de infracoes: {url}")
+        async def _exec_csv():
+            import csv as _csv
+            buf = io.StringIO()
+            w = _csv.writer(buf)
+            if re.search(r'\binfra[cç][aã]o|infracoes|punicao\b', msg_l):
+                w.writerow(["Usuario", "ID", "Infracoes", "Silenciamentos", "Ultimo motivo"])
+                for uid in sorted(set(infracoes) | set(silenciamentos), key=lambda u: -infracoes.get(u, 0)):
+                    m = guild.get_member(uid)
+                    nome_m = m.display_name if m else nomes_historico.get(uid, f"ID {uid}")
+                    w.writerow([nome_m, uid, infracoes.get(uid, 0), silenciamentos.get(uid, 0), ultimo_motivo.get(uid, "")])
+                nome_arq = "infracoes.csv"
             elif re.search(r'\batividade\b|\branking\b', msg_l):
-                url = await gsheet_atividade(guild)
-                await message.channel.send(f"Planilha de atividade: {url}")
-            elif re.search(r'\bcita[cç][aã]o|citacoes\b', msg_l):
-                url = await gsheet_citacoes()
-                await message.channel.send(f"Planilha de citacoes: {url}")
+                w.writerow(["#", "Usuario", "ID", "Mensagens (sessao)"])
+                for i, (uid, cnt) in enumerate(sorted(atividade_mensagens.items(), key=lambda x: -x[1]), 1):
+                    mb = guild.get_member(uid)
+                    w.writerow([i, mb.display_name if mb else f"ID {uid}", uid, cnt])
+                nome_arq = "atividade.csv"
+            elif re.search(r'\bcita[cç][aã]o\b', msg_l):
+                w.writerow(["#", "Autor", "Canal", "Data", "Texto"])
+                for i, c in enumerate(citacoes, 1):
+                    w.writerow([i, c.get("autor",""), c.get("canal",""), c.get("ts",""), c.get("texto","")])
+                nome_arq = "citacoes.csv"
             else:
-                url = await gsheet_membros(guild)
-                await message.channel.send(f"Planilha de membros: {url}")
-            log.info(f"[GSHEET] {_nome_sheet} criou planilha")
+                w.writerow(["#", "Nome", "Apelido", "Entrou em", "Conta criada em", "Cargos", "Bot"])
+                for i, m in enumerate(sorted(guild.members, key=lambda m: m.display_name.lower()), 1):
+                    joined = m.joined_at.astimezone(brasilia).strftime('%d/%m/%Y') if m.joined_at else "?"
+                    created = m.created_at.astimezone(brasilia).strftime('%d/%m/%Y')
+                    cargos = ", ".join(r.name for r in m.roles[1:])
+                    w.writerow([i, m.name, m.display_name, joined, created, cargos, "Sim" if m.bot else "Nao"])
+                nome_arq = "membros.csv"
+            arq = discord.File(io.BytesIO(buf.getvalue().encode("utf-8-sig")), filename=nome_arq)
+            await message.channel.send("Planilha gerada:", file=arq)
+            log.info(f"[CSV] {_nome_csv} gerou {nome_arq}")
 
-        tipo_sheet = ("de infracoes" if re.search(r'\binfra[cç][aã]o|infracoes\b', msg_l)
-                      else "de atividade" if re.search(r'\batividade\b|\branking\b', msg_l)
-                      else "de citacoes" if re.search(r'\bcita[cç][aã]o\b', msg_l)
-                      else "de membros")
-        return await _solicitar_confirmacao(message, f"Google Sheet {tipo_sheet}", _exec_gsheet)
+        tipo_csv = ("de infracoes" if re.search(r'\binfra[cç][aã]o\b', msg_l)
+                    else "de atividade" if re.search(r'\batividade\b|\branking\b', msg_l)
+                    else "de citacoes" if re.search(r'\bcita[cç][aã]o\b', msg_l)
+                    else "de membros")
+        return await _solicitar_confirmacao(message, f"planilha {tipo_csv}", _exec_csv)
 
     # ── gerar PDF ─────────────────────────────────────────────────────────────
     elif _addr and re.search(r'\bpdf\b', conteudo.lower()):
