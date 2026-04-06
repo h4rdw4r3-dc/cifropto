@@ -1202,6 +1202,10 @@ _SYSTEM_INTENT = """Você é um classificador de intenção para um bot de Disco
 Dado o texto de uma mensagem, retorne APENAS um objeto JSON com a intenção detectada.
 Responda SOMENTE com JSON válido, sem texto antes ou depois, sem markdown.
 
+REGRA CRÍTICA: Se a pergunta mencionar um nome de cargo/função específico (ex: "posse", "mod", "vip", "admin"),
+use SEMPRE "cargo_por_nome" com o nome extraído — NUNCA use "membros_total" nesses casos.
+"membros_total" só se usa quando a pergunta é genérica, sem citar nenhum cargo específico.
+
 Intenções possíveis e seus campos:
 - {"intent": "uptime"}
 - {"intent": "cargo_quantidade"}
@@ -1233,19 +1237,36 @@ Intenções possíveis e seus campos:
 Para "detalhado": true quando a pergunta pede detalhes como tempo, idade da conta, etc.
 Para "cargo_por_nome": extraia apenas o nome do cargo, sem aspas, sem artigos.
 Se a mensagem não for uma pergunta sobre o servidor, retorne {"intent": "nao_reconhecido"}.
+
+EXEMPLOS (siga estes padrões):
+"quantos membros no servidor?" -> {"intent": "membros_total"}
+"quantos membros no total?" -> {"intent": "membros_total"}
+"há quantos membros na função de posse?" -> {"intent": "cargo_por_nome", "nome": "posse", "detalhado": false}
+"quantos membros no cargo vip?" -> {"intent": "cargo_por_nome", "nome": "vip", "detalhado": false}
+"a quantos membros na função de 'posse'?" -> {"intent": "cargo_por_nome", "nome": "posse", "detalhado": false}
+"membros no cargo mod" -> {"intent": "cargo_por_nome", "nome": "mod", "detalhado": false}
+"quem tem o cargo admin?" -> {"intent": "cargo_por_nome", "nome": "admin", "detalhado": false}
+"quais os cargos do servidor?" -> {"intent": "cargo_listagem"}
+"quantos cargos existem?" -> {"intent": "cargo_quantidade"}
+"info do Hardware" -> {"intent": "membro_info", "nome": "Hardware"}
+"quando o RH entrou?" -> {"intent": "membro_info", "nome": "RH"}
 """
 
-async def _detectar_intencao(conteudo: str) -> dict:
+async def _detectar_intencao(conteudo: str, guild=None) -> dict:
     """Usa a Groq para classificar a intenção da mensagem. Retorna dict com intent."""
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return {"intent": "nao_reconhecido"}
     try:
+        system = _SYSTEM_INTENT
+        if guild:
+            nomes_cargos = [r.name for r in guild.roles if r.name != "@everyone"]
+            system += f"\nCargos existentes no servidor: {', '.join(nomes_cargos)}\nUse esses nomes como referência ao extrair o campo 'nome' em cargo_por_nome."
         resp = await _groq_client().chat.completions.create(
             model="llama-3.1-8b-instant",
             max_tokens=80,
             temperature=0.0,
             messages=[
-                {"role": "system", "content": _SYSTEM_INTENT},
+                {"role": "system", "content": system},
                 {"role": "user", "content": conteudo},
             ],
         )
@@ -1273,7 +1294,7 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
         if role:
             return _role_info(role)
 
-    intent_data = await _detectar_intencao(conteudo)
+    intent_data = await _detectar_intencao(conteudo, guild)
     intent = intent_data.get("intent", "nao_reconhecido")
 
     if intent == "nao_reconhecido":
