@@ -1284,7 +1284,10 @@ async def _detectar_intencao(conteudo: str, guild=None) -> dict:
         system = _SYSTEM_INTENT
         if guild:
             ctx_classificador = build_classifier_context(guild)
-            system += f"\n\n=== ESTRUTURA DO SERVIDOR ===\n{ctx_classificador}\nUse essa estrutura para identificar nomes de cargos, membros e canais corretamente."
+            # Limita a 2000 chars para não estourar o contexto do modelo leve
+            ctx_curto = ctx_classificador[:2000]
+            system += f"\n\n=== ESTRUTURA DO SERVIDOR ===\n{ctx_curto}\nUse essa estrutura para identificar nomes de cargos, membros e canais corretamente."
+        log.info(f"[intent] classificando: {conteudo[:80]!r}")
         resp = await _groq_client().chat.completions.create(
             model="llama-3.1-8b-instant",
             max_tokens=150,
@@ -1295,13 +1298,15 @@ async def _detectar_intencao(conteudo: str, guild=None) -> dict:
             ],
         )
         texto = resp.choices[0].message.content.strip()
+        log.info(f"[intent] resposta bruta: {texto!r}")
         texto = re.sub(r"^```json|^```|```$", "", texto, flags=re.MULTILINE).strip()
-        # Garante que o JSON está fechado caso venha truncado
         if texto.startswith("{") and not texto.endswith("}"):
             texto += "}"
-        return json.loads(texto)
+        resultado = json.loads(texto)
+        log.info(f"[intent] detectado: {resultado}")
+        return resultado
     except Exception as e:
-        log.warning(f"_detectar_intencao falhou: {e}")
+        log.warning(f"[intent] falhou ({type(e).__name__}): {e}")
         return {"intent": "nao_reconhecido"}
 
 
@@ -1312,6 +1317,7 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
     """
     agora = agora_utc()
     brasilia = timezone(timedelta(hours=-3))
+    log.info(f"[query] entrada: {conteudo[:80]!r}")
 
     # ID numérico do Discord: detecta direto sem chamar a IA
     m_id = re.search(r'(\d{17,19})', conteudo)
@@ -1323,6 +1329,7 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
 
     intent_data = await _detectar_intencao(conteudo, guild)
     intent = intent_data.get("intent", "nao_reconhecido")
+    log.info(f"[query] intent={intent}")
 
     if intent == "nao_reconhecido":
         return None
