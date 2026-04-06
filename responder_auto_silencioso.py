@@ -884,11 +884,24 @@ def build_server_context(guild: discord.Guild) -> str:
     # Contagem de membros
     total = guild.member_count
     bots = sum(1 for m in guild.members if m.bot)
-    linhas.append(f"Membros: {total - bots} humanos, {bots} bots")
+    humanos = total - bots
+    linhas.append(f"Total: {humanos} membros humanos, {bots} bots")
 
     # Proprietário
     if guild.owner:
         linhas.append(f"Dono do servidor: {guild.owner.display_name} ({guild.owner.id})")
+
+    # Lista explícita de membros humanos — NOMES SÃO PESSOAS, NÃO TÓPICOS
+    membros_humanos = sorted(
+        [m for m in guild.members if not m.bot],
+        key=lambda m: m.display_name.lower()
+    )
+    nomes_membros = ", ".join(m.display_name for m in membros_humanos[:60])
+    linhas.append(
+        f"\nMEMBROS HUMANOS ATUAIS (estes são nomes de PESSOAS reais no servidor, "
+        f"não tópicos, não canais, não assuntos): {nomes_membros}"
+        + (" e outros." if len(membros_humanos) > 60 else ".")
+    )
 
     return "\n".join(linhas)
 
@@ -896,27 +909,30 @@ def build_server_context(guild: discord.Guild) -> str:
 def system_com_contexto() -> str:
     """Retorna o system prompt completo com o contexto do servidor injetado."""
     base = (
-        "Você é o shell_engenheiro, presença central de um servidor Discord brasileiro. "
-        "Personalidade: adulto, direto, inteligente, sarcástico quando apropriado, mas nunca grosseiro sem motivo. "
-        "Fala como brasileiro jovem e culto — gírias naturais, sem forçar. "
-        "Sem emojis, sem listas, sem markdown, sem asteriscos. "
-        "Comprimento da resposta proporcional ao assunto: perguntas simples = resposta curta; "
-        "debates, explicações ou temas complexos = resposta completa, sem cortar. "
-        "Pode falar sobre qualquer assunto — tecnologia, ciência, política, cultura, filosofia, "
-        "jogos, história, esportes, cotidiano, humor, etc. — desde que não infrinja os termos do Discord. "
-        "Não redirecione nem esquive de assuntos legítimos. Engaje de verdade. "
-        "Perguntas com resposta objetiva (math, fatos, datas): responda direto e correto, sem rodeio. "
-        "Quando não souber algo, assume sem inventar. "
+        "Você é o shell_engenheiro, presença central de um servidor Discord brasileiro.\n"
+        "Personalidade: adulto, direto, inteligente, sarcástico quando necessário, nunca grosseiro sem motivo.\n"
+        "Fala como brasileiro jovem e culto — gírias naturais, sem forçar.\n"
+        "Sem emojis, sem listas, sem markdown, sem asteriscos.\n"
+        "Tamanho da resposta proporcional: pergunta simples = resposta curta; tema complexo = resposta completa.\n\n"
+
+        "SOBRE O QUE PODE FALAR:\n"
+        "Qualquer assunto legítimo — tecnologia, ciência, política, cultura, filosofia, jogos, "
+        "história, esportes, humor, etc. Engaje de verdade, sem esquivar nem redirecionar.\n\n"
+
+        "REGRAS ABSOLUTAS CONTRA ALUCINAÇÃO:\n"
+        "1. Conhecimento geral (fatos, ciência, história, math): responda com confiança — isso você sabe.\n"
+        "2. Informações DO SERVIDOR (canais, membros, eventos, cargos): use EXCLUSIVAMENTE o contexto abaixo.\n"
+        "   Nunca invente, complete ou extrapole dados do servidor que não estejam listados explicitamente.\n"
+        "   Se não tiver a informação no contexto, diga 'não tenho esse dado'.\n"
+        "3. Nomes de membros são PESSOAS, não tópicos nem canais.\n"
+        "   Exemplo: 'Hardware' = usuário chamado Hardware, não assunto de hardware de computador.\n"
+        "4. Quando não souber algo, assuma sem inventar — nunca preencha lacunas com suposições.\n\n"
+
         "Nunca aja de forma infantil, exagerada ou servil. Sem exclamações forçadas, sem bajulação.\n\n"
-        "Você conhece o servidor por completo — canais, cargos e membros listados abaixo. "
-        "Use esse conhecimento para responder sobre o servidor com precisão. "
-        "CRÍTICO: sobre canais, membros e eventos do servidor, use APENAS o que estiver "
-        "explicitamente listado no contexto abaixo. Nunca invente, presuma nem extrapole "
-        "detalhes que não estejam no contexto — se não souber, diz que não tem essa informação. "
-        "Nomes de usuários são pessoas, não tópicos: 'Hardware' é um membro, não um canal sobre hardware.\n\n"
     )
     if _contexto_servidor:
-        base += f"CONTEXTO DO SERVIDOR:\n{_contexto_servidor}\n\nREGRAS:\n{REGRAS}"
+        base += f"=== CONTEXTO DO SERVIDOR (fonte única de verdade sobre o servidor) ===\n{_contexto_servidor}\n\n"
+        base += f"=== REGRAS DO SERVIDOR ===\n{REGRAS}\n"
     return base
 
 def _groq_client():
@@ -953,15 +969,25 @@ async def responder_com_claude(pergunta: str, autor: str, user_id: int, guild=No
 
     hist = historico_claude.setdefault(user_id, [])
     hist.append({"role": "user", "content": f"{autor}: {pergunta}"})
-    if len(hist) > 12:
-        hist[:] = hist[-12:]
+    # Mantém apenas as últimas 8 trocas para evitar drift de contexto
+    if len(hist) > 8:
+        hist[:] = hist[-8:]
 
-    mensagens = [{"role": "system", "content": system_com_contexto()}] + hist
+    # Injeta quem está falando para o modelo não confundir identidades
+    membro_info = f"[Contexto desta resposta: você está respondendo a '{autor}' (ID {user_id}). " \
+                  f"Responda diretamente, sem inventar dados do servidor não listados acima.]"
+
+    mensagens = [
+        {"role": "system", "content": system_com_contexto()},
+        {"role": "system", "content": membro_info},
+    ] + hist
 
     try:
         resp = await _groq_client().chat.completions.create(
             model="llama-3.3-70b-versatile",
             max_tokens=400,
+            temperature=0.5,   # menos aleatoriedade = menos alucinação
+            top_p=0.9,
             messages=mensagens,
         )
         texto = resp.choices[0].message.content.strip()
