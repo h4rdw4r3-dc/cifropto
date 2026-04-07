@@ -1709,8 +1709,13 @@ async def enviar_auditoria(guild: discord.Guild, membro: discord.Member, violaco
 
     arquivo = io.BytesIO(conteudo.encode("utf-8"))
     nome_arquivo = f"auditoria_{membro.id}_{agora.strftime('%Y%m%d_%H%M%S')}.txt"
+    _legenda = await _ia_curta(
+        "Notificar equipe sobre ofensa detectada e remoção de mensagem. Natural, objetivo.",
+        contexto=f"membro: {membro.display_name}, infração nº {count}, violações: {', '.join(v[0] for v in violacoes[:3])}",
+        max_tokens=60,
+    )
     await canal_audit.send(
-        f"Ofensa detectada: {membro.display_name}, infracao n {count}",
+        _legenda or f"Ofensa detectada: {membro.display_name}, infração nº {count}",
         file=discord.File(arquivo, filename=nome_arquivo)
     )
 
@@ -2688,6 +2693,40 @@ def _groq_client() -> AsyncOpenAI:
     return _groq
 
 
+async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80) -> str:
+    """
+    Gera uma resposta curta e natural para qualquer situação — sem template.
+    Substitui todos os random.choice e f-strings fixos do bot.
+    situacao: descrição da situação (ex: 'membro entrou no servidor pela primeira vez')
+    contexto: informações adicionais relevantes
+    Retorna string pronta para envio ou '' em caso de erro.
+    """
+    if not GROQ_DISPONIVEL or not GROQ_API_KEY:
+        return ""
+    humor_txt = f" Humor atual: {_humor_sessao}." if _humor_sessao else ""
+    system = (
+        f"Você é o shell_engenheiro — membro de servidor Discord brasileiro. Observador, econômico, irônico quando cabe.{humor_txt}\n"
+        "Gere UMA frase natural para a situação descrita. Sem template, sem clichê, variado a cada vez.\n"
+        "Sem emojis, sem markdown, sem 'Olá', sem encerramento de assistente. Só a frase."
+    )
+    prompt = situacao + (f"\nContexto adicional: {contexto}" if contexto else "")
+    try:
+        resp = await _groq_client().chat.completions.create(
+            model="llama-3.1-8b-instant",
+            max_tokens=max_tokens,
+            temperature=0.95,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        _registrar_tokens("8b", resp.usage.total_tokens if resp.usage else 40)
+        return _limpar_markdown(resp.choices[0].message.content.strip())
+    except Exception as e:
+        log.debug(f"[IA_CURTA] falhou: {e}")
+        return ""
+
+
 # ── Visão: análise de imagens via Llama 4 Scout ───────────────────────────────
 
 _MODELO_VISAO = "meta-llama/llama-4-scout-17b-16e-instruct"
@@ -3143,121 +3182,22 @@ async def continuar_conversa(user_id: int, msg: str, autor: str, guild=None) -> 
     dados = estado.get("dados", {})
     msg_l = msg.lower()
 
-    # ── SAUDAÇÃO ──────────────────────────────────────────────────────────────
-    if ctx == "saudacao":
-        if etapa == 1:
-            if any(p in msg_l for p in ["bem", "bom", "otimo", "ótimo", "tranquilo", "tudo"]):
-                estado["etapa"] = 2
-                return random.choice(["Que bom. O que quer?", "Ótimo. O que precisa?", "Beleza. O que é?"])
-            if any(p in msg_l for p in ["mal", "ruim", "chateado", "cansado", "triste"]):
-                estado["etapa"] = 2
-                estado["contexto"] = "desabafo"
-                return random.choice(["O que aconteceu?", "Me conta.", "O que rolou?", "Fala o que é."])
-            # Mensagem não é resposta à saudação  -  encerra e deixa o fluxo principal processar
-            del conversas[user_id]
-            return None
-        if etapa == 2:
-            del conversas[user_id]
-            if any(p in msg_l for p in ["regra", "norma", "proibido"]):
-                return f"tá tudo em {CANAL_REGRAS()}"
-            # Qualquer outra coisa: devolve None para o chamador tratar corretamente
-            return None
-
-    # ── DESABAFO ──────────────────────────────────────────────────────────────
-    if ctx == "desabafo":
+    # Todos os contextos de conversa caem em responder_com_groq —
+    # sem strings fixas, sem random.choice: o modelo lida com qualquer situação.
+    if ctx == "noticias" and etapa == 1:
         del conversas[user_id]
-        if any(p in msg_l for p in ["servidor", "member", "membro", "mod", "admin", "alguem", "alguém"]):
-            return f"Se é algo do servidor, vai no canal de denúncias e descreve o que aconteceu."
-        return random.choice(["Vida que segue.", "Isso acontece.", "Entendi. Chama se precisar de algo.", "Ok."])
-
-    # ── PUNIÇÃO ───────────────────────────────────────────────────────────────
-    if ctx == "punicao":
-        if etapa == 1:
-            estado["etapa"] = 2
-            return random.choice(["Qual o motivo?", "Por quê?", "O que fez?", "Me conta o que aconteceu."])
-        if etapa == 2:
-            del conversas[user_id]
-            return f"Diz o comando direto: banir, silenciar ou expulsar seguido do usuário. Ou aciona a moderação."
-
-    # ── MODERAÇÃO ─────────────────────────────────────────────────────────────
-    if ctx == "chamar_mod":
-        if etapa == 1:
-            if eh_sim(msg):
-                estado["etapa"] = 2
-                return f"Qual o motivo? Resume o que tá acontecendo."
-            del conversas[user_id]
-            return random.choice(["Ok.", "Certo.", "Tá.", "Beleza."])
-        if etapa == 2:
-            del conversas[user_id]
-            return f"Registrado. Moderação vai ver que {autor} precisa de atenção  -  {msg}."
-
-    # ── CAPACIDADES ───────────────────────────────────────────────────────────
-    if ctx == "capacidades":
-        if etapa == 1:
-            if eh_sim(msg):
-                estado["etapa"] = 2
-                return f"Monitoro o chat, aplico as regras, silencio quem infringe, busco notícias, mostro estatísticas do servidor e dados de membros. Quer saber de algo específico?"
-            del conversas[user_id]
-            return random.choice(["Ok.", "Certo.", "Tá.", "Beleza."])
-        if etapa == 2:
-            del conversas[user_id]
-            if any(p in msg_l for p in ["noticia", "notícia", "news"]):
-                noticias = await buscar_noticias()
-                if noticias:
-                    n = random.choice(noticias)
-                    return f"{n['fonte']}: {n['titulo']}. O que acha disso?"
-                return f"Sem notícias no momento. Tenta mais tarde."
-            if any(p in msg_l for p in ["estat", "membro", "servidor"]):
-                if guild:
-                    return await stats_servidor(guild)
-                return f"Sem acesso ao servidor agora."
-            return f"Não faço isso."
-
-    # ── NOTÍCIAS ──────────────────────────────────────────────────────────────
-    if ctx == "noticias":
-        if etapa == 1:
-            del conversas[user_id]
-            noticias = await buscar_noticias()
-            if not noticias:
-                return f"Não tô conseguindo pegar notícias agora. Tenta mais tarde."
+        noticias = await buscar_noticias()
+        if noticias:
             n = random.choice(noticias)
             iniciar_conversa(user_id, "opiniao_noticia", {"noticia": n["titulo"]})
-            return f"{n['fonte']}: {n['titulo']}. Tinha visto isso?"
-        if etapa == 2:
-            del conversas[user_id]
-            return f"É. Tá aí. Quer mais alguma?"
-
-    # ── OPINIÃO SOBRE NOTÍCIA ─────────────────────────────────────────────────
-    if ctx == "opiniao_noticia":
+            sit = f"Notícia: '{n['titulo']}' ({n['fonte']}). Apresente de forma natural e pergunte a opinião."
+            return await _ia_curta(sit, max_tokens=90) or f"{n['fonte']}: {n['titulo']}."
         del conversas[user_id]
-        if any(p in msg_l for p in ["não", "nao", "nunca", "desconhecia"]):
-            return random.choice(["Pois é, passa batido. Vale prestar atenção.", "Não é muito divulgado mesmo.", "Pouca gente sabe disso."])
-        if any(p in msg_l for p in ["sim", "vi", "sei", "conheço", "soube"]):
-            return random.choice(["Tá por dentro então. Tem opinião sobre isso?", "Que bom. O que acha?", "E qual é sua visão?"])
-        return random.choice(["Cada um tem sua visão. Faz sentido pra você?", "É um assunto que divide opiniões.", "Dá pra debater bastante nisso."])
 
-    # ── AJUDA ─────────────────────────────────────────────────────────────────
-    if ctx == "ajuda":
+    if ctx in ("saudacao", "desabafo", "punicao", "chamar_mod", "capacidades",
+               "noticias", "opiniao_noticia", "ajuda", "problema", "pergunta"):
         del conversas[user_id]
-        if any(p in msg_l for p in ["regra", "norma", "proibido"]):
-            return f"tá tudo em {CANAL_REGRAS()}"
-        return await responder_com_groq(msg, autor, user_id, guild)
 
-    # ── PROBLEMA ──────────────────────────────────────────────────────────────
-    if ctx == "problema":
-        del conversas[user_id]
-        if any(p in msg_l for p in ["ban", "mute", "silenci", "expuls", "kick"]):
-            return f"Se acha que foi punido errado, vai no canal de denúncias e explica o que rolou."
-        return random.choice(["Chama um moderador e explica o que rolou.", "Fala com a mod sobre isso.", "Isso é com a moderação."])
-
-    # ── PERGUNTA GENÉRICA ────────────────────────────────────────────────────
-    if ctx == "pergunta":
-        del conversas[user_id]
-        if any(p in msg_l for p in ["regra", "norma", "proibido"]):
-            return f"tá tudo em {CANAL_REGRAS()}"
-        return await responder_com_groq(msg, autor, user_id, guild)
-
-    del conversas[user_id]
     return await responder_com_groq(msg, autor, user_id, guild)
 
 
@@ -3267,31 +3207,13 @@ async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, 
     if any(p in msg for p in ["regra", "regras", "norma", "proibido"]):
         return f"tá tudo em {CANAL_REGRAS()}"
 
-    if any(p in msg for p in ["denúncia", "denuncia", "reportar", "report", "quero denunciar",
-                               "quero reportar", "infração", "infringindo", "desrespeitando", "abusando"]):
-        # Acionamento via _on_message_impl (tem acesso ao message para criar canal privado).
-        # Aqui só cai se não houver @menção direta ao bot — informa o caminho correto.
-        return f"{autor}, me menciona diretamente para iniciar uma denúncia. Ex.: @Shell quero denunciar [nome]"
-
-    if any(p in msg for p in ["ban", "banir", "expulsar", "kick", "punir", "silenciar", "mutar"]):
-        iniciar_conversa(user_id, "punicao", canal_id=canal_id)
-        return f"Quem você quer punir? Menciona ou passa o ID."
-
-    if any(p in msg for p in ["chamar mod", "acionar mod", "chamar a mod", "precisa de mod", "mod aqui"]):
-        iniciar_conversa(user_id, "chamar_mod", canal_id=canal_id)
-        return f"Sim, diga. Quer acionar a moderação agora?"
-
-    if any(p in msg for p in ["problema", "erro", "bug", "quebrado", "não funciona", "nao funciona", "travou", "falhou"]):
-        iniciar_conversa(user_id, "problema", canal_id=canal_id)
-        return f"Que problema? Descreve."
-
     if any(p in msg for p in ["notícia", "noticia", "news", "novidade", "aconteceu", "você viu", "voce viu", "viu que", "o que tá rolando", "o que ta rolando", "mundo atual", "aconteceu hoje"]):
         noticias = await buscar_noticias()
         if noticias:
             n = random.choice(noticias)
             iniciar_conversa(user_id, "opiniao_noticia", {"noticia": n["titulo"]}, canal_id)
-            return f"{n['fonte']}: {n['titulo']}. Sabia disso?"
-        return f"Sem acesso a notícias agora."
+            sit = f"Notícia: '{n['titulo']}' ({n['fonte']}). Apresente de forma natural e pergunte a opinião de {autor}."
+            return await _ia_curta(sit, max_tokens=90) or f"{n['fonte']}: {n['titulo']}."
 
     if any(p in msg for p in ["quem são os mods", "quem sao os mods", "lista de mods", "quem modera",
                                "equipe de mod", "time de mod", "quem é a equipe", "quem e a equipe",
@@ -5121,15 +5043,22 @@ async def resposta_inicial_superior(conteudo: str, autor: str, user_id: int, gui
                      and m.id != client.user.id]
 
         if alvos:
-            nomes = " ".join(m.mention for m in alvos[:5])
-            texto_bv = f"Sejam bem-vindos ao servidor {nomes}. Leiam as regras em {CANAL_REGRAS()} e bom aprendizado."
+            nomes_str = " ".join(m.mention for m in alvos[:5])
+            _ctx_bv = f"novos membros: {nomes_str}, canal de regras: {CANAL_REGRAS()}"
+            _sit_bv = "Dar boas-vindas a novos membros do servidor mencionando o canal de regras. Natural, sem template."
         else:
-            texto_bv = f"Bem-vindos ao servidor. Leiam as regras em {CANAL_REGRAS()} e aproveitem."
+            _ctx_bv = f"canal de regras: {CANAL_REGRAS()}"
+            _sit_bv = "Dar boas-vindas genéricas ao servidor mencionando o canal de regras. Natural, sem template."
+
+        texto_bv = await _ia_curta(_sit_bv, contexto=_ctx_bv, max_tokens=80)
+        if not texto_bv:
+            texto_bv = f"Bem-vindos. Regras em {CANAL_REGRAS()}."
 
         # Se o superior especificou um canal diferente do atual, envia lá
         if canal_alvo and message and canal_alvo.id != message.channel.id:
             await canal_alvo.send(texto_bv)
-            return f"Boas-vindas enviadas em {canal_alvo.mention}."
+            _conf = await _ia_curta("Confirmar que boas-vindas foram enviadas em outro canal.", contexto=canal_alvo.mention, max_tokens=40)
+            return _conf or f"Boas-vindas enviadas em {canal_alvo.mention}."
         return texto_bv
 
     # ── Ordens de história / contar algo ──────────────────────────────────────
@@ -6323,6 +6252,24 @@ def _atualizar_contexto(guild: discord.Guild):
     _contexto_compacto = build_server_context_compact(guild)
 
 
+async def _audit_ia(canal: discord.TextChannel, evento: str, dados: dict) -> None:
+    """
+    Envia registro de auditoria gerado por IA — sem texto fixo.
+    evento: tipo de evento ('entrada de membro', 'lockdown ativado', etc.)
+    dados: dict com fatos estruturados (sempre incluídos mesmo que IA falhe)
+    """
+    dados_txt = " | ".join(f"{k}: {v}" for k, v in dados.items())
+    sit = f"Evento de auditoria — {evento}. Dados: {dados_txt}. Registre de forma natural, objetiva e concisa, como um observador experiente descreveria isso num log interno. Inclua os dados concretos."
+    texto = await _ia_curta(sit, max_tokens=120)
+    if not texto:
+        # fallback estruturado sem template fixo
+        texto = f"{evento} | {dados_txt}"
+    try:
+        await canal.send(texto)
+    except Exception as e:
+        log.warning(f"[AUDIT] falha ao enviar: {e}")
+
+
 # ── Anti-raid: lockdown e detecção de ataques ────────────────────────────────
 
 async def _ativar_lockdown(guild: discord.Guild, motivo: str = "atividade suspeita detectada") -> None:
@@ -6350,11 +6297,12 @@ async def _ativar_lockdown(guild: discord.Guild, motivo: str = "atividade suspei
     mod = mencao_mod(guild)
     if canal_audit:
         try:
-            await canal_audit.send(
-                f"LOCKDOWN ATIVADO — {motivo}\n"
-                f"{mod} intervenção necessária. Canais bloqueados para @everyone.\n"
-                f"Lockdown auto-desfaz em 10 minutos, ou use: `desativar lockdown`"
-            )
+            await _audit_ia(canal_audit, "lockdown ativado", {
+                "motivo": motivo,
+                "acao": "canais bloqueados para @everyone",
+                "moderacao": mod,
+                "auto_desfaz_em": "10 minutos",
+            })
         except Exception:
             pass
     log.warning(f"[LOCKDOWN] Ativado: {motivo}")
@@ -6382,9 +6330,11 @@ async def _desativar_lockdown(guild: discord.Guild, automatico: bool = False) ->
 
     canal_audit = guild.get_channel(_canal_auditoria_id())
     if canal_audit:
-        sufixo = " (automático — 10min)" if automatico else " (manual)"
         try:
-            await canal_audit.send(f"LOCKDOWN DESATIVADO{sufixo}. Canais reabertos para @everyone.")
+            await _audit_ia(canal_audit, "lockdown desativado", {
+                "modo": "automático (10min)" if automatico else "manual",
+                "status": "canais reabertos para @everyone",
+            })
         except Exception:
             pass
     log.info("[LOCKDOWN] Desativado")
@@ -6571,11 +6521,24 @@ async def _processar_denuncia_wizard(message: discord.Message) -> bool:
         )
         if canal_audit:
             try:
-                await canal_audit.send(f"```\n{relato}\n```")
+                await _audit_ia(canal_audit, "denúncia registrada", {
+                    "id": denuncia_id,
+                    "denunciante": dados['denunciante'],
+                    "denunciado": dados.get('denunciado', 'não informado'),
+                    "local": dados.get('local', 'não informado'),
+                    "descricao": dados.get('descricao', '')[:100],
+                    "evidencia": dados.get('evidencia', 'nenhuma'),
+                    "status": f"PENDENTE — {mod}",
+                })
             except Exception:
                 pass
 
-        await canal.send(f"{denuncia_id} registrada. Equipe notificada. Canal some em 60s.")
+        _confirmacao = await _ia_curta(
+            f"Confirmar registro de denúncia {denuncia_id}. Canal privado some em 60 segundos.",
+            contexto=f"denunciante: {dados['denunciante']}, denunciado: {dados.get('denunciado', 'não informado')}",
+            max_tokens=60,
+        )
+        await canal.send(_confirmacao or f"{denuncia_id} registrada. Canal some em 60s.")
 
         # Apagar canal privado após 60s
         if canal_privado_id and guild:
@@ -6768,11 +6731,11 @@ async def _task_accountability_equipe():
                 if canal_audit:
                     nomes_in = ", ".join(m["nome"] for m in inativos[:5])
                     try:
-                        await canal_audit.send(
-                            f"[Accountability] {len(inativos)} membro{'s' if len(inativos) != 1 else ''} "
-                            f"da equipe sem atividade nesta sessão: {nomes_in}. "
-                            f"Considere verificar a presença da moderação."
-                        )
+                        await _audit_ia(canal_audit, "inatividade da equipe", {
+                            "membros_inativos": nomes_in,
+                            "total": len(inativos),
+                            "status": "sem atividade nesta sessão, offline",
+                        })
                         log.info(f"[ACCOUNT] notificou inatividade de {len(inativos)} mods")
                     except Exception:
                         pass
@@ -7093,12 +7056,12 @@ async def on_member_join(member: discord.Member):
 
     canal_audit = member.guild.get_channel(_canal_auditoria_id())
     if canal_audit:
-        aviso = " | CONTA NOVA" if conta_nova else ""
-        reentrada = f" | Reentrada n.{vezes}" if vezes > 1 else ""
-        await canal_audit.send(
-            f"[ENTRADA]{aviso}{reentrada} {member.display_name} ({member.id}) "
-            f"entrou. Conta criada há {formatar_duracao(idade_conta)}."
-        )
+        await _audit_ia(canal_audit, "entrada de membro", {
+            "membro": f"{member.display_name} ({member.id})",
+            "conta_criada_há": formatar_duracao(int(idade_conta.total_seconds())),
+            "conta_nova": "sim" if conta_nova else "não",
+            "reentrada": f"n.{vezes}" if vezes > 1 else "primeira vez",
+        })
 
     # ── Boas-vindas automática no canal geral ─────────────────────────────────
     canal_geral = discord.utils.get(member.guild.text_channels, name="geral") \
@@ -7106,12 +7069,16 @@ async def on_member_join(member: discord.Member):
                or discord.utils.get(member.guild.text_channels, name="testes") \
                or member.guild.system_channel
     if canal_geral:
-        if vezes > 1:
-            bv = f"Eae {member.mention}, voltou por aqui. Seja bem-vindo de volta."
-        elif conta_nova:
-            bv = f"Eae {member.mention}, conta nova em folha. Leia as regras em {CANAL_REGRAS()} antes de qualquer coisa."
-        else:
-            bv = f"Eae {member.mention}, bem-vindo ao servidor. Leia as regras em {CANAL_REGRAS()} e aproveita."
+        _sit_bv = (
+            f"O membro {member.mention} entrou no servidor pela {vezes}ª vez (reentrada)."
+            if vezes > 1 else
+            f"O membro {member.mention} entrou no servidor pela primeira vez. A conta tem {formatar_duracao(int(idade_conta.total_seconds()))} de existência."
+            + (" É uma conta nova, suspeita." if conta_nova else "")
+        )
+        _ctx_bv = f"Canal de regras: {CANAL_REGRAS()}. Servidor: {member.guild.name}. Membros: {member.guild.member_count}."
+        bv = await _ia_curta(_sit_bv, _ctx_bv, max_tokens=60)
+        if not bv:
+            bv = f"{member.mention}."  # fallback mínimo
         try:
             await canal_geral.send(bv)
         except Exception:
@@ -7163,11 +7130,12 @@ async def on_member_join(member: discord.Member):
         canal_audit = member.guild.get_channel(_canal_auditoria_id())
         if canal_audit:
             mod = mencao_mod(member.guild)
-            await canal_audit.send(
-                f"[ALERTA]POSSÍVEL RAID: {len(_joins_recentes)} entradas nos últimos 2 minutos "
-                f"({novas} contas com menos de {RAID_CONTA_NOVA_DIAS} dias). "
-                f"{mod}, verifiquem imediatamente."
-            )
+            await _audit_ia(canal_audit, "possível raid detectado", {
+                "entradas_em_2min": len(_joins_recentes),
+                "contas_novas": f"{novas} com menos de {RAID_CONTA_NOVA_DIAS} dias",
+                "moderacao": mod,
+                "acao_sugerida": "verificação imediata",
+            })
         log.warning(f"RAID detectado: {len(_joins_recentes)} joins em 2min, {novas} contas novas")
         _joins_recentes.clear()  # Evita alertas duplicados
 
@@ -7200,10 +7168,10 @@ async def on_member_remove(member: discord.Member):
 
     canal_audit = member.guild.get_channel(_canal_auditoria_id())
     if canal_audit:
-        await canal_audit.send(
-            f"[SAÍDA] {member.display_name} ({member.id}) saiu. "
-            f"Ficou por {ficou_txt}."
-        )
+        await _audit_ia(canal_audit, "saída de membro", {
+            "membro": f"{member.display_name} ({member.id})",
+            "ficou_por": ficou_txt,
+        })
 
     _atualizar_contexto(member.guild)
     log.info(f"Saída: {member.display_name} ({member.id}) | ficou: {ficou_txt}")
@@ -7464,17 +7432,23 @@ async def _on_message_impl(message: discord.Message):
             await message.delete()
         except Exception:
             pass
+        _aviso_bomb = await _ia_curta(
+            "Avisar usuário que menções em massa não são permitidas. Tom firme, sem template.",
+            contexto=f"usuário: {message.author.display_name}, menções: {len(message.mentions)}",
+            max_tokens=60,
+        )
         await message.channel.send(
-            f"{message.author.mention}, menções em massa não são permitidas. "
-            f"Próxima ocorrência resulta em punição."
+            f"{message.author.mention} {_aviso_bomb or 'menções em massa não são permitidas.'}"
         )
         canal_audit = message.guild.get_channel(_canal_auditoria_id())
         if canal_audit:
             try:
-                await canal_audit.send(
-                    f"[ATAQUE] Mention bombing detectado: {message.author.display_name} "
-                    f"({message.author.id}) — {len(message.mentions)} menções em #{message.channel.name}"
-                )
+                await _audit_ia(canal_audit, "mention bombing detectado", {
+                    "autor": message.author.display_name,
+                    "id": str(message.author.id),
+                    "menções": str(len(message.mentions)),
+                    "canal": f"#{message.channel.name}",
+                })
             except Exception:
                 pass
         return
@@ -7533,8 +7507,7 @@ async def _on_message_impl(message: discord.Message):
 
     # ── Mídia passiva: processa imagens/vídeos/áudios em canais monitorados ────────
     if (not message.author.bot
-            and message.attachments
-            and message.channel.id in canais_monitorados):
+            and message.attachments):
         _audios_passivos = [
             a for a in message.attachments
             if (a.content_type or "").startswith("audio/")
@@ -7588,7 +7561,8 @@ async def _on_message_impl(message: discord.Message):
             "conteudo": _conteudo_mem,
         })
 
-    # ── Rastrear atividade + participação ativa (debate / monitoramento) ──────
+    # ── Rastrear atividade + participação autônoma ────────────────────────────
+    # O bot age sem precisar ser mencionado — avalia qualquer mensagem não trivial
     if not message.author.bot and message.content.strip() and not _TRIVIAIS.match(message.content.strip()):
         atividade_mensagens[message.author.id] += 1
         _canal_id = message.channel.id
@@ -7597,16 +7571,19 @@ async def _on_message_impl(message: discord.Message):
         if _debate and _agora < _debate["fim"]:
             _debate["msgs"] = _debate.get("msgs", 0) + 1
             _ultima = ultima_interjeccao.get(_canal_id, datetime(1970, 1, 1, tzinfo=timezone.utc))
-            # Debate ativo: cooldown de 60s, entra após ≥2 msgs
             if _debate["msgs"] >= 2 and (_agora - _ultima).total_seconds() > 60:
                 ultima_interjeccao[_canal_id] = _agora
                 asyncio.ensure_future(_participar_debate(message, _debate["tema"]))
-        elif _canal_id in canais_monitorados:
+        else:
             _ultima = ultima_interjeccao.get(_canal_id, datetime(1970, 1, 1, tzinfo=timezone.utc))
             _secs = (_agora - _ultima).total_seconds()
-            # Chance dinâmica: quanto mais tempo sem falar, maior a chance de entrar
-            # 3min cooldown mínimo; chance sobe de 12% até 35% com o tempo
-            _chance = min(0.35, 0.12 + (_secs - 180) / 1800 * 0.23) if _secs > 180 else 0
+            _monitorado = _canal_id in canais_monitorados
+            # Canais monitorados: chance maior e cooldown menor (90s → 35-55%)
+            # Outros canais: chance menor e cooldown maior (3min → 8-20%)
+            if _monitorado:
+                _chance = min(0.55, 0.20 + (_secs - 90) / 900 * 0.35) if _secs > 90 else 0
+            else:
+                _chance = min(0.20, 0.08 + (_secs - 180) / 1800 * 0.12) if _secs > 180 else 0
             if _chance > 0 and random.random() < _chance:
                 ultima_interjeccao[_canal_id] = _agora
                 asyncio.ensure_future(_interjetar_conversa(message))
