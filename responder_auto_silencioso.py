@@ -843,7 +843,6 @@ _MODELO_SCOUT = "meta-llama/llama-4-scout-17b-16e-instruct"
 _MODELO_QWEN  = "qwen/qwen3-32b"
 
 # ── Raid detection ────────────────────────────────────────────────────────────
-_joins_recentes: list[datetime] = []          # timestamps dos últimos joins
 RAID_JANELA   = timedelta(minutes=2)          # janela de análise
 RAID_LIMIAR   = 5                             # joins para disparar alerta
 RAID_CONTA_NOVA_DIAS = 7                      # conta com menos de X dias = suspeita
@@ -7921,12 +7920,12 @@ async def on_member_join(member: discord.Member):
     agora = agora_utc()
     ts = agora.isoformat()
 
-    # ── Detecção de raid: 5+ entradas em 30 segundos ─────────────────────────
+    # ── Detecção de raid: 5+ entradas em 30 segundos → lockdown imediato ────
     _joins_recentes.append(agora)
-    _joins_recentes[:] = [t for t in _joins_recentes if agora - t < timedelta(seconds=30)]
-    if len(_joins_recentes) >= 5 and not _lockdown_ativo:
-        log.warning(f"[RAID] {len(_joins_recentes)} entradas em 30s — ativando lockdown")
-        asyncio.ensure_future(_ativar_lockdown(member.guild, f"raid: {len(_joins_recentes)} entradas em 30s"))
+    _recentes_30s = [t for t in _joins_recentes if agora - t < timedelta(seconds=30)]
+    if len(_recentes_30s) >= 5 and not _lockdown_ativo:
+        log.warning(f"[RAID] {len(_recentes_30s)} entradas em 30s — ativando lockdown")
+        asyncio.ensure_future(_ativar_lockdown(member.guild, f"raid: {len(_recentes_30s)} entradas em 30s"))
 
     if member.id not in registro_entradas:
         registro_entradas[member.id] = []
@@ -7943,7 +7942,7 @@ async def on_member_join(member: discord.Member):
     if canal_audit:
         await _audit_ia(canal_audit, "entrada de membro", {
             "membro": f"{member.display_name} ({member.id})",
-            "conta_criada_há": formatar_duracao(int(idade_conta.total_seconds())),
+            "conta_criada_há": formatar_duracao(idade_conta),
             "conta_nova": "sim" if conta_nova else "não",
             "reentrada": f"n.{vezes}" if vezes > 1 else "primeira vez",
         })
@@ -7957,7 +7956,7 @@ async def on_member_join(member: discord.Member):
         _sit_bv = (
             f"O membro {member.mention} entrou no servidor pela {vezes}ª vez (reentrada)."
             if vezes > 1 else
-            f"O membro {member.mention} entrou no servidor pela primeira vez. A conta tem {formatar_duracao(int(idade_conta.total_seconds()))} de existência."
+            f"O membro {member.mention} entrou no servidor pela primeira vez. A conta tem {formatar_duracao(idade_conta)} de existência."
             + (" É uma conta nova, suspeita." if conta_nova else "")
         )
         _ctx_bv = f"Canal de regras: {CANAL_REGRAS()}. Servidor: {member.guild.name}. Membros: {member.guild.member_count}."
@@ -8000,9 +7999,8 @@ async def on_member_join(member: discord.Member):
     _atualizar_contexto(member.guild)
     log.info(f"Entrada: {member.display_name} ({member.id}) | conta: {formatar_duracao(idade_conta)}{' | CONTA NOVA' if conta_nova else ''}")
 
-    # ── Raid detection ────────────────────────────────────────────────────────
-    _joins_recentes.append(agora)
-    # Remove entradas fora da janela
+    # ── Raid detection: alerta de auditoria (janela 2 min) ───────────────────
+    # (append já feito acima; apenas filtra a janela de 2 min)
     corte = agora - RAID_JANELA
     while _joins_recentes and _joins_recentes[0] < corte:
         _joins_recentes.pop(0)
@@ -8206,7 +8204,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         _ficou_voz = ""
         if _entrada_voz:
             _delta_voz = agora_utc() - _entrada_voz
-            _ficou_voz = formatar_duracao(int(_delta_voz.total_seconds()))
+            _ficou_voz = formatar_duracao(_delta_voz)
         log.info(f"[VOZ] {member.display_name} saiu de #{before.channel.name}")
         _dados_voz = {
             "membro": f"{member.display_name} ({member.id})",
