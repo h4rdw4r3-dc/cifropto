@@ -6445,8 +6445,10 @@ def _separar_comandos_externos(texto: str) -> tuple[str, list[str]]:
         return ''
 
     texto_limpo = _CMD_EXTERNO_RE.sub(_capturar, texto)
-    # Remove espaços duplos e pontuação solta que sobrou após remover o comando
-    texto_limpo = re.sub(r'\s{2,}', ' ', texto_limpo).strip().strip('.,; ')
+    # Remove espaços duplos e pontuação solta apenas se algum comando foi extraído
+    texto_limpo = re.sub(r'\s{2,}', ' ', texto_limpo).strip()
+    if comandos:
+        texto_limpo = texto_limpo.strip('.,; ')
     return texto_limpo, comandos
 
 
