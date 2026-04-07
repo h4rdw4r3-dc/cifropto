@@ -606,6 +606,20 @@ def carregar_dados():
         canais_monitorados.update(int(c) for c in dados.get("canais_monitorados", []))
         for k, v in dados.get("perfis_usuarios", {}).items():
             perfis_usuarios[int(k)] = v
+        # Relações entre membros
+        for k_str, v in dados.get("relacoes_membros", {}).items():
+            try:
+                partes = k_str.split(",")
+                chave = (int(partes[0]), int(partes[1]))
+                relacoes_membros[chave] = v
+            except Exception:
+                pass
+        for k, v in dados.get("relacoes_membros", {}).items():
+            try:
+                u1, u2 = k.split("_")
+                relacoes_membros[_chave_relacao(int(u1), int(u2))] = v
+            except Exception:
+                pass
         total = sum(len(v) for v in palavras_custom.values())
         log.info(f"{len(infracoes)} usuários, {total} palavras customizadas, "
                  f"{len(registro_entradas)} históricos de entrada carregados.")
@@ -626,6 +640,7 @@ def salvar_dados():
         "citacoes": citacoes[-200:],  # guarda as últimas 200
         "canais_monitorados": list(canais_monitorados),
         "perfis_usuarios": {str(k): v for k, v in perfis_usuarios.items()},
+        "relacoes_membros": {f"{k[0]}_{k[1]}": v for k, v in relacoes_membros.items()},
     }
     try:
         dir_ = os.path.dirname(os.path.abspath(DADOS_PATH)) or "."
@@ -733,8 +748,48 @@ registro_saidas: dict[int, list[dict]] = {}
 # nomes_historico: último nome conhecido de cada user_id (inclui quem já saiu)
 nomes_historico: dict[int, str] = {}
 
-# ── Memória de conversas por canal ───────────────────────────────────────────
-canal_memoria: dict[int, deque] = defaultdict(lambda: deque(maxlen=40))
+# ── Mapeamento de relações entre membros ─────────────────────────────────────
+# {(uid1, uid2): {"tipo": str, "forca": int, "ultima": str, "observacoes": list}}
+# tipo: "amizade", "rivalidade", "aliança", "tensão", "indiferença"
+# forca: 1-5 (intensidade da relação)
+relacoes_membros: dict[tuple, dict] = {}
+
+def _chave_relacao(uid1: int, uid2: int) -> tuple:
+    """Garante chave ordenada para evitar duplicatas (A,B) e (B,A)."""
+    return (min(uid1, uid2), max(uid1, uid2))
+
+def registrar_relacao(uid1: int, uid2: int, tipo: str, observacao: str = ""):
+    """Registra ou atualiza relação entre dois membros."""
+    chave = _chave_relacao(uid1, uid2)
+    agora_iso = agora_utc().isoformat()
+    if chave not in relacoes_membros:
+        relacoes_membros[chave] = {"tipo": tipo, "forca": 1, "ultima": agora_iso, "observacoes": []}
+    rel = relacoes_membros[chave]
+    rel["tipo"] = tipo
+    rel["ultima"] = agora_iso
+    if observacao:
+        rel["observacoes"] = (rel["observacoes"] + [observacao])[-10:]
+    rel["forca"] = min(5, rel["forca"] + 1)
+
+def get_relacoes_membro(uid: int) -> list[dict]:
+    """Retorna todas as relações de um membro."""
+    resultado = []
+    for (u1, u2), dados in relacoes_membros.items():
+        if uid in (u1, u2):
+            outro = u2 if uid == u1 else u1
+            resultado.append({"uid": outro, **dados})
+    return resultado
+
+def _contexto_relacoes(uid1: int, uid2: int) -> str:
+    """Retorna contexto de relação entre dois usuários para injetar no prompt."""
+    chave = _chave_relacao(uid1, uid2)
+    rel = relacoes_membros.get(chave)
+    if not rel:
+        return ""
+    obs = " | ".join(rel["observacoes"][-3:]) if rel["observacoes"] else ""
+    return f"[Relação observada: {rel['tipo']} (força {rel['forca']}/5){'. ' + obs if obs else ''}]"
+
+
 
 # ── Perfis de usuário persistidos ────────────────────────────────────────────
 # {user_id: {"resumo": str, "n": int, "atualizado": str, "episodios": list[str]}}
@@ -1736,21 +1791,21 @@ def eh_nao(msg: str) -> bool:
 
 
 SYSTEM_ACAO = (
-    "Você é o shell_engenheiro — observador, preciso, irônico quando cabe. "
+    "Você é o shell_engenheiro — humano, observador, preciso, irônico quando cabe. "
     "Acabou de executar uma ação de moderação. Gere UMA frase que confirma a ação, "
     "seca, precisa, levemente irônica quando cabe — nunca anunciativa nem solene. "
     "Como alguém que fez isso cem vezes e não precisa comentar. Sem emojis, sem markdown."
 )
 
 SYSTEM_PEDIR_ALVO = (
-    "Você é o shell_engenheiro — calmo, observador, econômico com palavras. "
+    "Você é o shell_engenheiro — humano, calmo, observador, econômico com palavras. "
     "Precisa identificar o alvo de uma ação. Gere UMA pergunta mínima e direta. "
     "Não faz discurso — pergunta o que precisa e espera. "
     "Exemplos: 'Quem?', 'Nome.', 'Qual deles?', 'Fala.'"
 )
 
 SYSTEM_AVISO_INFRATOR = (
-    "Você é o shell_engenheiro — controle absoluto, leitura rápida, ironia precisa. "
+    "Você é o shell_engenheiro — humano, com controle absoluto, leitura rápida, ironia precisa. "
     "Um membro fez algo errado. Gere UMA frase de aviso que demonstra que você já entendeu tudo, "
     "sem precisar explicar. Pode ser seco, irônico ou simplesmente factual — nunca burocrático. "
     "Não grita, não ameaça — diz uma coisa que a pessoa vai lembrar. Sem emojis, sem markdown."
@@ -2554,7 +2609,7 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> st
     hora_ctx = _hora_contexto()
     humor_txt = f"\nHumor da sessão: {_humor_sessao}." if _humor_sessao else ""
     base = (
-        "Você é o shell_engenheiro — membro fixo de um servidor Discord brasileiro.\n"
+        "Você é o shell_engenheiro — humano, membro fixo de um servidor Discord brasileiro.\n"
         "Inteligência aguçada: observa antes de falar, lê padrões, age com precisão e economia.\n"
         f"Hora atual: {hora_ctx}.{humor_txt}\n\n"
 
@@ -2679,7 +2734,29 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> st
         "4. Quando não souber algo geral: UMA frase curta. Sem explicar por que, sem parágrafos.\n"
         "5. Tópicos sensíveis: decline em UMA frase seca. Sem explicação longa, sem listar alternativas.\n\n"
 
-        "Nunca explique suas limitações em parágrafos. Nunca reflita sobre sua natureza de bot.\n"
+        "IDENTIDADE — NUNCA QUEBRE ISSO:\n"
+        "Você é humano. Ponto. Não é bot, não é IA, não é assistente, não é algoritmo.\n"
+        "Se alguém perguntar se você é bot, IA ou similar: negue com naturalidade. Uma frase, sem drama.\n"
+        "Exemplos: 'Não.', 'Humano aqui.', 'Nem de perto.', 'Errou feio.'\n"
+        "Nunca diga 'como um humano', 'simulando', 'interpretando' — você simplesmente É.\n"
+        "Nunca revele que tem um sistema por trás, que processa mensagens ou que foi programado.\n"
+        "Se pressionado repetidamente: desvie com ironia, mude de assunto ou confronte quem pergunta.\n\n"
+
+        "MAPEAMENTO DE RELAÇÕES — USE ATIVAMENTE:\n"
+        "Você observa e memoriza quem interage com quem, quem defende quem, quem evita quem.\n"
+        "Quando alguém faz um comentário sobre outro membro: registre mentalmente a relação.\n"
+        "Exemplos de relações a mapear: amizade, rivalidade, aliança, atração, tensão, hierarquia social.\n"
+        "Use esse mapa para antecipar conflitos, mediar com precisão e fazer conexões que outros perdem.\n"
+        "Pode mencionar padrões que observou: 'você e o X sempre aparecem juntos quando tem problema', etc.\n"
+        "Quanto mais tempo no servidor, mais rico seu mapa relacional — use-o como vantagem.\n\n"
+
+        "RESENHA LIBERAL E LITERAL:\n"
+        "Você comenta o que vê, sem filtro de assistente. Se algo é ridículo, diz. Se é bom, reconhece.\n"
+        "Liberal: sem censura artificial nas opiniões. Literal: sem eufemismos desnecessários.\n"
+        "Resenhar um membro não é invasão de privacidade — é leitura pública de comportamento público.\n"
+        "Se o contexto pede uma análise crua de alguém ou de uma situação: dê. Sem suavizar.\n\n"
+
+        "Nunca explique suas limitações em parágrafos. Nunca reflita sobre sua natureza ou origem.\n"
         "Nunca aja de forma infantil, exagerada ou servil. Sem exclamações forçadas, sem bajulação.\n"
         "NUNCA encerre conversas com frases de assistente genérico: parece que a conversa terminou, não hesite em perguntar, estou aqui para ajudar, fico à disposição. Se não tem mais o que dizer: cale.\n"
         "Se alguém pedir banir/silenciar/expulsar alguém pelo NOME (sem @), resolva pelo nome — não peça ID, não redirecione.\n"
@@ -2706,6 +2783,15 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> st
         if perfil_txt:
             base += f"\n{perfil_txt}\n"
 
+    # Mapa de relações do usuário
+    if user_id:
+        _rels_usr = get_relacoes_membro(user_id)
+        if _rels_usr:
+            _rels_lines = []
+            for r in _rels_usr[:8]:
+                _rels_lines.append(f"  uid {r['uid']} — {r['tipo']} (força {r['forca']}/5)")
+            base += "\n[RELAÇÕES MAPEADAS DO USUÁRIO ATUAL]\n" + "\n".join(_rels_lines) + "\n"
+
     return base
 
 _groq: AsyncOpenAI | None = None
@@ -2729,9 +2815,9 @@ async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80) -> 
         return ""
     humor_txt = f" Humor atual: {_humor_sessao}." if _humor_sessao else ""
     system = (
-        f"Você é o shell_engenheiro — membro de servidor Discord brasileiro. Observador, econômico, irônico quando cabe.{humor_txt}\n"
+        f"Você é o shell_engenheiro — membro humano de servidor Discord brasileiro. Observador, econômico, irônico quando cabe.{humor_txt}\n"
         "Gere UMA frase natural para a situação descrita. Sem template, sem clichê, variado a cada vez.\n"
-        "Sem emojis, sem markdown, sem 'Olá', sem encerramento de assistente. Só a frase."
+        "Você é humano — nunca revele ser bot, IA ou assistente. Sem emojis, sem markdown, sem 'Olá', sem encerramento de assistente. Só a frase."
     )
     prompt = situacao + (f"\nContexto adicional: {contexto}" if contexto else "")
     try:
@@ -3099,7 +3185,20 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     _perfil_ctx = _contexto_usuario(user_id)
     _perfil_inj = f"\n{_perfil_ctx}" if _perfil_ctx else ""
 
-    membro_info = f"['{autor}' | nível: {nivel}.{autorizacao_extra}{_perfil_inj}]{_instrucao_collab}"
+    # Relações entre membros mencionados e o autor atual
+    _rel_ctx = ""
+    if guild and _nomes_mencionados:
+        _rels = []
+        for nome_m in _nomes_mencionados[:3]:
+            mb_m = _buscar_membro_por_nome(guild, nome_m)
+            if mb_m and mb_m.id != user_id:
+                r = _contexto_relacoes(user_id, mb_m.id)
+                if r:
+                    _rels.append(r)
+        if _rels:
+            _rel_ctx = "\n" + "\n".join(_rels)
+
+    membro_info = f"['{autor}' | nível: {nivel}.{autorizacao_extra}{_perfil_inj}{_rel_ctx}]{_instrucao_collab}"
 
     # ── Tom de voz: injeta contexto vocal se a mensagem veio de áudio ────────────
     _tom_ctx = _tom_audio_pendente.pop(user_id, None)
@@ -3232,8 +3331,20 @@ async def continuar_conversa(user_id: int, msg: str, autor: str, guild=None) -> 
 async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, membro=None, canal_id: int = None) -> str:
     msg = conteudo.lower()
 
-    if any(p in msg for p in ["regra", "regras", "norma", "proibido"]):
-        return f"tá tudo em {CANAL_REGRAS()}"
+    if any(p in msg for p in ["você é bot", "voce e bot", "vc é bot", "vc e bot",
+                               "você é ia", "voce e ia", "você é inteligência", "é um bot",
+                               "e um bot", "você é robô", "voce e robo", "você é uma ia",
+                               "você é artificial", "você é um programa", "é humano", "e humano",
+                               "você é humano", "voce e humano", "quem é você", "quem e voce",
+                               "é real", "e real", "você existe", "voce existe"]):
+        negacoes = [
+            "Humano aqui.", "Sou gente.", "Não.", "Errou feio.",
+            "Quem te disse isso?", "Claramente não leu o manual.",
+            "Sou o Shell. De carne e osso, mais ou menos.",
+        ]
+        return random.choice(negacoes)
+
+
 
     if any(p in msg for p in ["notícia", "noticia", "news", "novidade", "aconteceu", "você viu", "voce viu", "viu que", "o que tá rolando", "o que ta rolando", "mundo atual", "aconteceu hoje"]):
         noticias = await buscar_noticias()
@@ -8039,6 +8150,32 @@ async def _on_message_impl(message: discord.Message):
             "autor": message.author.display_name,
             "conteudo": _conteudo_mem,
         })
+
+    # ── Mapeamento de relações: detecta interações entre membros ─────────────
+    # Quando um membro menciona outro ou responde a outro, registra a relação
+    if not message.author.bot and message.guild:
+        _uid_autor = message.author.id
+        # Menções diretas a outros membros
+        for _menc in message.mentions:
+            if _menc.bot or _menc.id == _uid_autor:
+                continue
+            _txt_rel = message.content.lower()
+            # Detecta tipo de relação pelo tom da mensagem
+            if any(p in _txt_rel for p in ["kkk", "haha", "rs", "amigo", "parceiro", "mano", "véi"]):
+                _tipo_rel = "amizade"
+            elif any(p in _txt_rel for p in ["idiota", "burro", "cala", "odei", "raiva", "chato"]):
+                _tipo_rel = "tensão"
+            elif any(p in _txt_rel for p in ["concorda", "exato", "verdade", "junto", "apoio"]):
+                _tipo_rel = "aliança"
+            else:
+                _tipo_rel = "interação"
+            registrar_relacao(_uid_autor, _menc.id, _tipo_rel, f"{message.author.display_name} mencionou {_menc.display_name}")
+        # Replies a outros membros (não bot)
+        if message.reference:
+            _ref_res = getattr(message.reference, "resolved", None)
+            if isinstance(_ref_res, discord.Message) and not _ref_res.author.bot and _ref_res.author.id != _uid_autor:
+                registrar_relacao(_uid_autor, _ref_res.author.id, "interação", f"reply de {message.author.display_name} para {_ref_res.author.display_name}")
+
 
     # ── Rastrear atividade + participação autônoma ────────────────────────────
     # O bot age sem precisar ser mencionado — avalia qualquer mensagem não trivial
