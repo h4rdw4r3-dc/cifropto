@@ -6335,9 +6335,9 @@ async def _digitar_e_enviar(
     antes de enviar — chamado APÓS a resposta já estar pronta.
     """
     palavras = max(len(texto.split()), 1)
-    # Pequeno delay natural após ter o texto pronto (simula releitura/correção)
-    delay = min(0.4 + palavras * 0.07 + random.uniform(0.0, 0.35), 2.5)
-    delay = max(delay, 0.4)
+    # Delay proporcional ao texto — mais curto para respostas rápidas de chat
+    delay = min(0.3 + palavras * 0.04 + random.uniform(0.0, 0.2), 1.2)
+    delay = max(delay, 0.3)
 
     parar = asyncio.Event()
     task = asyncio.ensure_future(_manter_digitando(channel, parar))
@@ -6806,11 +6806,45 @@ async def _interjetar_conversa(message: discord.Message):
         )
         texto = resp.choices[0].message.content.strip()
         if texto and "SILÊNCIO" not in texto.upper() and len(texto) > 8:
-            await asyncio.sleep(random.uniform(3, 9))  # delay humano
+            await asyncio.sleep(random.uniform(1, 3))  # delay mais curto
             await _digitar_e_enviar(message.channel, texto)
             log.info(f"[MONITOR] {tipo} em #{message.channel.name}: {texto[:60]}")
     except Exception as e:
         log.debug(f"[MONITOR] _interjetar falhou: {e}")
+
+
+async def _responder_convite(message: discord.Message):
+    """
+    Responde a mensagens que convidam o bot a interagir (ex: 'Fala ai seus tagarela').
+    Pula triagem — vai direto para resposta casual sem julgamento de 'substância'.
+    """
+    if not GROQ_DISPONIVEL or not GROQ_API_KEY:
+        return
+    ctx = _montar_ctx_canal(message.channel.id, n=6)
+    humor_txt = f" Humor: {_humor_sessao}." if _humor_sessao else ""
+    canal_nome = getattr(message.channel, "name", "")
+    try:
+        resp = await _groq_create(
+            model="llama-3.1-8b-instant",
+            max_tokens=80,
+            temperature=0.95,
+            messages=[
+                {"role": "system", "content": (
+                    f"Você é o shell_engenheiro — membro do servidor.{humor_txt}\n"
+                    f"Canal: #{canal_nome}. Alguém está te chamando pra participar da conversa.\n"
+                    "Responda de forma casual, curta e com personalidade. Pode usar gíria, kkk, rs.\n"
+                    "1 frase. Sem emojis, sem markdown. Entre na resenha como quem estava por ali."
+                )},
+                {"role": "user", "content": f"{message.author.display_name}: {message.content}\n\nContexto:\n{ctx}"},
+            ],
+        )
+        texto = resp.choices[0].message.content.strip()
+        if texto and len(texto) > 3:
+            await asyncio.sleep(random.uniform(0.8, 2.5))
+            await _digitar_e_enviar(message.channel, texto)
+            log.info(f"[CONVITE] #{canal_nome}: {texto[:60]}")
+    except Exception as e:
+        log.debug(f"[CONVITE] falhou: {e}")
 
 
 async def _reagir_midia_autonoma(message: discord.Message, descricao: str):
@@ -8662,7 +8696,7 @@ async def _on_message_impl(message: discord.Message):
             ))
             if _convite and _secs > 15:
                 ultima_interjeccao[_canal_id] = _agora
-                asyncio.ensure_future(_interjetar_conversa(message))
+                asyncio.ensure_future(_responder_convite(message))
             else:
                 # Canais monitorados: cooldown 90s, chance máx 40%
                 # Outros canais de chat: cooldown 3min, chance máx 20%
