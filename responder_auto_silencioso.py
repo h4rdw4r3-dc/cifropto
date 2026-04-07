@@ -661,6 +661,10 @@ ultima_interjeccao: dict[int, datetime] = {}  # cooldown por canal
 atividade_mensagens: dict[int, int] = defaultdict(int)  # user_id → contagem
 citacoes: list[dict] = []  # {texto, autor, canal, ts}
 
+# ── Deduplicação de respostas por canal ──────────────────────────────────────
+# Evita reenviar a mesma resposta repetida no mesmo canal
+_ultima_resposta_canal: dict[int, str] = {}
+
 # ── Tom e frequência de voz por usuário ───────────────────────────────────────
 # Acumula histórico de tons detectados para adaptar resposta ao padrão vocal
 _voz_historico: dict[int, list[dict]] = defaultdict(list)
@@ -3111,7 +3115,7 @@ async def continuar_conversa(user_id: int, msg: str, autor: str, guild=None) -> 
         if etapa == 2:
             del conversas[user_id]
             if any(p in msg_l for p in ["regra", "norma", "proibido"]):
-                return REGRAS
+                return f"tá tudo em {CANAL_REGRAS()}"
             # Qualquer outra coisa: devolve None para o chamador tratar corretamente
             return None
 
@@ -3191,9 +3195,9 @@ async def continuar_conversa(user_id: int, msg: str, autor: str, guild=None) -> 
     # ── AJUDA ─────────────────────────────────────────────────────────────────
     if ctx == "ajuda":
         del conversas[user_id]
-        if any(p in msg_l for p in ["regra", "norma", "proibido", "pode", "posso"]):
-            return REGRAS
-        return f"Isso não tô resolvendo, {autor}. Chama um mod."
+        if any(p in msg_l for p in ["regra", "norma", "proibido"]):
+            return f"tá tudo em {CANAL_REGRAS()}"
+        return await responder_com_groq(msg, autor, user_id, guild)
 
     # ── PROBLEMA ──────────────────────────────────────────────────────────────
     if ctx == "problema":
@@ -3205,8 +3209,8 @@ async def continuar_conversa(user_id: int, msg: str, autor: str, guild=None) -> 
     # ── PERGUNTA GENÉRICA ────────────────────────────────────────────────────
     if ctx == "pergunta":
         del conversas[user_id]
-        if any(p in msg_l for p in ["regra", "norma", "proibido", "pode", "posso", "permitido"]):
-            return REGRAS
+        if any(p in msg_l for p in ["regra", "norma", "proibido"]):
+            return f"tá tudo em {CANAL_REGRAS()}"
         return await responder_com_groq(msg, autor, user_id, guild)
 
     del conversas[user_id]
@@ -3216,8 +3220,8 @@ async def continuar_conversa(user_id: int, msg: str, autor: str, guild=None) -> 
 async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, membro=None, canal_id: int = None) -> str:
     msg = conteudo.lower()
 
-    if any(p in msg for p in ["regra", "regras", "norma", "proibido", "pode", "posso", "permitido", "permitida"]):
-        return REGRAS
+    if any(p in msg for p in ["regra", "regras", "norma", "proibido"]):
+        return f"tá tudo em {CANAL_REGRAS()}"
 
     if any(p in msg for p in ["denúncia", "denuncia", "reportar", "report", "quero denunciar",
                                "quero reportar", "infração", "infringindo", "desrespeitando", "abusando"]):
@@ -5867,7 +5871,23 @@ async def _reagir_ou_responder(
     """
     Decide se reage com emoji ou responde em texto.
     Mensagens muito curtas e afirmativas viram reação.
+    Remove markdown e deduplica antes de enviar.
     """
+    if not texto:
+        return
+
+    # Strip de markdown — o bot fala como humano, não como documento
+    texto = _limpar_markdown(texto)
+    if not texto:
+        return
+
+    # Deduplicação: não envia resposta idêntica à última neste canal
+    _chave_dup = texto.strip().lower()[:120]
+    if _ultima_resposta_canal.get(message.channel.id) == _chave_dup:
+        log.debug(f"[DEDUP] resposta idêntica ignorada em #{message.channel.name}")
+        return
+    _ultima_resposta_canal[message.channel.id] = _chave_dup
+
     _curta = len(texto.split()) <= 4
     _afirmativa = re.search(
         r'\b(sim|certo|exato|ok|claro|concordo|tambem|faz sentido|verdade)\b',
