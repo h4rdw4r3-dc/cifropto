@@ -855,8 +855,20 @@ GATILHOS_NOME = re.compile(
 )
 # Contextos que desambiguam "shell" (terminal/bash) ou "engenheiro" (profissão técnica).
 # Se presentes, GATILHOS_NOME não dispara.
+#
+# ⚠️  ATENÇÃO — HISTÓRICO DE BUG:
+#   "comando" foi removido desta lista propositalmente.
+#   Frases como "Shell, use o comando clear da loritta" continham a palavra
+#   "comando" e faziam o bot ignorar o gatilho (mencionado=False), silenciando
+#   toda a resposta. "Comando" é uma palavra comum no português e não indica
+#   contexto técnico de terminal por si só.
+#   Formas técnicas específicas foram adicionadas no lugar:
+#     • "linha de comando"   → contexto de CLI
+#     • "prompt de comando"  → contexto de CLI Windows
+#     • "comando bash/linux/terminal/sh" → contexto técnico inequívoco
 _GATILHO_EXCLUIDO = re.compile(
-    r'\b(?:bash|zsh|fish|sh\b|script|linux|unix|terminal|comando'
+    r'\b(?:bash|zsh|fish|sh\b|script|linux|unix|terminal'
+    r'|linha\s+de\s+comando|prompt\s+de\s+comando|comando\s+(?:bash|linux|terminal|sh)'
     r'|el[eé]tric[ao]|civil|mecânic[ao]|mecanico|quimic[ao]|nuclear'
     r'|agrônom[ao]|agronomo|de\s+software|de\s+dados|de\s+sistemas)\b',
     re.IGNORECASE
@@ -4812,6 +4824,62 @@ async def processar_ordem(message: discord.Message) -> bool:
                 await message.channel.send(_err or "Não consegui desafixar.")
         else:
             await message.channel.send(await _ia_curta("Pedir para responder à mensagem que quer desafixar.", max_tokens=15))
+
+    # ── acionar comando de outro bot ──────────────────────────────────────────
+    # Uso: "Shell, use o comando clear da loritta"
+    #      "Shell, manda o !clear da burra"
+    #      "Shell, use o /ban da loritta no Hardware"
+    #
+    # COMO FUNCIONA:
+    #   Detecta a intenção de usar um comando de OUTRO bot (não do Shell).
+    #   Extrai o nome/comando mencionado e envia como mensagem isolada no canal.
+    #   Mensagens isoladas são as únicas que outros bots reconhecem como comandos.
+    #
+    # LÓGICA DE EXTRAÇÃO:
+    #   1. Tenta capturar comandos já com prefixo: "!clear", "/ban", "+kick"
+    #   2. Se não encontrar prefixo, usa IA para determinar o comando correto
+    #      com base no nome do bot + ação pedida (ex: loritta → !clear)
+    elif _addr and re.search(
+        r'\b(?:us[ae]r?|mand[ae]r?|execut[ae]r?|rod[ae]r?|dis[pf]ar[ae]r?)\b.{0,25}'
+        r'\b(?:comando|cmd|command)\b.{0,30}'
+        r'\b(?:d[ao]s?|d[eo]s?|para\s+o?s?)\s+\w',
+        conteudo.lower()
+    ):
+        # Tenta capturar comando com prefixo explícito (!, /, +, .)
+        _m_cmd_prefixo = re.search(r'([!\/+\.][a-z][a-z0-9_-]*(?:\s+\d+)?)', conteudo, re.IGNORECASE)
+        if _m_cmd_prefixo:
+            _cmd_ext = _m_cmd_prefixo.group(1).strip()
+            _c_conf = await _ia_curta(f"Confirmar que vou enviar o comando {_cmd_ext} no canal. Bem direto.", max_tokens=15)
+            await message.channel.send(_c_conf or f"Enviando {_cmd_ext}.")
+            await asyncio.sleep(0.4)
+            await message.channel.send(_cmd_ext)
+            log.info(f"[CMD_EXT] Acionado por ordem de {autor}: {_cmd_ext}")
+        else:
+            # Sem prefixo explícito: pede à IA para determinar o comando exato
+            # Ex: "use o clear da loritta" → IA sabe que loritta usa "!clear"
+            _cmd_ia = await _ia_curta(
+                f"O usuário pediu: '{conteudo}'. "
+                "Responda APENAS com o comando completo que deve ser enviado no Discord "
+                "(ex: !clear, /ban @user, +clear 100). "
+                "Se não souber o prefixo exato do bot mencionado, use '!'. "
+                "Sem explicação, sem texto extra — só o comando.",
+                max_tokens=20,
+            )
+            if _cmd_ia and re.match(r'[!\/+\.]\w', _cmd_ia.strip()):
+                _cmd_limpo = _cmd_ia.strip()
+                _c_conf2 = await _ia_curta(f"Confirmar brevemente que vou usar {_cmd_limpo}.", max_tokens=12)
+                await message.channel.send(_c_conf2 or f"Usando {_cmd_limpo}.")
+                await asyncio.sleep(0.4)
+                await message.channel.send(_cmd_limpo)
+                log.info(f"[CMD_EXT] IA determinou comando: {_cmd_limpo}")
+            else:
+                # IA não conseguiu determinar: pede ao usuário o comando exato
+                _c_pedir = await _ia_curta(
+                    f"Dizer que não sei o comando exato do bot e pedir que o usuário informe (ex: '!clear 300').",
+                    max_tokens=25,
+                )
+                await message.channel.send(_c_pedir or "Qual é o comando exato? Me manda aqui que eu disparo.")
+        return True
 
     # ── limpar canal ──────────────────────────────────────────────────────────
     # Uso: "Shell limpa 10 mensagens" ou "Shell limpa #canal 5 mensagens"
