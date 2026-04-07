@@ -2614,6 +2614,21 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> st
         "Nunca repita a mesma pergunta que já foi respondida. Progrida para o próximo passo.\n"
         "Se o usuário respondeu 'sim' a algo: avance. Se respondeu 'não': encerre esse caminho.\n\n"
 
+        "APRENDIZADO POR FEEDBACK — REGRAS CRÍTICAS:\n"
+        "1. SEU NOME É SHELL — quando alguém usa 'Shell' numa mensagem estão falando COM VOCÊ.\n"
+        "   Nunca responda com 'Entendi, Shell.' ou 'Sim, Shell.' — você é o Shell, não o destinatário.\n"
+        "   Responda ao AUTOR da mensagem, não ao seu próprio nome.\n"
+        "2. ERROS DE OUTROS BOTS — o contexto do canal mostra mensagens marcadas como [BOT:NomeBot] ERRO/REJEIÇÃO.\n"
+        "   Se um bot respondeu com erro depois de você enviar algo: SUA AÇÃO FALHOU.\n"
+        "   Não repita a mesma ação. Reconheça o que aconteceu e ofereça alternativa real.\n"
+        "3. OUTROS BOTS SÃO ENTIDADES SEPARADAS — Loritta, MEE6, Carl-bot, etc. têm comandos próprios.\n"
+        "   Quando alguém pede para 'usar a Loritta', significa DIGITAR o comando da Loritta no canal.\n"
+        "   Se a Loritta rejeitar: SUA CONTA não tem a permissão necessária — explique e sugira usar a sua própria função.\n"
+        "4. CORREÇÃO IMEDIATA — se alguém diz 'Entendeu?', 'Errado', 'Não é assim', 'Para': PARE a ação atual.\n"
+        "   Reconheça o erro em UMA frase. Pergunte o que fazer de diferente, se necessário.\n"
+        "5. NÃO REPITA AÇÕES FRACASSADAS — se tentou algo e não funcionou (erro, sem permissão, rejeitado):\n"
+        "   mude a abordagem ou informe que não é possível com sua conta. Nunca reexecute o mesmo comando.\n\n"
+
         "REGRAS:\n"
         "1. Conhecimento geral (fatos, ciência, história, math): responda direto e com confiança.\n"
         "2. Dados do servidor: o contexto abaixo tem TUDO que existe. Use-o.\n"
@@ -7381,6 +7396,27 @@ async def _on_message_impl(message: discord.Message):
 
     if not message.guild or message.guild.id != SERVIDOR_ID:
         return
+
+    # ── Captura respostas de outros bots para memória de contexto ───────────────
+    # Erros de permissão, rejeições de comandos, etc. precisam estar no contexto
+    # para que o bot entenda que sua ação anterior falhou e não repita.
+    if message.author.bot and message.author != client.user:
+        _txt_bot = (message.content or "").strip()
+        if _txt_bot and len(_txt_bot) < 400:
+            # Detecta se é uma resposta de erro/rejeição (indicadores comuns)
+            _e_erro_bot = bool(re.search(
+                r'(não tem permiss|sem permiss|não podes|você não pode|invalid|erro|error'
+                r'|❌|⛔|🚫|não autorizado|permissão necessária|permission)',
+                _txt_bot, re.IGNORECASE
+            ))
+            # Só armazena erros ou respostas curtas relevantes (evita flood de bot)
+            if _e_erro_bot:
+                canal_memoria[message.channel.id].append({
+                    "autor": f"[BOT:{message.author.display_name}]",
+                    "conteudo": f"ERRO/REJEIÇÃO: {_txt_bot[:200]}",
+                })
+                log.debug(f"[BOT] erro de {message.author.display_name} capturado: {_txt_bot[:60]}")
+        return  # bots não passam pelo fluxo principal
 
     # Ignorar mensagens de outros bots com prefixo (ex: 7!afk, !cmd, /cmd)
     # Só ignora se começar com prefixo e não mencionar este bot
