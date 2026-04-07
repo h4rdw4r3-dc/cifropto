@@ -2927,12 +2927,19 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     try:
         resp = await _groq_client().chat.completions.create(
             model=modelo,
-            max_tokens=150,
+            max_tokens=220,
             temperature=0.6,
             top_p=0.9,
             messages=mensagens,
         )
-        texto = resp.choices[0].message.content.strip()
+        escolha = resp.choices[0]
+        texto = _limpar_markdown(escolha.message.content.strip())
+        # Se o modelo foi cortado pelo limite de tokens, trunca na última frase completa
+        if escolha.finish_reason == "length":
+            ultimo_ponto = max(texto.rfind("."), texto.rfind("!"), texto.rfind("?"))
+            if ultimo_ponto > len(texto) // 2:
+                texto = texto[:ultimo_ponto + 1]
+            log.warning(f"[GROQ] resposta truncada pelo limite de tokens — cortada na frase")
         # Rastrear tokens consumidos
         if resp.usage:
             _registrar_tokens(modelo, resp.usage.total_tokens)
@@ -2947,11 +2954,16 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
                 log.info("[GROQ] fallback para 8b-instant")
                 resp2 = await _groq_client().chat.completions.create(
                     model="llama-3.1-8b-instant",
-                    max_tokens=120,
+                    max_tokens=180,
                     temperature=0.6,
                     messages=mensagens,
                 )
-                texto2 = resp2.choices[0].message.content.strip()
+                escolha2 = resp2.choices[0]
+                texto2 = _limpar_markdown(escolha2.message.content.strip())
+                if escolha2.finish_reason == "length":
+                    ult = max(texto2.rfind("."), texto2.rfind("!"), texto2.rfind("?"))
+                    if ult > len(texto2) // 2:
+                        texto2 = texto2[:ult + 1]
                 if resp2.usage:
                     _registrar_tokens("llama-3.1-8b-instant", resp2.usage.total_tokens)
                 hist.append({"role": "assistant", "content": texto2})
@@ -4202,19 +4214,9 @@ async def processar_ordem(message: discord.Message) -> bool:
             await message.channel.send("Menciona o membro para ver o histórico.")
         return True
 
-    # ── ajuda ──────────────────────────────────────────────────────────────────
+    # ── ajuda — não responde com manual hardcoded, cai no fluxo normal de conversa
     elif cmd in ("ajuda", "help", "comandos"):
-        await message.channel.send(
-            "Para silenciar alguém diga silenciar e mencione o usuário, opcionalmente com o tempo em minutos. "
-            "Para desfazer diga dessilenciar. Para banir diga banir seguido do usuário, duração e motivo. "
-            "Para revogar diga desbanir. Para expulsar diga expulsar. "
-            "Para avisar alguém diga avisar e mencione quem. Para chamar a moderação diga chamar mod. "
-            "Para enviar uma mensagem em outro canal diga envia seguido do texto e mencione o canal. "
-            "Para listar membros diga lista membros. "
-            "Para ver entradas e saídas diga entradas, saídas ou fluxo de membros (com: hoje, semana ou mês). "
-            "Para ver histórico de um membro diga histórico e mencione quem. "
-            "Para ativar ausência diga ausente ou afk com motivo opcional, e para voltar diga voltei."
-        )
+        pass  # sem prefixo, sem manual — o bot responde naturalmente pela IA
 
     # ── punicoes [@user]  -  audit log de punições via REST ─────────────────────
     elif cmd in ("punicoes", "punições", "punicao", "punição", "audit", "log"):
@@ -5570,6 +5572,26 @@ async def _manter_digitando(channel: discord.TextChannel, parar: asyncio.Event) 
             pass
 
 
+def _limpar_markdown(texto: str) -> str:
+    """Remove formatação markdown do texto para envio como usuário comum."""
+    # Remove blocos de código
+    texto = re.sub(r"```[\s\S]*?```", "", texto)
+    texto = re.sub(r"`[^`]+`", lambda m: m.group(0)[1:-1], texto)
+    # Remove negrito/itálico
+    texto = re.sub(r"\*{1,3}([^*]+)\*{1,3}", r"\1", texto)
+    texto = re.sub(r"_{1,3}([^_]+)_{1,3}", r"\1", texto)
+    # Remove cabeçalhos
+    texto = re.sub(r"^#{1,6}\s+", "", texto, flags=re.MULTILINE)
+    # Remove listas numeradas e com bullet
+    texto = re.sub(r"^\s*\d+\.\s+", "", texto, flags=re.MULTILINE)
+    texto = re.sub(r"^\s*[-*•]\s+", "", texto, flags=re.MULTILINE)
+    # Remove links markdown [texto](url) → texto
+    texto = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", texto)
+    # Colapsa múltiplas linhas em branco
+    texto = re.sub(r"\n{3,}", "\n\n", texto)
+    return texto.strip()
+
+
 async def _safe_send(
     channel: discord.TextChannel,
     texto: str,
@@ -5980,6 +6002,60 @@ async def _interjetar_conversa(message: discord.Message):
             log.info(f"[MONITOR] {tipo} em #{message.channel.name}: {texto[:60]}")
     except Exception as e:
         log.debug(f"[MONITOR] _interjetar falhou: {e}")
+
+
+async def _reagir_midia_autonoma(message: discord.Message, descricao: str):
+    """
+    Reage de forma autônoma a uma imagem/vídeo enviada num canal monitorado.
+    Sem ser mencionado — age como membro que viu a mídia e tem algo genuíno a dizer.
+    Cooldown de 90s por canal para não spammar.
+    """
+    if not GROQ_DISPONIVEL or not GROQ_API_KEY:
+        return
+
+    _canal_id = message.channel.id
+    _agora = agora_utc()
+    _ultima = ultima_interjeccao.get(_canal_id, datetime(1970, 1, 1, tzinfo=timezone.utc))
+    if (_agora - _ultima).total_seconds() < 90:
+        return  # cooldown
+
+    ctx = _montar_ctx_canal(_canal_id, n=5)
+    legenda = message.content.strip()
+    humor_txt = f" Humor: {_humor_sessao}." if _humor_sessao else ""
+
+    prompt_midia = (
+        f"Mídia enviada por {message.author.display_name}"
+        + (f" com legenda: '{legenda}'" if legenda else "")
+        + f".\nDescrição do conteúdo: {descricao}"
+        + (f"\nContexto recente do canal:\n{ctx}" if ctx else "")
+    )
+
+    system_midia = (
+        f"Você é o shell_engenheiro, membro de um servidor Discord brasileiro.{humor_txt}\n"
+        "Alguém enviou uma imagem/vídeo no canal. Você viu e quer comentar de forma genuína — "
+        "como um membro normal reagiria: pode ser uma observação, uma piada, uma opinião, uma pergunta.\n"
+        "1 frase no máximo. Sem emojis. Sem asteriscos. Sem markdown. Sem introdução.\n"
+        "Se não tiver NADA genuíno a dizer sobre a mídia: responda SILÊNCIO."
+    )
+    try:
+        resp = await _groq_client().chat.completions.create(
+            model="llama-3.1-8b-instant",
+            max_tokens=80,
+            temperature=0.9,
+            messages=[
+                {"role": "system", "content": system_midia},
+                {"role": "user", "content": prompt_midia},
+            ],
+        )
+        _registrar_tokens("8b", resp.usage.total_tokens if resp.usage else 50)
+        texto = _limpar_markdown(resp.choices[0].message.content.strip())
+        if texto and "SILÊNCIO" not in texto.upper() and len(texto) > 5:
+            ultima_interjeccao[_canal_id] = _agora
+            await asyncio.sleep(random.uniform(2, 7))
+            await _digitar_e_enviar(message.channel, texto)
+            log.info(f"[MIDIA] reagiu em #{message.channel.name}: {texto[:60]}")
+    except Exception as e:
+        log.debug(f"[MIDIA] _reagir_midia_autonoma falhou: {e}")
 
 
 async def traduzir_texto(texto: str, idioma: str = "ingles") -> str:
@@ -7222,7 +7298,34 @@ async def _on_message_impl(message: discord.Message):
         asyncio.ensure_future(_desativar_lockdown(message.guild))
         return
 
-    # ── Áudio passivo: transcreve em canais monitorados mesmo sem @menção ───────
+    # ── Áudio inline: transcreve mensagens de voz antes de tudo ─────────────────
+    # Mensagens de voz chegam com content=''. Sem transcrever antes, o bot nunca
+    # detecta gatilhos nem processa ordens ditas no áudio.
+    _conteudo_base = message.content
+    _transcricao_audio_inline: str = ""
+    _att_audio_inline = None
+    if not message.author.bot and not _conteudo_base.strip() and message.attachments:
+        _att_audio_inline = next(
+            (a for a in message.attachments
+             if (a.content_type or "").startswith("audio/")
+             or (a.filename or "").endswith((".mp3", ".ogg", ".wav", ".webm", ".m4a", ".flac", ".opus"))),
+            None,
+        )
+        if _att_audio_inline:
+            if _att_audio_inline.size <= _GROQ_AUDIO_MAX_BYTES:
+                _transcricao_audio_inline = await _transcrever_audio(
+                    _att_audio_inline.url, _att_audio_inline.filename or ""
+                )
+                if _transcricao_audio_inline:
+                    _conteudo_base = _transcricao_audio_inline
+                    log.info(f"[AUDIO] inline de {message.author.display_name}: {_conteudo_base[:80]!r}")
+            else:
+                log.warning(
+                    f"[AUDIO] arquivo de {message.author.display_name} grande demais "
+                    f"({_att_audio_inline.size // 1024 // 1024}MB), ignorado"
+                )
+
+    # ── Mídia passiva: processa imagens/vídeos/áudios em canais monitorados ────────
     if (not message.author.bot
             and message.attachments
             and message.channel.id in canais_monitorados):
@@ -7231,15 +7334,41 @@ async def _on_message_impl(message: discord.Message):
             if (a.content_type or "").startswith("audio/")
             or (a.filename or "").endswith((".mp3", ".ogg", ".wav", ".webm", ".m4a", ".opus"))
         ]
+        _imagens_passivas = [
+            a for a in message.attachments
+            if (a.content_type or "").startswith("image/")
+            or (a.content_type or "").startswith("video/")
+            or (a.filename or "").lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".mov"))
+        ]
+
         if _audios_passivos:
-            _transcricao_passiva = await _transcrever_audio(_audios_passivos[0].url, _audios_passivos[0].filename)
+            # Reusa transcrição inline se já feita para o mesmo arquivo
+            if _transcricao_audio_inline and _audios_passivos[0].url == getattr(_att_audio_inline, "url", None):
+                _transcricao_passiva = _transcricao_audio_inline
+            else:
+                _transcricao_passiva = await _transcrever_audio(_audios_passivos[0].url, _audios_passivos[0].filename)
             if _transcricao_passiva:
-                # Injeta transcrição na memória do canal para contexto
                 canal_memoria[message.channel.id].append({
                     "autor": message.author.display_name,
                     "conteudo": f"[áudio]: {_transcricao_passiva[:300]}",
                 })
                 log.info(f"[AUDIO] transcrição passiva em #{message.channel.name}: {_transcricao_passiva[:60]}")
+
+        if _imagens_passivas:
+            # Descreve a imagem/vídeo e reage autonomamente
+            _att_img = _imagens_passivas[0]
+            _ct_img = (_att_img.content_type or "").lower()
+            if _ct_img.startswith("image/"):
+                _desc_img = await _descrever_imagem(_att_img.url, message.content or "")
+            else:
+                _desc_img = f"[Vídeo: {_att_img.filename}, {_att_img.size // 1024}KB]"
+            if _desc_img:
+                canal_memoria[message.channel.id].append({
+                    "autor": message.author.display_name,
+                    "conteudo": f"[imagem/vídeo enviado]: {_desc_img[:200]}",
+                })
+                # Dispara reação autônoma em background
+                asyncio.ensure_future(_reagir_midia_autonoma(message, _desc_img))
 
     # ── Memória do canal: registra toda mensagem humana ──────────────────────
     # Permite ao bot entender o contexto da conversa sem intervenção manual
@@ -7278,7 +7407,8 @@ async def _on_message_impl(message: discord.Message):
 
     autor = message.author.display_name
     user_id = message.author.id
-    conteudo = message.content
+    # _conteudo_base já foi transcrito do áudio inline no bloco acima, se necessário
+    conteudo = _conteudo_base
 
     _eh_dono = message.author.id in DONOS_IDS
     _eh_superior_ = eh_superior(message.author)   # donos + cargos superiores
