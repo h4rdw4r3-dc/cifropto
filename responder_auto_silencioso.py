@@ -745,6 +745,7 @@ _humor_sessao: str = ""
 
 # ── Controle de iniciativa proativa ───────────────────────────────────────────
 _ultima_iniciativa: dict[int, datetime] = {}  # canal_id → última vez que postou
+_voz_entradas: dict[int, datetime] = {}       # user_id → hora que entrou no canal de voz
 
 # ── Mensagens triviais: não processam IA ─────────────────────────────────────
 _TRIVIAIS = re.compile(
@@ -3643,7 +3644,7 @@ async def _verificar_confirmacao_pendente(message: discord.Message) -> bool:
     resp = message.content.strip().lower()
     if resp in ("sim", "s", "yes", "y", "confirma", "ok", "pode"):
         del confirmacoes_pendentes[user_id]
-        await message.channel.send("Certo, processando...")
+        await message.channel.send(await _ia_curta("Avisar que está processando. Bem curto e natural.", max_tokens=10))
         try:
             await pendente["coro_fn"](*pendente["args"], **pendente["kwargs"])
         except Exception as e:
@@ -3651,7 +3652,7 @@ async def _verificar_confirmacao_pendente(message: discord.Message) -> bool:
         return True
     elif resp in ("nao", "não", "n", "no", "cancela", "cancelar"):
         del confirmacoes_pendentes[user_id]
-        await message.channel.send("Cancelado.")
+        await message.channel.send(await _ia_curta("Confirmar cancelamento. Bem curto.", max_tokens=8))
         return True
     # Resposta não reconhecida — deixa a mensagem passar normalmente
     return False
@@ -4137,7 +4138,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         if not m:
             m = re.search(r'(?:palavra|termo|filtro|adiciona[r]?|bloqueia[r]?|filtra[r]?)\s+(\S+)', msg)
         if not m:
-            await message.channel.send("Não entendi qual palavra adicionar. Use: adicionar a palavra e a categoria como vulgar, sexual ou discriminação.")
+            await message.channel.send(await _ia_curta("Pedir para especificar a palavra e a categoria (vulgar, sexual ou discriminação). Natural.", max_tokens=25))
             return True
         nova = m.group(1).strip().lower()
         cat = inferir_categoria(msg)
@@ -4156,7 +4157,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         if not m:
             m = re.search(r'(?:remove[r]?|remov[ae][r]?|desbloqueai?[r]?|desfiltrai?[r]?)\s+(\S+)', msg)
         if not m:
-            await message.channel.send("Não entendi qual palavra remover. Diga remover seguido da palavra.")
+            await message.channel.send(await _ia_curta("Pedir para especificar qual palavra remover. Natural.", max_tokens=20))
             return True
         alvo = m.group(1).strip().lower()
         removida = False
@@ -4174,7 +4175,7 @@ async def processar_ordem(message: discord.Message) -> bool:
     elif cmd in ("listar", "lista", "palavras", "filtros"):
         total = sum(len(v) for v in palavras_custom.values())
         if total == 0:
-            await message.channel.send("Nenhuma palavra customizada adicionada ainda.")
+            await message.channel.send(await _ia_curta("Nenhuma palavra customizada adicionada ainda. Breve.", max_tokens=15))
             return True
         linhas = []
         nomes = {"vulgares": "Palavrões", "sexual": "Sexual", "discriminacao": "Discriminação", "compostos": "Compostos"}
@@ -4212,9 +4213,9 @@ async def processar_ordem(message: discord.Message) -> bool:
     elif cmd in ("voltar", "voltei", "retornei", "presente"):
         if message.author.id in ausencia:
             del ausencia[message.author.id]
-            await message.channel.send("Modo ausente desativado. Bem-vindo de volta.")
+            await message.channel.send(await _ia_curta("Modo ausente desativado, bem-vindo de volta. Natural e curto.", max_tokens=15))
         else:
-            await message.channel.send("Você não estava marcado como ausente.")
+            await message.channel.send(await _ia_curta("Avisar que não estava marcado como ausente. Breve.", max_tokens=15))
 
     # ── listar membros ─────────────────────────────────────────────────────────
     elif any(p in conteudo.lower() for p in ["lista membros", "listar membros", "membros do servidor", "lista de membros"]):
@@ -4231,7 +4232,8 @@ async def processar_ordem(message: discord.Message) -> bool:
                 bloco_atual += linha
         if bloco_atual:
             blocos.append(bloco_atual)
-        await message.channel.send(f"Membros humanos  -  {len(membros)} no total.")
+        _cap = await _ia_curta(f"Listar {len(membros)} membros humanos do servidor. Breve.", max_tokens=20)
+        await message.channel.send(_cap or f"{len(membros)} membros.")
         for bloco in blocos:
             await message.channel.send(f"```\n{bloco}```")
 
@@ -4246,7 +4248,7 @@ async def processar_ordem(message: discord.Message) -> bool:
     ):
         canal_destino = message.channel_mentions[0] if message.channel_mentions else None
         if not canal_destino:
-            await message.channel.send("Menciona o canal onde devo enviar.")
+            await message.channel.send(await _ia_curta("Pedir para mencionar o canal onde enviar a mensagem.", max_tokens=15))
             return True
         # Remove menções de canal e usuário
         texto_msg = re.sub(r'<#\d+>\s*', '', conteudo).strip()
@@ -4263,10 +4265,11 @@ async def processar_ordem(message: discord.Message) -> bool:
             '', texto_msg, flags=re.IGNORECASE
         ).strip()
         if not texto_msg:
-            await message.channel.send("Qual mensagem devo enviar?")
+            await message.channel.send(await _ia_curta("Pedir qual mensagem enviar. Natural.", max_tokens=15))
             return True
         await canal_destino.send(texto_msg)
-        await message.channel.send(f"Mensagem enviada em {canal_destino.mention}.")
+        _conf = await _ia_curta(f"Confirmar que mensagem foi enviada em {canal_destino.name}. Breve.", max_tokens=15)
+        await message.channel.send(_conf or f"Enviado em {canal_destino.mention}.")
 
     # ── comandos exclusivos de donos absolutos ─────────────────────────────────
     elif message.author.id in DONOS_ABSOLUTOS_IDS and any(
@@ -4282,11 +4285,13 @@ async def processar_ordem(message: discord.Message) -> bool:
                 nome = canal_del.name
                 try:
                     await canal_del.delete(reason=f"Ordem de {message.author.display_name}")
-                    await message.channel.send(f"Canal #{nome} apagado.")
+                    _c = await _ia_curta(f"Confirmar que canal '{nome}' foi apagado.", max_tokens=15)
+                    await message.channel.send(_c or f"Canal #{nome} apagado.")
                 except Exception as e:
-                    await message.channel.send(f"Não foi possível apagar #{nome}  -  {e}")
+                    _c = await _ia_curta(f"Erro ao apagar canal '{nome}': {str(e)[:50]}.", max_tokens=20)
+                    await message.channel.send(_c or f"Não consegui apagar #{nome}.")
             else:
-                await message.channel.send("Menciona o canal a apagar.")
+                await message.channel.send(await _ia_curta("Pedir para mencionar o canal a apagar.", max_tokens=15))
 
         # Apagar cargo
         elif any(p in msg_l for p in ["apaga cargo", "deleta cargo", "remove cargo"]):
@@ -4296,11 +4301,13 @@ async def processar_ordem(message: discord.Message) -> bool:
                 nome = cargo_del.name
                 try:
                     await cargo_del.delete(reason=f"Ordem de {message.author.display_name}")
-                    await message.channel.send(f"Cargo {nome} apagado.")
+                    _c = await _ia_curta(f"Confirmar que cargo '{nome}' foi apagado.", max_tokens=15)
+                    await message.channel.send(_c or f"Cargo {nome} apagado.")
                 except Exception as e:
-                    await message.channel.send(f"Não foi possível apagar o cargo {nome}  -  {e}")
+                    _c = await _ia_curta(f"Erro ao apagar cargo '{nome}': {str(e)[:50]}.", max_tokens=20)
+                    await message.channel.send(_c or f"Não consegui apagar o cargo {nome}.")
             else:
-                await message.channel.send("Menciona o cargo a apagar.")
+                await message.channel.send(await _ia_curta("Pedir para mencionar o cargo a apagar.", max_tokens=15))
 
     # ── relatório de entradas/saídas ───────────────────────────────────────────
     elif any(p in conteudo.lower() for p in [
@@ -4317,6 +4324,9 @@ async def processar_ordem(message: discord.Message) -> bool:
         else:
             dias = 7
         rel = await relatorio_membros(guild, dias)
+        _cap = await _ia_curta(f"Apresentar relatório de membros dos últimos {dias} dias. Breve.", max_tokens=20)
+        if _cap:
+            await message.channel.send(_cap)
         blocos = [rel[i:i+1900] for i in range(0, len(rel), 1900)]
         for bloco in blocos:
             await message.channel.send(f"```\n{bloco}\n```")
@@ -4326,9 +4336,12 @@ async def processar_ordem(message: discord.Message) -> bool:
         if alvos:
             alvo = alvos[0]
             hist = await historico_membro(alvo.id, alvo.display_name)
+            _cap = await _ia_curta(f"Apresentar histórico de {alvo.display_name}. Breve.", max_tokens=20)
+            if _cap:
+                await message.channel.send(_cap)
             await message.channel.send(f"```\n{hist}\n```")
         else:
-            await message.channel.send("Menciona o membro para ver o histórico.")
+            await message.channel.send(await _ia_curta("Pedir para mencionar o membro para ver o histórico.", max_tokens=15))
         return True
 
     # ── ajuda — não responde com manual hardcoded, cai no fluxo normal de conversa
@@ -4339,6 +4352,10 @@ async def processar_ordem(message: discord.Message) -> bool:
     elif cmd in ("punicoes", "punições", "punicao", "punição", "audit", "log"):
         alvo_audit = alvos[0] if alvos else None
         resultado = await api_historico_punicoes(guild, alvo_audit)
+        _nome_a = alvo_audit.display_name if alvo_audit else "servidor"
+        _cap = await _ia_curta(f"Apresentar histórico de punições de {_nome_a}. Breve.", max_tokens=20)
+        if _cap:
+            await message.channel.send(_cap)
         blocos = [resultado[i:i+1900] for i in range(0, len(resultado), 1900)]
         for bloco in blocos:
             await message.channel.send(f"```\n{bloco}\n```")
@@ -4346,6 +4363,9 @@ async def processar_ordem(message: discord.Message) -> bool:
     # ── banidos  -  lista de banimentos via REST ─────────────────────────────────
     elif cmd in ("banidos", "bans", "banimentos"):
         resultado = await api_banimentos_formatado(guild)
+        _cap = await _ia_curta("Apresentar lista de banimentos do servidor. Breve.", max_tokens=20)
+        if _cap:
+            await message.channel.send(_cap)
         blocos = [resultado[i:i+1900] for i in range(0, len(resultado), 1900)]
         for bloco in blocos:
             await message.channel.send(f"```\n{bloco}\n```")
@@ -4358,6 +4378,9 @@ async def processar_ordem(message: discord.Message) -> bool:
         if m_qtd:
             qtd = min(int(m_qtd.group(1)), 50)
         resultado = await api_ultimas_mensagens(guild, canal_alvo.id, qtd)
+        _cap = await _ia_curta(f"Apresentar últimas {qtd} mensagens de #{canal_alvo.name}. Breve.", max_tokens=20)
+        if _cap:
+            await message.channel.send(_cap)
         blocos = [resultado[i:i+1900] for i in range(0, len(resultado), 1900)]
         for bloco in blocos:
             await message.channel.send(f"```\n{bloco}\n```")
@@ -4370,6 +4393,9 @@ async def processar_ordem(message: discord.Message) -> bool:
     # ── info @membro  -  dados completos via REST ────────────────────────────────
     elif cmd == "info" and alvos:
         texto = await api_info_membro_completa(guild, alvos[0])
+        _cap = await _ia_curta(f"Apresentar info de {alvos[0].display_name}. Breve.", max_tokens=20)
+        if _cap:
+            await message.channel.send(_cap)
         await message.channel.send(f"```\n{texto}\n```")
 
     # ── tokens  -  exibe consumo de tokens Groq do dia ──────────────────────────
@@ -4377,11 +4403,11 @@ async def processar_ordem(message: discord.Message) -> bool:
         _resetar_tokens_se_novo_dia()
         pct_70b = round(_tokens_70b_hoje / LIMITE_70B * 100)
         pct_8b  = round(_tokens_8b_hoje  / LIMITE_8B  * 100)
-        await message.channel.send(
-            f"Budget Groq hoje:\n"
-            f"70b-versatile: {_tokens_70b_hoje:,}/{LIMITE_70B:,} tokens ({pct_70b}%)\n"
-            f"8b-instant:    {_tokens_8b_hoje:,}/{LIMITE_8B:,} tokens ({pct_8b}%)"
+        _cap = await _ia_curta(
+            f"Informar consumo de tokens Groq hoje. 70b: {_tokens_70b_hoje}/{LIMITE_70B} ({pct_70b}%). 8b: {_tokens_8b_hoje}/{LIMITE_8B} ({pct_8b}%). Natural.",
+            max_tokens=40,
         )
+        await message.channel.send(_cap or f"70b: {_tokens_70b_hoje:,}/{LIMITE_70B:,} ({pct_70b}%) | 8b: {_tokens_8b_hoje:,}/{LIMITE_8B:,} ({pct_8b}%)")
 
     # ── enquete / votação ─────────────────────────────────────────────────────
     # Uso: "Shell abre enquete: Tema | Opção A | Opção B | Opção C"
@@ -4391,7 +4417,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         ).strip())
         partes_eq = [p.strip() for p in partes_eq if p.strip()]
         if len(partes_eq) < 2:
-            await message.channel.send("Formato: Shell abre enquete: Tema | Opção A | Opção B")
+            await message.channel.send(await _ia_curta("Pedir para especificar o tema e opções da enquete separados por |. Exemplo natural.", max_tokens=25))
             return True
         tema = partes_eq[0]
         opcoes = partes_eq[1:]
@@ -4422,13 +4448,14 @@ async def processar_ordem(message: discord.Message) -> bool:
         else:
             pool = [m for m in guild.members if not m.bot and m != client.user]
         if not pool:
-            await message.channel.send("Nenhum membro disponível para sortear.")
+            await message.channel.send(await _ia_curta("Nenhum membro disponível para sortear. Avisar brevemente.", max_tokens=15))
             return True
         qtd = min(qtd, len(pool))
         ganhadores = random.sample(pool, qtd)
         mencoes = " ".join(m.mention for m in ganhadores)
-        sufixo = "o sorteado é" if qtd == 1 else f"os {qtd} sorteados são"
-        await message.channel.send(f"Sorteio encerrado  -  {sufixo}: {mencoes}")
+        _nomes_g = ", ".join(m.display_name for m in ganhadores)
+        _cap = await _ia_curta(f"Anunciar resultado de sorteio. Sorteado(s): {_nomes_g}. Natural, sem template.", max_tokens=30)
+        await message.channel.send(f"{_cap or 'Sorteado(s):'} {mencoes}")
         log.info(f"[SORTEIO] {autor}: {[m.display_name for m in ganhadores]}")
 
     # ── pin / fixar mensagem ──────────────────────────────────────────────────
@@ -4446,11 +4473,12 @@ async def processar_ordem(message: discord.Message) -> bool:
         if alvo_pin:
             try:
                 await alvo_pin.pin()
-                await message.channel.send("Mensagem fixada.")
+                await message.channel.send(await _ia_curta("Confirmar que mensagem foi fixada. Bem curto.", max_tokens=10))
             except Exception as e:
-                await message.channel.send(f"Não foi possível fixar: {e}")
+                _err = await _ia_curta(f"Erro ao fixar mensagem: {str(e)[:50]}.", max_tokens=20)
+                await message.channel.send(_err or "Não consegui fixar.")
         else:
-            await message.channel.send("Responde à mensagem que quer fixar, ou diz qual.")
+            await message.channel.send(await _ia_curta("Pedir para responder à mensagem que quer fixar.", max_tokens=15))
 
     # ── unpin / desafixar ─────────────────────────────────────────────────────
     elif _addr and re.search(r'\b(desafix[ae]r?|unpin|despin)\b', conteudo.lower()):
@@ -4460,11 +4488,12 @@ async def processar_ordem(message: discord.Message) -> bool:
         if alvo_unpin:
             try:
                 await alvo_unpin.unpin()
-                await message.channel.send("Mensagem desafixada.")
+                await message.channel.send(await _ia_curta("Confirmar que mensagem foi desafixada. Bem curto.", max_tokens=10))
             except Exception as e:
-                await message.channel.send(f"Não foi possível desafixar: {e}")
+                _err = await _ia_curta(f"Erro ao desafixar: {str(e)[:50]}.", max_tokens=20)
+                await message.channel.send(_err or "Não consegui desafixar.")
         else:
-            await message.channel.send("Responde à mensagem que quer desafixar.")
+            await message.channel.send(await _ia_curta("Pedir para responder à mensagem que quer desafixar.", max_tokens=15))
 
     # ── limpar canal ──────────────────────────────────────────────────────────
     # Uso: "Shell limpa 10 mensagens" ou "Shell limpa #canal 5 mensagens"
@@ -4481,9 +4510,11 @@ async def processar_ordem(message: discord.Message) -> bool:
                     if apagadas >= qtd_limpa:
                         break
                     await asyncio.sleep(0.4)
-            await message.channel.send(f"{apagadas} mensagem{'s' if apagadas != 1 else ''} minhas apagada{'s' if apagadas != 1 else ''} em {canal_limpa.mention}.")
+            _cap = await _ia_curta(f"Confirmar que {apagadas} mensagem(ns) foram apagadas em #{canal_limpa.name}. Natural.", max_tokens=20)
+            await message.channel.send(_cap or f"{apagadas} mensagem(s) apagada(s).")
         except Exception as e:
-            await message.channel.send(f"Erro ao limpar: {e}")
+            _err = await _ia_curta(f"Erro ao limpar mensagens: {str(e)[:50]}.", max_tokens=20)
+            await message.channel.send(_err or "Não consegui limpar.")
 
     # ── criar canal ───────────────────────────────────────────────────────────
     # Uso: "Shell cria canal texto nome-do-canal [categoria]"
@@ -4510,10 +4541,12 @@ async def processar_ordem(message: discord.Message) -> bool:
             else:
                 novo = await guild.create_text_channel(nome_canal, category=categoria, reason=f"Ordem de {autor}")
             tipo_txt = "voz" if tipo_voz else "texto"
-            await message.channel.send(f"Canal de {tipo_txt} {novo.mention} criado.")
+            _c = await _ia_curta(f"Confirmar criação de canal de {tipo_txt} '{nome_canal}'. Breve.", max_tokens=20)
+            await message.channel.send(f"{_c or f'Canal {novo.mention} criado.'}")
             log.info(f"[CANAL] {autor} criou #{nome_canal} ({tipo_txt})")
         except Exception as e:
-            await message.channel.send(f"Não foi possível criar o canal: {e}")
+            _err = await _ia_curta(f"Erro ao criar canal '{nome_canal}': {str(e)[:50]}.", max_tokens=20)
+            await message.channel.send(_err or "Não consegui criar o canal.")
 
     # ── criar cargo ───────────────────────────────────────────────────────────
     # Uso: "Shell cria cargo NomeDoCargo"
@@ -4524,36 +4557,40 @@ async def processar_ordem(message: discord.Message) -> bool:
         nome_cargo = nome_cargo[:50] or "Novo Cargo"
         try:
             novo_cargo = await guild.create_role(name=nome_cargo, reason=f"Ordem de {autor}")
-            await message.channel.send(f"Cargo {novo_cargo.mention} criado.")
+            _c = await _ia_curta(f"Confirmar criação do cargo '{nome_cargo}'. Breve.", max_tokens=15)
+            await message.channel.send(_c or f"Cargo {novo_cargo.mention} criado.")
             log.info(f"[CARGO] {autor} criou cargo '{nome_cargo}'")
         except Exception as e:
-            await message.channel.send(f"Não foi possível criar o cargo: {e}")
+            _err = await _ia_curta(f"Erro ao criar cargo '{nome_cargo}': {str(e)[:50]}.", max_tokens=20)
+            await message.channel.send(_err or "Não consegui criar o cargo.")
 
     # ── renomear canal ────────────────────────────────────────────────────────
     # Uso: "Shell renomeia #canal para novo-nome"
     elif _addr and re.search(r'\b(renomei[ae]r?|rename)\b.{0,20}\bcanal\b', conteudo.lower()):
         if not message.channel_mentions:
-            await message.channel.send("Menciona o canal a renomear.")
+            await message.channel.send(await _ia_curta("Pedir para mencionar o canal a renomear.", max_tokens=15))
             return True
         m_para = re.search(r'\bpara\s+(.+)$', conteudo, re.IGNORECASE)
         if not m_para:
-            await message.channel.send("Formato: Shell renomeia #canal para novo-nome")
+            await message.channel.send(await _ia_curta("Pedir formato correto para renomear canal: mencionar canal e novo nome após 'para'.", max_tokens=20))
             return True
         novo_nome = re.sub(r'[^\w\-]', '-', m_para.group(1).strip().lower()).strip('-')
         canal_ren = message.channel_mentions[0]
         nome_antigo = canal_ren.name
         try:
             await canal_ren.edit(name=novo_nome, reason=f"Ordem de {autor}")
-            await message.channel.send(f"Canal #{nome_antigo} renomeado para #{novo_nome}.")
+            _c = await _ia_curta(f"Confirmar renomeação do canal '{nome_antigo}' para '{novo_nome}'. Breve.", max_tokens=20)
+            await message.channel.send(_c or f"#{nome_antigo} → #{novo_nome}.")
         except Exception as e:
-            await message.channel.send(f"Não foi possível renomear: {e}")
+            _err = await _ia_curta(f"Erro ao renomear canal: {str(e)[:50]}.", max_tokens=20)
+            await message.channel.send(_err or "Não consegui renomear.")
 
     # ── renomear cargo ────────────────────────────────────────────────────────
     # Uso: "Shell renomeia cargo NomeAntigo para NomeNovo"
     elif _addr and re.search(r'\b(renomei[ae]r?|rename)\b.{0,20}\bcargo\b', conteudo.lower()):
         m_para = re.search(r'\bpara\s+(.+)$', conteudo, re.IGNORECASE)
         if not m_para:
-            await message.channel.send("Formato: Shell renomeia cargo NomeAtual para NomeNovo")
+            await message.channel.send(await _ia_curta("Pedir formato para renomear cargo: nome atual e novo nome após 'para'.", max_tokens=20))
             return True
         novo_nome_c = m_para.group(1).strip()[:50]
         # Extrai nome atual do cargo
@@ -4561,14 +4598,16 @@ async def processar_ordem(message: discord.Message) -> bool:
         nome_atual = re.sub(r'\bpara\b.*$', '', nome_atual, flags=re.IGNORECASE).strip()
         role_ren = _buscar_role_por_nome(guild, nome_atual) or (message.role_mentions[0] if message.role_mentions else None)
         if not role_ren:
-            await message.channel.send(f"Não encontrei o cargo '{nome_atual}'.")
+            await message.channel.send(await _ia_curta(f"Cargo '{nome_atual}' não encontrado. Avisar brevemente.", max_tokens=20))
             return True
         try:
             nome_antigo_c = role_ren.name
             await role_ren.edit(name=novo_nome_c, reason=f"Ordem de {autor}")
-            await message.channel.send(f"Cargo '{nome_antigo_c}' renomeado para '{novo_nome_c}'.")
+            _c = await _ia_curta(f"Confirmar renomeação do cargo '{nome_antigo_c}' para '{novo_nome_c}'. Breve.", max_tokens=20)
+            await message.channel.send(_c or f"Cargo '{nome_antigo_c}' → '{novo_nome_c}'.")
         except Exception as e:
-            await message.channel.send(f"Não foi possível renomear o cargo: {e}")
+            _err = await _ia_curta(f"Erro ao renomear cargo: {str(e)[:50]}.", max_tokens=20)
+            await message.channel.send(_err or "Não consegui renomear.")
 
     # ── lembrete agendado ─────────────────────────────────────────────────────
     # Uso: "Shell em 30 minutos avisa a galera no #canal sobre o evento"
@@ -4603,7 +4642,7 @@ async def processar_ordem(message: discord.Message) -> bool:
     elif _addr and re.search(r'\b(debate|discussão|discussao|discutir)\b', conteudo.lower()):
         tema_db = re.sub(r'(?i).*?\b(?:debate|discussão|discussao|discutir)\b\s*:?\s*', '', conteudo).strip()
         if not tema_db:
-            await message.channel.send("Qual o tema do debate? Diga: Shell debate: tema aqui")
+            await message.channel.send(await _ia_curta("Pedir o tema do debate. Natural.", max_tokens=20))
             return True
         canal_db = message.channel_mentions[0] if message.channel_mentions else message.channel
         await canal_db.send(
@@ -4681,13 +4720,14 @@ async def processar_ordem(message: discord.Message) -> bool:
             _nome_str = None
         _canal_voz = await _entrar_canal_voz(guild, _nome_str)
         if not _canal_voz:
-            await message.channel.send("Nao encontrei nenhum canal de voz no servidor.")
+            await message.channel.send(await _ia_curta("Sem canal de voz disponível no servidor. Breve.", max_tokens=15))
             return True
         _vc, _err = await _conectar_voz(_canal_voz)
         if _err:
             await message.channel.send(_err)
         else:
-            await message.channel.send(f"Entrei em {_canal_voz.mention}.")
+            _c = await _ia_curta(f"Confirmar que entrei no canal de voz {_canal_voz.name}. Breve.", max_tokens=15)
+            await message.channel.send(f"{_c or f'Entrei em {_canal_voz.mention}.'}")
         return True
 
     elif _addr and re.search(
@@ -4696,23 +4736,23 @@ async def processar_ordem(message: discord.Message) -> bool:
     ):
         if guild and guild.voice_client:
             await guild.voice_client.disconnect(force=True)
-            await message.channel.send("Sai do canal de voz.")
+            await message.channel.send(await _ia_curta("Confirmar que saí do canal de voz. Bem curto.", max_tokens=10))
         else:
-            await message.channel.send("Nao estou em nenhum canal de voz.")
+            await message.channel.send(await _ia_curta("Avisar que não estou em nenhum canal de voz. Breve.", max_tokens=15))
         return True
 
     elif _addr and re.search(
         rf'\b(?:fal[ae][r]?|diz(?:er)?|mand[ae][r]?\s+(?:audio|voz))\b.{{0,30}}\b{_VOZ_KW}',
         conteudo.lower()
     ):
-        await message.channel.send("TTS em canal de voz não está disponível no momento — a biblioteca não suporta o protocolo E2EE do Discord.")
+        await message.channel.send(await _ia_curta("TTS indisponível por incompatibilidade com E2EE do Discord. Explicar brevemente.", max_tokens=25))
         return True
 
     # ── configuração dinâmica ─────────────────────────────────────────────────
     # Somente donos absolutos podem alterar configurações
     elif _addr and re.search(r'\b(config(?:ura(?:r|cao|ção)?)?|defin[ei][r]?|set[a]?)\b', conteudo.lower()):
         if message.author.id not in DONOS_ABSOLUTOS_IDS:
-            await message.channel.send("Apenas donos absolutos podem alterar configurações.")
+            await message.channel.send(await _ia_curta("Avisar que apenas donos absolutos podem alterar configurações. Direto.", max_tokens=15))
             return True
 
         _cfg_msg = conteudo.lower()
@@ -4763,7 +4803,8 @@ async def processar_ordem(message: discord.Message) -> bool:
                 _canal_novo = message.channel_mentions[0]
                 _cfg[_chave_canal] = _canal_novo.id
                 salvar_config()
-                await message.channel.send(f"Canal de {_m_canal.group(2)} definido como {_canal_novo.mention}.")
+                _c = await _ia_curta(f"Confirmar configuração do canal de {_m_canal.group(2)} como {_canal_novo.name}. Breve.", max_tokens=20)
+                await message.channel.send(_c or f"Canal de {_m_canal.group(2)} definido como {_canal_novo.mention}.")
                 return True
 
         # ── definir cargo ─────────────────────────────────────────────────────
@@ -4774,16 +4815,18 @@ async def processar_ordem(message: discord.Message) -> bool:
             if "mod" in _tipo_cargo:
                 _cfg["cargo_mod_id"] = _cargo_novo.id
                 salvar_config()
-                await message.channel.send(f"Cargo de moderação definido como {_cargo_novo.mention}.")
+                _c = await _ia_curta(f"Confirmar cargo de moderação definido como {_cargo_novo.name}. Breve.", max_tokens=20)
+                await message.channel.send(_c or f"Cargo de moderação: {_cargo_novo.mention}.")
             elif "superior" in _tipo_cargo:
                 _lista = _cfg.get("cargos_superiores_ids", list(CARGOS_SUPERIORES_IDS))
                 if _cargo_novo.id not in _lista:
                     _lista.append(_cargo_novo.id)
                     _cfg["cargos_superiores_ids"] = _lista
                     salvar_config()
-                    await message.channel.send(f"Cargo {_cargo_novo.mention} adicionado aos superiores.")
+                    _c = await _ia_curta(f"Confirmar que cargo {_cargo_novo.name} foi adicionado como superior. Breve.", max_tokens=20)
+                    await message.channel.send(_c or f"Cargo {_cargo_novo.mention} adicionado aos superiores.")
                 else:
-                    await message.channel.send(f"Cargo {_cargo_novo.mention} ja esta na lista de superiores.")
+                    await message.channel.send(await _ia_curta(f"Cargo {_cargo_novo.name} já está na lista de superiores. Breve.", max_tokens=15))
             return True
 
         # ── remover cargo superior ────────────────────────────────────────────
@@ -4794,9 +4837,10 @@ async def processar_ordem(message: discord.Message) -> bool:
                 _lista.remove(_cargo_rm.id)
                 _cfg["cargos_superiores_ids"] = _lista
                 salvar_config()
-                await message.channel.send(f"Cargo {_cargo_rm.mention} removido dos superiores.")
+                _c = await _ia_curta(f"Confirmar que cargo {_cargo_rm.name} foi removido dos superiores. Breve.", max_tokens=15)
+                await message.channel.send(_c or f"Cargo {_cargo_rm.mention} removido.")
             else:
-                await message.channel.send(f"Cargo {_cargo_rm.mention} nao estava na lista.")
+                await message.channel.send(await _ia_curta(f"Cargo {_cargo_rm.name} não estava na lista de superiores. Breve.", max_tokens=15))
             return True
 
         # ── adicionar/remover usuário superior ────────────────────────────────
@@ -4811,17 +4855,19 @@ async def processar_ordem(message: discord.Message) -> bool:
                         _lista_u.append(_user_cfg.id)
                         _cfg["usuarios_superiores_ids"] = _lista_u
                         salvar_config()
-                        await message.channel.send(f"{_user_cfg.mention} adicionado como usuario superior.")
+                        _c = await _ia_curta(f"{_user_cfg.display_name} adicionado como usuário superior. Confirmar brevemente.", max_tokens=15)
+                        await message.channel.send(_c or f"{_user_cfg.mention} agora é superior.")
                     else:
-                        await message.channel.send(f"{_user_cfg.mention} ja e superior.")
+                        await message.channel.send(await _ia_curta(f"{_user_cfg.display_name} já é superior. Breve.", max_tokens=15))
                 else:
                     if _user_cfg.id in _lista_u:
                         _lista_u.remove(_user_cfg.id)
                         _cfg["usuarios_superiores_ids"] = _lista_u
                         salvar_config()
-                        await message.channel.send(f"{_user_cfg.mention} removido dos superiores.")
+                        _c = await _ia_curta(f"{_user_cfg.display_name} removido dos superiores. Confirmar brevemente.", max_tokens=15)
+                        await message.channel.send(_c or f"{_user_cfg.mention} removido.")
                     else:
-                        await message.channel.send(f"{_user_cfg.mention} nao estava na lista.")
+                        await message.channel.send(await _ia_curta(f"{_user_cfg.display_name} não estava na lista. Breve.", max_tokens=15))
             return True
 
         # ── adicionar/remover conta de teste ──────────────────────────────────
@@ -4836,17 +4882,19 @@ async def processar_ordem(message: discord.Message) -> bool:
                         _lista_t.append(_user_t.id)
                         _cfg["contas_teste_ids"] = _lista_t
                         salvar_config()
-                        await message.channel.send(f"{_user_t.mention} adicionado como conta de teste.")
+                        _c = await _ia_curta(f"{_user_t.display_name} adicionado como conta de teste. Confirmar brevemente.", max_tokens=15)
+                        await message.channel.send(_c or f"{_user_t.mention} adicionado como teste.")
                     else:
-                        await message.channel.send(f"{_user_t.mention} ja esta na lista.")
+                        await message.channel.send(await _ia_curta(f"{_user_t.display_name} já está na lista de teste. Breve.", max_tokens=15))
                 else:
                     if _user_t.id in _lista_t:
                         _lista_t.remove(_user_t.id)
                         _cfg["contas_teste_ids"] = _lista_t
                         salvar_config()
-                        await message.channel.send(f"{_user_t.mention} removido das contas de teste.")
+                        _c = await _ia_curta(f"{_user_t.display_name} removido das contas de teste. Breve.", max_tokens=15)
+                        await message.channel.send(_c or f"{_user_t.mention} removido do teste.")
                     else:
-                        await message.channel.send(f"{_user_t.mention} nao estava na lista.")
+                        await message.channel.send(await _ia_curta(f"{_user_t.display_name} não estava na lista de teste. Breve.", max_tokens=15))
             return True
 
         await message.channel.send(
@@ -4872,7 +4920,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         else:
             texto_trad = re.sub(r'(?i).*?\btraduz[ir]?\s*(?:isso\s*)?(?:para\s+\w+\s*)?:?\s*', '', conteudo).strip()
         if not texto_trad:
-            await message.channel.send("Responde à mensagem que quer traduzir, ou escreve: Shell traduz: texto")
+            await message.channel.send(await _ia_curta("Pedir para responder à mensagem a traduzir ou passar o texto diretamente.", max_tokens=20))
             return True
         resultado = await traduzir_texto(texto_trad, idioma)
         await message.channel.send(f"**Tradução ({idioma}):** {resultado}")
@@ -4881,15 +4929,16 @@ async def processar_ordem(message: discord.Message) -> bool:
     # Uso: "Shell cria ticket para @membro motivo aqui"
     elif _addr and re.search(r'\bticket\b', conteudo.lower()):
         if not alvos:
-            await message.channel.send("Menciona o membro para quem abrir o ticket.")
+            await message.channel.send(await _ia_curta("Pedir para mencionar o membro para abrir o ticket.", max_tokens=15))
             return True
         alvo_ticket = alvos[0]
         motivo_ticket = re.sub(r'(?i).*?\bticket\b\s*(?:para\s+\S+\s*)?', '', conteudo).strip() or "sem motivo"
         canal_ticket = await criar_ticket_canal(guild, alvo_ticket, motivo_ticket, autor)
         if canal_ticket:
-            await message.channel.send(f"Ticket criado: {canal_ticket.mention}")
+            _c = await _ia_curta(f"Confirmar criação de ticket. Canal: {canal_ticket.name}. Natural.", max_tokens=20)
+            await message.channel.send(_c or f"Ticket criado: {canal_ticket.mention}")
         else:
-            await message.channel.send("Não foi possível criar o ticket.")
+            await message.channel.send(await _ia_curta("Erro ao criar ticket. Avisar brevemente.", max_tokens=15))
 
     # ── enviar DM a membro ────────────────────────────────────────────────────
     # Uso: "Shell manda DM para @membro: mensagem"
@@ -4899,14 +4948,16 @@ async def processar_ordem(message: discord.Message) -> bool:
         texto_dm = m_dm.group(1).strip() if m_dm else ""
         texto_dm = re.sub(r'<@!?\d+>', '', texto_dm).strip()
         if not texto_dm:
-            await message.channel.send("Qual a mensagem a enviar? Formato: Shell manda DM para @membro: texto")
+            await message.channel.send(await _ia_curta("Pedir o texto da DM. Natural.", max_tokens=20))
             return True
         try:
             await alvo_dm.send(f"Mensagem de {autor} (via bot): {texto_dm}")
-            await message.channel.send(f"DM enviada para {alvo_dm.mention}.")
+            _c = await _ia_curta(f"Confirmar que DM foi enviada para {alvo_dm.display_name}. Breve.", max_tokens=15)
+            await message.channel.send(_c or f"DM enviada para {alvo_dm.mention}.")
             log.info(f"[DM] {autor} → {alvo_dm.display_name}: {texto_dm[:60]}")
         except Exception as e:
-            await message.channel.send(f"Não foi possível enviar DM para {alvo_dm.display_name}: {e}")
+            _err = await _ia_curta(f"Erro ao enviar DM para {alvo_dm.display_name}: {str(e)[:50]}.", max_tokens=20)
+            await message.channel.send(_err or f"Não consegui mandar DM para {alvo_dm.mention}.")
 
     # ── guardar citação ───────────────────────────────────────────────────────
     # Uso: responder à mensagem + "Shell guarda isso" / "Shell salva essa frase"
@@ -4915,7 +4966,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         if message.reference and isinstance(getattr(message.reference, "resolved", None), discord.Message):
             msg_cit = message.reference.resolved
         if not msg_cit:
-            await message.channel.send("Responde à mensagem que quer guardar como citação.")
+            await message.channel.send(await _ia_curta("Pedir para responder à mensagem que quer guardar como citação.", max_tokens=15))
             return True
         brasilia = timezone(timedelta(hours=-3))
         citacoes.append({
@@ -4925,12 +4976,13 @@ async def processar_ordem(message: discord.Message) -> bool:
             "ts": msg_cit.created_at.astimezone(brasilia).strftime('%d/%m/%Y %H:%M'),
         })
         salvar_dados()
-        await message.channel.send(f"Citação de {msg_cit.author.display_name} guardada. Total: {len(citacoes)}.")
+        _c = await _ia_curta(f"Confirmar que citação de {msg_cit.author.display_name} foi guardada. Total: {len(citacoes)}. Natural.", max_tokens=20)
+        await message.channel.send(_c or f"Citação de {msg_cit.author.display_name} guardada.")
 
     # ── citação aleatória ─────────────────────────────────────────────────────
     elif _addr and re.search(r'\bcita[cç][aã]o\s+aleat[oó]ria\b|\bcita[cç][aã]o\b', conteudo.lower()):
         if not citacoes:
-            await message.channel.send("Nenhuma citação guardada ainda. Responde a uma mensagem e diz: Shell guarda isso")
+            await message.channel.send(await _ia_curta("Nenhuma citação guardada ainda. Explicar como guardar uma.", max_tokens=20))
             return True
         cit = random.choice(citacoes)
         await message.channel.send(f'"{cit["texto"]}"  -  {cit["autor"]}, {cit.get("ts","?")}')
@@ -4938,7 +4990,7 @@ async def processar_ordem(message: discord.Message) -> bool:
     # ── ranking de atividade ──────────────────────────────────────────────────
     elif _addr and re.search(r'\branking\b|\batividade\b|\bmais\s+ativo[s]?\b', conteudo.lower()):
         if not atividade_mensagens:
-            await message.channel.send("Ainda não há dados de atividade desta sessão.")
+            await message.channel.send(await _ia_curta("Sem dados de atividade desta sessão ainda. Breve.", max_tokens=15))
             return True
         top = sorted(atividade_mensagens.items(), key=lambda x: x[1], reverse=True)[:10]
         linhas = []
@@ -4953,14 +5005,16 @@ async def processar_ordem(message: discord.Message) -> bool:
         canal_mon = message.channel_mentions[0] if message.channel_mentions else message.channel
         canais_monitorados.add(canal_mon.id)
         salvar_dados()
-        await message.channel.send(f"Vou participar ativamente das conversas em {canal_mon.mention}.")
+        _c = await _ia_curta(f"Confirmar que vou participar ativamente das conversas em {canal_mon.name}. Natural.", max_tokens=20)
+        await message.channel.send(_c or f"Monitorando {canal_mon.mention}.")
         log.info(f"[MONITOR] {autor} ativou monitoramento em #{canal_mon.name}")
 
     elif _addr and re.search(r'\bpara\s+de\s+monitor[a]?r?\b|\bdesmonitor[a]?r?\b|\bpare\s+de\s+participar\b', conteudo.lower()):
         canal_mon = message.channel_mentions[0] if message.channel_mentions else message.channel
         canais_monitorados.discard(canal_mon.id)
         salvar_dados()
-        await message.channel.send(f"Parei de monitorar {canal_mon.mention}.")
+        _c = await _ia_curta(f"Confirmar que parei de monitorar {canal_mon.name}. Natural.", max_tokens=15)
+        await message.channel.send(_c or f"Parei de monitorar {canal_mon.mention}.")
 
     else:
         return False
@@ -6345,16 +6399,19 @@ def _atualizar_contexto(guild: discord.Guild):
 
 async def _audit_ia(canal: discord.TextChannel, evento: str, dados: dict) -> None:
     """
-    Envia registro de auditoria gerado por IA — sem texto fixo.
-    evento: tipo de evento ('entrada de membro', 'lockdown ativado', etc.)
-    dados: dict com fatos estruturados (sempre incluídos mesmo que IA falhe)
+    Envia registro de auditoria como texto corrido natural, gerado por IA.
+    A IA usa APENAS os dados fornecidos — sem inferência, sem invenção, sem contexto extra.
     """
-    dados_txt = " | ".join(f"{k}: {v}" for k, v in dados.items())
-    sit = f"Evento de auditoria — {evento}. Dados: {dados_txt}. Registre de forma natural, objetiva e concisa, como um observador experiente descreveria isso num log interno. Inclua os dados concretos."
-    texto = await _ia_curta(sit, max_tokens=120)
+    dados_txt = ", ".join(f"{k}: {v}" for k, v in dados.items())
+    prompt = (
+        f"Evento: {evento}. Dados reais: {dados_txt}. "
+        "Escreva uma frase curta de registro usando APENAS esses dados. "
+        "Não invente nada. Não adicione contexto, motivação, especulação ou opinião. "
+        "Só os fatos fornecidos, em texto corrido natural. Sem prefixos, sem colchetes."
+    )
+    texto = await _ia_curta(prompt, max_tokens=60)
     if not texto:
-        # fallback estruturado sem template fixo
-        texto = f"{evento} | {dados_txt}"
+        texto = f"{evento}: {dados_txt}"
     try:
         await canal.send(texto)
     except Exception as e:
@@ -7601,18 +7658,31 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     entrou = after.channel and (not before.channel or before.channel.id != after.channel.id)
     saiu = before.channel and (not after.channel or before.channel.id != after.channel.id)
 
+    _agora_voz = datetime.now(timezone(timedelta(hours=-3))).strftime("%H:%M")
     if entrou:
+        _voz_entradas[member.id] = agora_utc()  # registra hora de entrada para calcular duração na saída
         log.info(f"[VOZ] {member.display_name} entrou em #{after.channel.name}")
         asyncio.ensure_future(_audit_ia(canal_audit, "entrou em canal de voz", {
-            "membro": member.display_name,
+            "membro": f"{member.display_name} ({member.id})",
             "canal": f"#{after.channel.name}",
+            "hora": _agora_voz,
         }))
     elif saiu:
+        # Calcula tempo no canal se possível
+        _entrada_voz = _voz_entradas.pop(member.id, None)
+        _ficou_voz = ""
+        if _entrada_voz:
+            _delta_voz = agora_utc() - _entrada_voz
+            _ficou_voz = formatar_duracao(int(_delta_voz.total_seconds()))
         log.info(f"[VOZ] {member.display_name} saiu de #{before.channel.name}")
-        asyncio.ensure_future(_audit_ia(canal_audit, "saiu de canal de voz", {
-            "membro": member.display_name,
+        _dados_voz = {
+            "membro": f"{member.display_name} ({member.id})",
             "canal": f"#{before.channel.name}",
-        }))
+            "hora": _agora_voz,
+        }
+        if _ficou_voz:
+            _dados_voz["ficou"] = _ficou_voz
+        asyncio.ensure_future(_audit_ia(canal_audit, "saiu de canal de voz", _dados_voz))
 
 
 @client.event
@@ -8086,7 +8156,8 @@ async def _on_message_impl(message: discord.Message):
     # ── Desativar AFK quando o próprio usuário manda mensagem ─────────────────
     if message.author.id in ausencia and not mencionado:
         del ausencia[message.author.id]
-        await message.channel.send(f"{message.author.mention}, modo ausente desativado.")
+        _c = await _ia_curta(f"Modo ausente de {message.author.display_name} desativado. Natural e breve.", max_tokens=15)
+        await message.channel.send(f"{message.author.mention} {_c or 'ausência desativada.'}")
 
     # ── Conta de teste: comandos liberados, sofre punições normalmente ─────────
     if eh_teste and not _eh_dono:
