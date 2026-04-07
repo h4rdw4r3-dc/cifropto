@@ -2845,6 +2845,8 @@ async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80) -> 
             return ""
         return resultado
     except Exception as e:
+        if "429" in str(e):
+            _bloquear_modelo("llama-3.1-8b-instant", _extrair_retry_after(str(e)))
         log.debug(f"[IA_CURTA] falhou: {e}")
         return ""
 
@@ -3097,14 +3099,47 @@ def _registrar_tokens(modelo: str, total: int):
     else:
         _tokens_8b_hoje += total
 
+# ── Controle de modelos esgotados (retry-after real da API) ──────────────────
+# modelo → datetime até quando está bloqueado
+_modelo_bloqueado_ate: dict[str, datetime] = {}
+
+def _bloquear_modelo(modelo: str, segundos: float):
+    """Marca modelo como indisponível pelo tempo indicado pela API."""
+    ate = agora_utc() + timedelta(seconds=segundos + 5)  # +5s margem
+    _modelo_bloqueado_ate[modelo] = ate
+    log.warning(f"[BUDGET] {modelo} bloqueado por {int(segundos)}s (até {ate.strftime('%H:%M:%S')} UTC)")
+
+def _modelo_disponivel(modelo: str) -> bool:
+    """Retorna True se o modelo não está bloqueado."""
+    bloqueado_ate = _modelo_bloqueado_ate.get(modelo)
+    if bloqueado_ate and agora_utc() < bloqueado_ate:
+        return False
+    if modelo in _modelo_bloqueado_ate:
+        del _modelo_bloqueado_ate[modelo]  # expirou
+    return True
+
+def _extrair_retry_after(erro_str: str) -> float:
+    """Extrai tempo de espera em segundos do erro 429 da API Groq."""
+    import re as _re
+    # Formato: "Please try again in 8m13.344s" ou "in 1m41.088s" ou "in 45.5s"
+    m = _re.search(r'try again in (?:(\d+)m)?(\d+(?:\.\d+)?)s', str(erro_str))
+    if m:
+        mins = int(m.group(1) or 0)
+        secs = float(m.group(2))
+        return mins * 60 + secs
+    return 60.0  # fallback conservador
+
 def _escolher_modelo(forcar_rapido: bool = False) -> str:
     """
     Retorna o modelo mais adequado dado o budget disponível.
+    Respeita bloqueios por rate limit real da API (retry-after).
     - 8b-instant: padrão (500k TPD), rápido e econômico.
-    - 70b-versatile: só quando budget disponível E pedido complexo.
+    - 70b-versatile: só quando disponível E budget ok.
     """
     _resetar_tokens_se_novo_dia()
     if forcar_rapido or _tokens_70b_hoje >= LIMITE_70B:
+        return "llama-3.1-8b-instant"
+    if not _modelo_disponivel("llama-3.3-70b-versatile"):
         return "llama-3.1-8b-instant"
     return "llama-3.3-70b-versatile"
 
@@ -3296,8 +3331,13 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         return texto
     except Exception as e:
         log.error(f"[GROQ] erro ({modelo}): {e}", exc_info=True)
+        # Registra bloqueio por rate limit com tempo real da API
+        if "429" in str(e):
+            _retry = _extrair_retry_after(str(e))
+            _bloquear_modelo(modelo, _retry)
+
         # Fallback automático para 8b-instant se o 70b falhar com rate limit
-        if "429" in str(e) and "8b" not in modelo:
+        if "429" in str(e) and "8b" not in modelo and _modelo_disponivel("llama-3.1-8b-instant"):
             try:
                 log.info("[GROQ] fallback para 8b-instant")
                 resp2 = await _groq_client().chat.completions.create(
@@ -3308,6 +3348,10 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
                 )
                 escolha2 = resp2.choices[0]
                 texto2 = _limpar_markdown(escolha2.message.content.strip())
+                # Filtro de identidade no fallback também
+                if any(t in texto2.lower() for t in ("groq", "openai", "sou um bot", "sou uma ia",
+                        "estou desativado", "como assistente", "minha programação")):
+                    texto2 = random.choice(["Não agora.", "Tô fora.", "Passa.", "Depois."])
                 if escolha2.finish_reason == "length":
                     ult = max(texto2.rfind("."), texto2.rfind("!"), texto2.rfind("?"))
                     if ult > 0:
@@ -3320,6 +3364,8 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
                 return texto2
             except Exception as e2:
                 log.error(f"[GROQ] fallback também falhou: {e2}")
+                if "429" in str(e2):
+                    _bloquear_modelo("llama-3.1-8b-instant", _extrair_retry_after(str(e2)))
         return await _ia_curta(
             "Não conseguiu processar a resposta agora. Diga algo seco e breve, como quem está pensando ou ocupado. Sem mencionar tecnologia, sistema ou IA.",
             max_tokens=20,
