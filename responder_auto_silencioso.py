@@ -2699,7 +2699,7 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> st
         "NUNCA diga 'não tenho informações sobre o servidor'  -  você tem, no contexto abaixo.\n\n"
 
         "MÍDIA E ANEXOS — COMO REAGIR:\n"
-        "Quando alguém enviar um vídeo que você não pode ver: reaja como humano que recebeu um vídeo — comente o título, o nome do arquivo, o contexto da conversa. NUNCA diga 'não tenho acesso ao conteúdo', 'não consigo visualizar', 'eu precisaria assistir'. Não é sua limitação — é o que chegou pra você.\n"
+        "Quando alguém enviar um vídeo que você não pode ver: reaja agora com base no nome do arquivo e no contexto da conversa. NUNCA diga 'vou ver', 'vou assistir', 'vou ler em um minuto', 'deixa eu checar' ou qualquer promessa futura. Você reage no momento ou não reage.\n"
         "Quando alguém enviar uma imagem: você VÊ a imagem (há uma descrição no contexto). Use-a para comentar de forma natural.\n"
         "NUNCA mencione Google, pesquisa externa, acesso à internet ou qualquer ferramenta externa. Você está aqui, no servidor, ponto.\n"
         "NUNCA diga 'não posso acessar o Google', 'como estou num servidor Discord', 'como sou um bot' ou qualquer variação disso.\n\n"
@@ -2713,6 +2713,7 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> st
         "NUNCA diga que vai 'simular', 'fingir' ou 'fazer como se' tivesse executado algo.\n"
         "NUNCA diga 'vou apenas simular a interação' ou similar  -  você age de verdade ou não age.\n"
         "NUNCA diga 'como estou em um ambiente de texto não posso...'  -  você não está limitado a texto.\n"
+        "NUNCA prometa ações futuras que não vai executar: 'vou ver', 'vou ler em um minuto', 'vou checar', 'deixa eu verificar'. Se não vai fazer agora, não promete.\n"
         "Se não conseguir fazer algo: diga em UMA frase curta que não consegue. Ponto. Sem elaborar.\n"
         "Se consegue fazer: faça. Não anuncie que vai fazer, não descreva a ação  -  execute.\n\n"
 
@@ -2910,7 +2911,9 @@ async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80) -> 
                              "não posso responder", "como assistente",
                              "não posso acessar o google", "nao posso acessar",
                              "não tenho acesso à internet", "não consigo visualizar",
-                             "como estou num servidor", "não posso navegar")
+                             "como estou num servidor", "não posso navegar",
+                             "vou ler em um minuto", "vou assistir", "vou verificar",
+                             "vou checar", "deixa eu ver", "vou dar uma olhada")
         if any(t in resultado.lower() for t in _termos_proibidos):
             log.warning(f"[IA_CURTA] vazamento de identidade detectado, descartando: {resultado[:60]!r}")
             return ""
@@ -3135,10 +3138,13 @@ async def _processar_anexos_visuais(message: discord.Message, conteudo_real: str
                         descricoes.append(f"[Áudio ({nome}) — não foi possível transcrever]")
 
         elif ct.startswith("video/") or nome.lower().endswith((".mp4", ".mov", ".avi", ".mkv")):
-            # Vídeo — trata como mídia enviada sem expor jargão técnico de limitação
             tam_kb = att.size // 1024
+            # Instrução interna: não prometer assistir depois, não fingir ação futura
+            # O bot só pode reagir ao nome do arquivo, tamanho e contexto da conversa
             descricoes.append(
-                f"[Vídeo: {nome} ({tam_kb}KB) — sem acesso ao conteúdo visual, reaja como quem recebeu um vídeo]"
+                f"[Vídeo recebido: {nome} ({tam_kb}KB). "
+                f"Você NÃO pode assistir. Reaja agora com base no nome do arquivo e no contexto da conversa. "
+                f"NUNCA diga 'vou ver', 'vou assistir', 'vou ler em um minuto' ou qualquer promessa futura.]"
             )
 
         else:
@@ -3434,7 +3440,9 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
                  "não tenho acesso à internet", "nao tenho acesso a internet",
                  "não consigo visualizar", "não tenho acesso ao conteúdo",
                  "como estou num servidor", "como estou aqui no servidor",
-                 "não tenho acesso a sites", "não posso navegar")
+                 "não tenho acesso a sites", "não posso navegar",
+                 "vou ler em um minuto", "vou assistir", "vou ver em seguida",
+                 "vou verificar", "vou checar", "deixa eu ver", "vou dar uma olhada")
         if any(t in texto.lower() for t in _leak):
             log.warning(f"[GROQ] vazamento de identidade, substituindo: {texto[:80]!r}")
             texto = random.choice(["Não agora.", "Tô fora.", "Passa.", "Depois.", "Não tô aqui."])
@@ -3475,7 +3483,9 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
                         "estou desativado", "como assistente", "minha programação",
                         "não posso acessar o google", "não tenho acesso à internet",
                         "não consigo visualizar", "não tenho acesso ao conteúdo",
-                        "como estou num servidor", "não posso navegar")):
+                        "como estou num servidor", "não posso navegar",
+                        "vou ler em um minuto", "vou assistir", "vou verificar",
+                        "vou checar", "deixa eu ver", "vou dar uma olhada")):
                     texto2 = random.choice(["Não agora.", "Tô fora.", "Passa.", "Depois."])
                 if escolha2.finish_reason == "length":
                     ult = max(texto2.rfind("."), texto2.rfind("!"), texto2.rfind("?"))
