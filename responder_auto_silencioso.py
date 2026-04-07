@@ -937,16 +937,14 @@ async def stats_servidor(guild: discord.Guild) -> str:
         key=lambda m: m.joined_at, default=None
     )
 
-    linhas = [
-        f"O servidor tem {humanos} {'membro' if humanos == 1 else 'membros'} humanos e {bots} {'robô' if bots == 1 else 'robôs'}, totalizando {total}.",
-    ]
+    fatos = f"membros humanos: {humanos}, bots: {bots}, total: {total}"
     if mais_antigo:
         tempo = formatar_duracao(agora - mais_antigo.joined_at.replace(tzinfo=timezone.utc))
-        linhas.append(f"Membro mais antigo: {mais_antigo.display_name}, há {tempo}.")
+        fatos += f", membro mais antigo: {mais_antigo.display_name} (há {tempo})"
     if mais_novo and mais_novo != mais_antigo:
         tempo = formatar_duracao(agora - mais_novo.joined_at.replace(tzinfo=timezone.utc))
-        linhas.append(f"Entrada mais recente: {mais_novo.display_name}, há {tempo}.")
-    return " ".join(linhas)
+        fatos += f", entrada mais recente: {mais_novo.display_name} (há {tempo})"
+    return await _ia_curta(f"Dados do servidor: {fatos}. Fale isso naturalmente.", max_tokens=60) or fatos
 
 
 async def relatorio_membros(guild: discord.Guild, periodo_dias: int = 7) -> str:
@@ -2178,17 +2176,18 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
 
     # ── Dono ─────────────────────────────────────────────────────────────────
     if intent == "dono_servidor":
-        return f"O dono do servidor é {guild.owner.display_name}." if guild.owner else "Não encontrei o dono."
+        _d = guild.owner.display_name if guild.owner else None
+        return await _ia_curta(f"Dono do servidor: {_d}. Diga isso naturalmente.", max_tokens=20) if _d else "Não encontrei o dono."
 
     # ── Data de criação ───────────────────────────────────────────────────────
     if intent == "data_criacao":
         dt = guild.created_at.astimezone(brasilia).strftime("%d/%m/%Y às %H:%M")
-        return f"O servidor foi criado em {dt} (horário de Brasília)."
+        return await _ia_curta(f"Servidor criado em {dt} BRT. Diga isso naturalmente.", max_tokens=25) or f"Servidor criado em {dt}."
 
     # ── Boosts ────────────────────────────────────────────────────────────────
     if intent == "boosts":
         n = guild.premium_subscription_count
-        return f"O servidor está no nível {guild.premium_tier} de boost com {n} boost{'s' if n != 1 else ''}."
+        return await _ia_curta(f"Nível de boost: {guild.premium_tier}, quantidade: {n}. Diga naturalmente.", max_tokens=25) or f"Nível {guild.premium_tier}, {n} boosts."
 
     # ── Membros: total ────────────────────────────────────────────────────────
     if intent == "membros_total":
@@ -2197,49 +2196,47 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
             total = dados["approximate_member_count"]
             online = dados.get("approximate_presence_count", "?")
             bots = sum(1 for mb in guild.members if mb.bot)
-            return f"O servidor tem {total - bots} membros humanos ({online} online agora) e {bots} bots."
+            _f = f"membros humanos: {total - bots}, online: {online}, bots: {bots}"
+            return await _ia_curta(f"Dados: {_f}. Diga naturalmente.", max_tokens=40) or _f
         bots = sum(1 for mb in guild.members if mb.bot)
-        return f"O servidor tem {guild.member_count - bots} membros humanos e {bots} bots."
+        _f = f"membros humanos: {guild.member_count - bots}, bots: {bots}"
+        return await _ia_curta(f"Dados: {_f}. Diga naturalmente.", max_tokens=40) or _f
 
     # ── Membros: online agora ─────────────────────────────────────────────────
     if intent == "membros_online":
         dados = await api_guild_info(guild.id)
         if dados and dados.get("approximate_presence_count"):
-            return f"Aproximadamente {dados['approximate_presence_count']} membros online agora."
-        return "Não foi possível obter contagem de membros online no momento."
+            _n = dados['approximate_presence_count']
+            return await _ia_curta(f"Membros online agora: {_n}. Diga naturalmente.", max_tokens=20) or f"{_n} online"
+        return await _ia_curta("Contagem de online indisponível agora. Breve.", max_tokens=15) or "Sem dado de online agora."
 
     # ── Membros: mais antigos ─────────────────────────────────────────────────
     if intent == "membros_antigos":
         mais_antigos = sorted([m for m in humanos_cache if m.joined_at], key=lambda m: m.joined_at)[:5]
-        linhas = ["Membros mais antigos no servidor:"]
-        for mb in mais_antigos:
-            linhas.append(f"  {mb.display_name}  -  há {_fmt_duracao_curta(agora - mb.joined_at.replace(tzinfo=timezone.utc))}")
-        return "\n".join(linhas)
+        _fatos = ", ".join(f"{mb.display_name} (há {_fmt_duracao_curta(agora - mb.joined_at.replace(tzinfo=timezone.utc))})" for mb in mais_antigos)
+        return await _ia_curta(f"Membros mais antigos: {_fatos}. Diga naturalmente.", max_tokens=60) or _fatos
 
     # ── Membros: mais recentes ────────────────────────────────────────────────
     if intent == "membros_recentes":
         mais_novos = sorted([m for m in humanos_cache if m.joined_at], key=lambda m: m.joined_at, reverse=True)[:5]
-        linhas = ["Entradas mais recentes:"]
-        for mb in mais_novos:
-            linhas.append(f"  {mb.display_name}  -  há {_fmt_duracao_curta(agora - mb.joined_at.replace(tzinfo=timezone.utc))}")
-        return "\n".join(linhas)
+        _fatos = ", ".join(f"{mb.display_name} (há {_fmt_duracao_curta(agora - mb.joined_at.replace(tzinfo=timezone.utc))})" for mb in mais_novos)
+        return await _ia_curta(f"Entradas mais recentes: {_fatos}. Diga naturalmente.", max_tokens=60) or _fatos
 
     # ── Membros: sem cargo ────────────────────────────────────────────────────
     if intent == "membros_sem_cargo":
         sem = [mb for mb in humanos_cache if all(r.name == "@everyone" for r in mb.roles)]
         nomes = ", ".join(mb.display_name for mb in sem[:20])
-        sufixo = f" (e mais {len(sem)-20})" if len(sem) > 20 else ""
-        return f"{len(sem)} membro{'s' if len(sem)!=1 else ''} sem cargo: {nomes}{sufixo}."
+        sufixo = f" e mais {len(sem)-20}" if len(sem) > 20 else ""
+        _f = f"sem cargo: {len(sem)} membros: {nomes}{sufixo}"
+        return await _ia_curta(f"Dados: {_f}. Diga naturalmente.", max_tokens=50) or _f
 
     # ── Membros: com infrações ────────────────────────────────────────────────
     if intent == "membros_com_infracoes":
         com_infr = sorted([(mb, infracoes[mb.id]) for mb in humanos_cache if infracoes.get(mb.id, 0) > 0], key=lambda x: -x[1])
         if not com_infr:
-            return "Nenhum membro com infrações registradas."
-        linhas = [f"Membros com infrações ({len(com_infr)}):"]
-        for mb, n in com_infr[:15]:
-            linhas.append(f"  {mb.display_name}  -  {n} infração{'ões' if n > 1 else ''}")
-        return "\n".join(linhas)
+            return await _ia_curta("Nenhum membro com infrações. Breve.", max_tokens=15) or "Nenhuma infração registrada."
+        _f = ", ".join(f"{mb.display_name}: {n}" for mb, n in com_infr[:15])
+        return await _ia_curta(f"Membros com infrações: {_f}. Diga naturalmente.", max_tokens=60) or _f
 
     # ── Membros: silenciados ──────────────────────────────────────────────────
     if intent == "membros_silenciados":
@@ -2257,21 +2254,15 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
                     except Exception:
                         pass
         if not silenciados:
-            return "Nenhum membro silenciado no momento."
-        linhas = [f"Membros silenciados agora ({len(silenciados)}):"]
-        for nome, mins in silenciados:
-            linhas.append(f"  {nome}  -  {mins} min restantes")
-        return "\n".join(linhas)
+            return await _ia_curta("Nenhum membro silenciado agora. Breve.", max_tokens=15) or "Ninguém silenciado."
+        _f = ", ".join(f"{nome} ({mins}min restantes)" for nome, mins in silenciados)
+        return await _ia_curta(f"Silenciados agora: {_f}. Diga naturalmente.", max_tokens=50) or _f
 
     # ── Membros: mais cargos ──────────────────────────────────────────────────
     if intent == "membros_mais_cargos":
         ranking = sorted(humanos_cache, key=lambda mb: len(mb.roles), reverse=True)[:5]
-        linhas = ["Membros com mais cargos:"]
-        for mb in ranking:
-            n = len([r for r in mb.roles if r.name != "@everyone"])
-            cargos = ", ".join(r.name for r in mb.roles if r.name != "@everyone")
-            linhas.append(f"  {mb.display_name}  -  {n} cargo{'s' if n!=1 else ''}: {cargos}")
-        return "\n".join(linhas)
+        _f = "; ".join(f"{mb.display_name}: {len([r for r in mb.roles if r.name != '@everyone'])} cargos" for mb in ranking)
+        return await _ia_curta(f"Membros com mais cargos: {_f}. Diga naturalmente.", max_tokens=60) or _f
 
     # ── Membros: por período ──────────────────────────────────────────────────
     if intent == "membros_por_periodo":
@@ -2287,24 +2278,24 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
             periodo_txt = "essa semana"
         recentes = [mb for mb in humanos_cache if mb.joined_at and mb.joined_at.replace(tzinfo=timezone.utc) >= corte]
         if not recentes:
-            return f"Nenhum membro entrou {periodo_txt}."
+            return await _ia_curta(f"Nenhum membro entrou {periodo_txt}. Breve.", max_tokens=20) or f"Ninguém entrou {periodo_txt}."
         nomes = ", ".join(mb.display_name for mb in recentes)
-        return f"{len(recentes)} membro{'s' if len(recentes)!=1 else ''} entrou{'ram' if len(recentes)>1 else ''} {periodo_txt}: {nomes}."
+        return await _ia_curta(f"{len(recentes)} membros entraram {periodo_txt}: {nomes}. Diga naturalmente.", max_tokens=50) or nomes
 
     # ── Bots ──────────────────────────────────────────────────────────────────
     if intent == "membros_bots":
         bots = [m for m in guild.members if m.bot]
         nomes = ", ".join(b.display_name for b in bots)
-        return f"O servidor tem {len(bots)} bot{'s' if len(bots)!=1 else ''}: {nomes}."
+        return await _ia_curta(f"Bots no servidor ({len(bots)}): {nomes}. Diga naturalmente.", max_tokens=50) or nomes
 
     # ── Banimentos ────────────────────────────────────────────────────────────
     if intent == "banimentos":
         bans = await api_banimentos(guild.id, 50)
         if not bans:
-            return "Nenhum banimento ativo no servidor."
+            return await _ia_curta("Nenhum banimento ativo. Breve.", max_tokens=15) or "Nenhum banido."
         nomes = ", ".join(b.get("user", {}).get("username", "?") for b in bans[:15])
-        sufixo = f" (e mais {len(bans)-15})" if len(bans) > 15 else ""
-        return f"{len(bans)} banimento{'s' if len(bans)!=1 else ''} ativo{'s' if len(bans)!=1 else ''}: {nomes}{sufixo}."
+        sufixo = f" e mais {len(bans)-15}" if len(bans) > 15 else ""
+        return await _ia_curta(f"Banidos ({len(bans)}): {nomes}{sufixo}. Diga naturalmente.", max_tokens=50) or nomes
 
     # ── Distribuição de cargos ────────────────────────────────────────────────
     if intent == "distribuicao_cargos":
@@ -5196,7 +5187,7 @@ async def resposta_inicial_superior(conteudo: str, autor: str, user_id: int, gui
         texto_eng = random.choice(opcoes)
         if canal_alvo and message and canal_alvo.id != message.channel.id:
             await canal_alvo.send(texto_eng)
-            return f"Mensagem enviada em {canal_alvo.mention}."
+            return await _ia_curta(f"Mensagem enviada em {canal_alvo.name}. Confirmar brevemente.", max_tokens=15) or f"Enviado em {canal_alvo.mention}."
         return texto_eng
 
     # ── Ordens de aviso público ────────────────────────────────────────────────
@@ -5403,7 +5394,8 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
         try:
             await dest_env.send(texto_env)
             if dest_env.id != canal.id:
-                await canal.send(f"Mensagem enviada em {dest_env.mention}.")
+                _c = await _ia_curta(f"Mensagem enviada em {dest_env.name}. Confirmar brevemente.", max_tokens=15)
+                await canal.send(_c or f"Enviado em {dest_env.mention}.")
             log.info(f"[IA] enviar_canal #{dest_env.name} | {autor}")
         except Exception as e:
             await canal.send(f"Não consegui enviar em {dest_env.mention}: {e}")
