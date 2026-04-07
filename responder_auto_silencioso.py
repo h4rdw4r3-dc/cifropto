@@ -2718,8 +2718,8 @@ async def _transcrever_audio(url: str, filename: str = "") -> str:
         form = _ahttp2.FormData()
         form.add_field("file", audio_bytes, filename=filename or f"audio.{ext}", content_type=mime)
         form.add_field("model", "whisper-large-v3-turbo")
-        form.add_field("language", "pt")
-        form.add_field("response_format", "text")
+        # Sem language fixo: Whisper detecta automaticamente — evita erros em falas mistas ou sotaques
+        form.add_field("response_format", "verbose_json")  # retorna segments + language detectado
 
         async with _ahttp2.ClientSession() as session:
             async with session.post(
@@ -2728,10 +2728,14 @@ async def _transcrever_audio(url: str, filename: str = "") -> str:
                 data=form,
             ) as resp:
                 if resp.status != 200:
-                    log.warning(f"[AUDIO] Whisper retornou {resp.status}")
+                    log.warning(f"[AUDIO] Whisper retornou {resp.status}: {await resp.text()}")
                     return ""
-                texto = await resp.text()
-                return texto.strip()
+                import json as _json
+                dados = await resp.json(content_type=None)
+                texto = dados.get("text", "").strip()
+                idioma = dados.get("language", "?")
+                log.info(f"[AUDIO] idioma detectado: {idioma} | {texto[:60]!r}")
+                return texto
     except Exception as e:
         log.warning(f"[AUDIO] erro ao transcrever {filename!r}: {e}")
         return ""
@@ -2801,12 +2805,13 @@ async def _analisar_tom_audio(transcricao: str, user_id: int) -> dict:
         return {}
 
 
-async def _processar_anexos_visuais(message: discord.Message) -> str:
+async def _processar_anexos_visuais(message: discord.Message, conteudo_real: str = "") -> str:
     """
     Analisa anexos da mensagem atual e da mensagem referenciada (reply).
     - Imagens: descrição via visão (Llama 4 Scout)
-    - Áudios/voz: transcrição via Groq Whisper
+    - Áudios/voz: transcrição via Groq Whisper (reutiliza _transcricao_audio_inline se disponível)
     - Outros tipos (PDF, vídeo, doc): menciona nome, tipo e tamanho
+    conteudo_real: conteúdo já transcrito (para mensagens de voz — evita dupla transcrição)
     Retorna string formatada ou '' se não houver nenhum anexo relevante.
     """
     # Coletar todos os anexos: mensagem atual + msg referenciada (reply)
@@ -2821,7 +2826,8 @@ async def _processar_anexos_visuais(message: discord.Message) -> str:
     if not todos_anexos:
         return ""
 
-    pedido = message.content.strip() if message.content.strip() else ""
+    # Pedido: usa conteudo_real (que pode ser transcrição de áudio) em vez de message.content
+    pedido = (conteudo_real or message.content or "").strip()
     descricoes: list[str] = []
     n_img = 0
 
@@ -2842,7 +2848,7 @@ async def _processar_anexos_visuais(message: discord.Message) -> str:
         elif ct.startswith("audio/") or ct.startswith("video/ogg") or nome.endswith(
             (".mp3", ".ogg", ".wav", ".webm", ".m4a", ".flac", ".opus")
         ):
-            # Áudio / mensagem de voz: transcreve via Whisper
+            # Áudio / mensagem de voz
             n_audio += 1
             if n_audio <= 2:
                 if att.size > _GROQ_AUDIO_MAX_BYTES:
@@ -2851,7 +2857,12 @@ async def _processar_anexos_visuais(message: discord.Message) -> str:
                         f"({att.size // 1024 // 1024}MB > 25MB, não processado)]"
                     )
                 else:
-                    transcricao = await _transcrever_audio(att.url, nome)
+                    # Reutiliza transcrição inline se message.content estava vazio
+                    # (conteudo_real veio do áudio inline, mesmo arquivo, sem necessidade de re-chamar Whisper)
+                    if conteudo_real and not message.content.strip() and n_audio == 1:
+                        transcricao = conteudo_real
+                    else:
+                        transcricao = await _transcrever_audio(att.url, nome)
                     if transcricao:
                         descricoes.append(f"[Áudio ({nome}) — transcrição: {transcricao}]")
                     else:
@@ -7597,9 +7608,25 @@ async def _on_message_impl(message: discord.Message):
         or (isinstance(_ref_resolvida, discord.Message) and _ref_resolvida.attachments)
     )
     if mencionado and not _e_trivial and _tem_anexo:
-        _desc_visual = await _processar_anexos_visuais(message)
+        # Detecta se a mensagem é puramente de voz (sem texto original)
+        _eh_mensagem_voz_pura = bool(_transcricao_audio_inline and not message.content.strip())
+        _desc_visual = await _processar_anexos_visuais(message, conteudo_real=conteudo)
         if _desc_visual:
-            conteudo = (conteudo + "\n" + _desc_visual).strip() if conteudo.strip() else _desc_visual
+            if _eh_mensagem_voz_pura:
+                # Áudio puro: conteudo JÁ É a transcrição.
+                # Se _desc_visual contém apenas a re-transcrição do mesmo áudio, descarta.
+                # Se contém descrição de imagem referenciada (reply), agrega.
+                _so_audio = all(
+                    "[Áudio" in linha
+                    for linha in _desc_visual.strip().splitlines() if linha.strip()
+                )
+                if not _so_audio:
+                    # Há descrição de imagem/outro: agrega ao conteudo
+                    conteudo = (conteudo + "\n" + _desc_visual).strip()
+                # else: só repetição de áudio, ignora
+            else:
+                # Mensagem com texto + anexo (imagem, arquivo, etc.): agrega descrição
+                conteudo = (conteudo + "\n" + _desc_visual).strip() if conteudo.strip() else _desc_visual
             _n_total = len(message.attachments) + (len(_ref_resolvida.attachments) if isinstance(_ref_resolvida, discord.Message) else 0)
             log.info(f"[VISAO] {_n_total} anexo(s) processado(s) para {autor}")
 
