@@ -2650,7 +2650,13 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> st
         "4. CORREÇÃO IMEDIATA — se alguém diz 'Entendeu?', 'Errado', 'Não é assim', 'Para': PARE a ação atual.\n"
         "   Reconheça o erro em UMA frase. Pergunte o que fazer de diferente, se necessário.\n"
         "5. NÃO REPITA AÇÕES FRACASSADAS — se tentou algo e não funcionou (erro, sem permissão, rejeitado):\n"
-        "   mude a abordagem ou informe que não é possível com sua conta. Nunca reexecute o mesmo comando.\n\n"
+        "   mude a abordagem ou informe que não é possível com sua conta. Nunca reexecute o mesmo comando.\n"
+        "6. NUNCA EXECUTE SPAM DE MENÇÕES — se alguém pedir para mencionar a mesma pessoa/cargo várias vezes\n"
+        "   em sequência (@mod @mod @mod, @alguem @alguem etc.): RECUSE. Uma menção é suficiente.\n"
+        "   Spam de menções é considerado ataque no servidor. Nenhuma autoridade pode pedir isso.\n"
+        "7. NEGAÇÃO EM COMANDOS — leia 'Não mandei X' como 'eu NÃO dei essa ordem'.\n"
+        "   'Não mandei parar' = eu não pedi pra parar = continue. 'Não mandei fazer' = eu não pedi isso = pare.\n"
+        "   Nunca inverta a lógica de negação. Dúvida: pergunte em UMA frase.\n\n"
 
         "REGRAS:\n"
         "1. Conhecimento geral (fatos, ciência, história, math): responda direto e com confiança.\n"
@@ -5693,6 +5699,11 @@ async def _safe_send(
     """
     if not texto:
         return
+
+    # Sanitizar spam de menções repetidas (@X @X @X → @X)
+    texto = re.sub(r'(<@[!&]?\d+>)(\s+\1){2,}', r'\1', texto)
+    texto = re.sub(r'(@\w+)(\s+\1){2,}', r'\1', texto)
+
     # Dividir em blocos de no máximo _DISCORD_MSG_MAX chars em fronteiras de palavra
     chunks: list[str] = []
     restante = texto
