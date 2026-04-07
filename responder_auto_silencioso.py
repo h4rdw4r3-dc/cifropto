@@ -1819,9 +1819,12 @@ async def _pedir_alvo(acao: str) -> str:
     """Gera pergunta natural para identificar o alvo de uma ação de moderação."""
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return "Quem?"
+    modelo = "llama-3.1-8b-instant"
+    if not _modelo_disponivel(modelo):
+        return "Quem?"
     try:
-        resp = await _groq_client().chat.completions.create(
-            model="llama-3.1-8b-instant",
+        resp = await _groq_create(
+            model=modelo,
             max_tokens=20,
             temperature=0.9,
             messages=[
@@ -1830,7 +1833,8 @@ async def _pedir_alvo(acao: str) -> str:
             ],
         )
         return resp.choices[0].message.content.strip()
-    except Exception:
+    except Exception as e:
+        log.debug(f"[PEDIR_ALVO] falhou: {e}")
         return "Quem?"
 
 
@@ -1838,9 +1842,12 @@ async def _aviso_infrator(mencao: str, contexto: str) -> str:
     """Gera aviso natural para infrator sem string fixa."""
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return f"{mencao} para."
+    modelo = "llama-3.1-8b-instant"
+    if not _modelo_disponivel(modelo):
+        return f"{mencao} para."
     try:
-        resp = await _groq_client().chat.completions.create(
-            model="llama-3.1-8b-instant",
+        resp = await _groq_create(
+            model=modelo,
             max_tokens=40,
             temperature=0.9,
             messages=[
@@ -1849,7 +1856,8 @@ async def _aviso_infrator(mencao: str, contexto: str) -> str:
             ],
         )
         return resp.choices[0].message.content.strip()
-    except Exception:
+    except Exception as e:
+        log.debug(f"[AVISO_INFRATOR] falhou: {e}")
         return f"{mencao} para."
 
 # ── Queries factuais do servidor (respondidas direto do guild, sem IA) ────────
@@ -2807,6 +2815,33 @@ def _groq_client() -> AsyncOpenAI:
     return _groq
 
 
+async def _groq_create(**kwargs) -> object:
+    """
+    Wrapper centralizado para _groq_client().chat.completions.create().
+    Verifica disponibilidade do modelo ANTES de chamar a API.
+    Registra tokens e bloqueia modelo automaticamente em caso de 429.
+    Lança a exceção original para o caller tratar fallbacks.
+    """
+    modelo = kwargs.get("model", "llama-3.1-8b-instant")
+
+    # Se o modelo solicitado estiver bloqueado, falha rápido sem chamar a API
+    if not _modelo_disponivel(modelo):
+        bloqueado_ate = _modelo_bloqueado_ate.get(modelo)
+        espera = int((bloqueado_ate - agora_utc()).total_seconds()) if bloqueado_ate else 60
+        raise Exception(f"[BUDGET] {modelo} bloqueado localmente por mais {espera}s — sem chamada à API")
+
+    try:
+        resp = await _groq_client().chat.completions.create(**kwargs)
+        # Registro automático de tokens
+        if resp.usage:
+            _registrar_tokens(modelo, resp.usage.total_tokens)
+        return resp
+    except Exception as e:
+        if "429" in str(e):
+            _bloquear_modelo(modelo, _extrair_retry_after(str(e)))
+        raise
+
+
 async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80) -> str:
     """
     Gera uma resposta curta e natural para qualquer situação — sem template.
@@ -2817,6 +2852,17 @@ async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80) -> 
     """
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return ""
+
+    # Respeita disponibilidade e budget — tenta 8b, depois verifica 70b como fallback reverso
+    modelo = "llama-3.1-8b-instant"
+    if not _modelo_disponivel(modelo):
+        # 8b indisponível — tenta 70b se disponível
+        if _modelo_disponivel("llama-3.3-70b-versatile") and _tokens_70b_hoje < LIMITE_70B:
+            modelo = "llama-3.3-70b-versatile"
+        else:
+            log.debug("[IA_CURTA] todos os modelos bloqueados, retornando vazio")
+            return ""
+
     humor_txt = f" Humor atual: {_humor_sessao}." if _humor_sessao else ""
     system = (
         f"Você é o shell_engenheiro — membro humano de servidor Discord brasileiro. Observador, econômico, irônico quando cabe.{humor_txt}\n"
@@ -2825,8 +2871,8 @@ async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80) -> 
     )
     prompt = situacao + (f"\nContexto adicional: {contexto}" if contexto else "")
     try:
-        resp = await _groq_client().chat.completions.create(
-            model="llama-3.1-8b-instant",
+        resp = await _groq_create(
+            model=modelo,
             max_tokens=max_tokens,
             temperature=0.95,
             messages=[
@@ -2834,7 +2880,6 @@ async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80) -> 
                 {"role": "user", "content": prompt},
             ],
         )
-        _registrar_tokens("8b", resp.usage.total_tokens if resp.usage else 40)
         resultado = _limpar_markdown(resp.choices[0].message.content.strip())
         # Filtra respostas que vazam identidade ou termos internos
         _termos_proibidos = ("groq", "openai", "llm", "modelo de linguagem", "sou um bot",
@@ -2845,8 +2890,6 @@ async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80) -> 
             return ""
         return resultado
     except Exception as e:
-        if "429" in str(e):
-            _bloquear_modelo("llama-3.1-8b-instant", _extrair_retry_after(str(e)))
         log.debug(f"[IA_CURTA] falhou: {e}")
         return ""
 
@@ -2866,7 +2909,7 @@ async def _descrever_imagem(url: str, pedido: str = "") -> str:
            "Se houver texto na imagem, transcreva-o. Seja direto, sem introduções."
     )
     try:
-        resp = await _groq_client().chat.completions.create(
+        resp = await _groq_create(
             model=_MODELO_VISAO,
             max_tokens=400,
             messages=[{
@@ -2945,6 +2988,8 @@ async def _analisar_tom_audio(transcricao: str, user_id: int) -> dict:
     """
     if not transcricao or not GROQ_DISPONIVEL:
         return {}
+    if not _modelo_disponivel("llama-3.1-8b-instant"):
+        return {}
 
     # Histórico do usuário para dar contexto ao modelo
     hist = _voz_historico.get(user_id, [])
@@ -2965,7 +3010,7 @@ async def _analisar_tom_audio(transcricao: str, user_id: int) -> dict:
     ) + hist_txt
 
     try:
-        resp = await _groq_client().chat.completions.create(
+        resp = await _groq_create(
             model="llama-3.1-8b-instant",
             max_tokens=40,
             temperature=0.0,
@@ -2974,7 +3019,6 @@ async def _analisar_tom_audio(transcricao: str, user_id: int) -> dict:
                 {"role": "user", "content": transcricao[:500]},
             ],
         )
-        _registrar_tokens("8b", resp.usage.total_tokens if resp.usage else 20)
         raw = resp.choices[0].message.content.strip()
         import json as _json
         dados = _json.loads(raw)
@@ -3135,13 +3179,26 @@ def _escolher_modelo(forcar_rapido: bool = False) -> str:
     Respeita bloqueios por rate limit real da API (retry-after).
     - 8b-instant: padrão (500k TPD), rápido e econômico.
     - 70b-versatile: só quando disponível E budget ok.
+    Retorna None se ambos estão bloqueados.
     """
     _resetar_tokens_se_novo_dia()
-    if forcar_rapido or _tokens_70b_hoje >= LIMITE_70B:
-        return "llama-3.1-8b-instant"
-    if not _modelo_disponivel("llama-3.3-70b-versatile"):
-        return "llama-3.1-8b-instant"
-    return "llama-3.3-70b-versatile"
+    oito_b = "llama-3.1-8b-instant"
+    setenta_b = "llama-3.3-70b-versatile"
+
+    # Tenta 70b primeiro (quando budget permite e não forçando rápido)
+    if not forcar_rapido and _tokens_70b_hoje < LIMITE_70B and _modelo_disponivel(setenta_b):
+        return setenta_b
+
+    # Padrão: 8b-instant
+    if _modelo_disponivel(oito_b):
+        return oito_b
+
+    # Ambos bloqueados — retorna o que desbloqueará primeiro
+    ate_70b = _modelo_bloqueado_ate.get(setenta_b)
+    ate_8b  = _modelo_bloqueado_ate.get(oito_b)
+    if ate_70b and ate_8b:
+        log.warning("[BUDGET] ambos os modelos bloqueados por rate limit")
+    return oito_b  # retorna 8b de qualquer forma; o caller trata o 429
 
 def _budget_status() -> str:
     _resetar_tokens_se_novo_dia()
@@ -3151,9 +3208,12 @@ def _budget_status() -> str:
 async def confirmar_acao(descricao: str, fallback: str) -> str:
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return fallback
+    modelo = "llama-3.1-8b-instant"
+    if not _modelo_disponivel(modelo):
+        return fallback
     try:
-        resp = await _groq_client().chat.completions.create(
-            model="llama-3.1-8b-instant",
+        resp = await _groq_create(
+            model=modelo,
             max_tokens=80,
             messages=[
                 {"role": "system", "content": SYSTEM_ACAO},
@@ -3298,7 +3358,7 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     log.info(f"[GROQ] {modelo} | user={autor} | chars={ctx_chars} | {_budget_status()}")
 
     try:
-        resp = await _groq_client().chat.completions.create(
+        resp = await _groq_create(
             model=modelo,
             max_tokens=420,
             temperature=0.78,
@@ -3323,24 +3383,18 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
             elif texto:
                 texto = texto.rstrip() + "..."
             log.warning(f"[GROQ] resposta truncada pelo limite de tokens — cortada na frase")
-        # Rastrear tokens consumidos
-        if resp.usage:
-            _registrar_tokens(modelo, resp.usage.total_tokens)
         log.info(f"[GROQ] OK ({len(texto)} chars) | {_budget_status()}")
         hist.append({"role": "assistant", "content": texto})
         return texto
     except Exception as e:
         log.error(f"[GROQ] erro ({modelo}): {e}", exc_info=True)
-        # Registra bloqueio por rate limit com tempo real da API
-        if "429" in str(e):
-            _retry = _extrair_retry_after(str(e))
-            _bloquear_modelo(modelo, _retry)
 
-        # Fallback automático para 8b-instant se o 70b falhar com rate limit
-        if "429" in str(e) and "8b" not in modelo and _modelo_disponivel("llama-3.1-8b-instant"):
+        # Fallback automático para 8b-instant se o 70b falhar (bloqueio local ou 429)
+        # _groq_create já aplicou o bloqueio — só verifica disponibilidade atual
+        if "8b" not in modelo and _modelo_disponivel("llama-3.1-8b-instant"):
             try:
                 log.info("[GROQ] fallback para 8b-instant")
-                resp2 = await _groq_client().chat.completions.create(
+                resp2 = await _groq_create(
                     model="llama-3.1-8b-instant",
                     max_tokens=300,
                     temperature=0.6,
@@ -3358,14 +3412,11 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
                         texto2 = texto2[:ult + 1]
                     elif texto2:
                         texto2 = texto2.rstrip() + "..."
-                if resp2.usage:
-                    _registrar_tokens("llama-3.1-8b-instant", resp2.usage.total_tokens)
                 hist.append({"role": "assistant", "content": texto2})
                 return texto2
             except Exception as e2:
                 log.error(f"[GROQ] fallback também falhou: {e2}")
-                if "429" in str(e2):
-                    _bloquear_modelo("llama-3.1-8b-instant", _extrair_retry_after(str(e2)))
+
         return await _ia_curta(
             "Não conseguiu processar a resposta agora. Diga algo seco e breve, como quem está pensando ou ocupado. Sem mencionar tecnologia, sistema ou IA.",
             max_tokens=20,
@@ -5237,7 +5288,7 @@ async def _gerar_aviso_afk_ia(membro: discord.Member, motivo: str, ate) -> str:
         f"Estilo: brasileiro jovem, sem emojis, sem asteriscos. Máximo 15 palavras."
     )
     try:
-        resp = await _groq_client().chat.completions.create(
+        resp = await _groq_create(
             model="llama-3.1-8b-instant",
             max_tokens=60,
             temperature=0.7,
@@ -5343,7 +5394,7 @@ async def resposta_inicial_superior(conteudo: str, autor: str, user_id: int, gui
             "Sem emojis, sem asteriscos, sem markdown, sem dois pontos. Fale como brasileiro jovem."
         )
         try:
-            resp = await _groq_client().chat.completions.create(
+            resp = await _groq_create(
                 model="llama-3.3-70b-versatile",
                 max_tokens=200,
                 messages=[
@@ -5488,7 +5539,7 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
         f"Membros do servidor: {membros_txt}."
     )
     try:
-        resp = await _groq_client().chat.completions.create(
+        resp = await _groq_create(
             model="llama-3.1-8b-instant",
             max_tokens=100,
             temperature=0,
@@ -5497,7 +5548,6 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
                 {"role": "user", "content": conteudo},
             ],
         )
-        _registrar_tokens("8b", (resp.usage.total_tokens if resp.usage else 250))
         txt = resp.choices[0].message.content.strip()
         txt = re.sub(r'^```(?:json)?\s*|\s*```$', '', txt, flags=re.MULTILINE).strip()
         return json.loads(txt)
@@ -6199,7 +6249,7 @@ async def _atualizar_perfil_usuario(user_id: int, autor: str, mensagem: str, res
     # Extrai episódio memorável a cada interação (só se a mensagem tiver substância)
     if GROQ_API_KEY and len(mensagem.split()) >= 6:
         try:
-            ep_r = await _groq_client().chat.completions.create(
+            ep_r = await _groq_create(
                 model="llama-3.1-8b-instant",
                 max_tokens=40,
                 temperature=0.2,
@@ -6211,7 +6261,6 @@ async def _atualizar_perfil_usuario(user_id: int, autor: str, mensagem: str, res
                     {"role": "user", "content": f"{autor}: {mensagem[:300]}\nBot: {resposta[:200]}"},
                 ],
             )
-            _registrar_tokens("8b", ep_r.usage.total_tokens if ep_r.usage else 40)
             ep_txt = ep_r.choices[0].message.content.strip()
             if ep_txt and ep_txt.upper() != "NENHUM" and len(ep_txt) > 5:
                 episodios = perfil["episodios"]
@@ -6261,7 +6310,7 @@ async def _atualizar_perfil_usuario(user_id: int, autor: str, mensagem: str, res
     )
 
     try:
-        r = await _groq_client().chat.completions.create(
+        r = await _groq_create(
             model="llama-3.1-8b-instant",
             max_tokens=100,
             temperature=0.3,
@@ -6277,7 +6326,6 @@ async def _atualizar_perfil_usuario(user_id: int, autor: str, mensagem: str, res
         novo_resumo = r.choices[0].message.content.strip()
         perfil["resumo"] = novo_resumo
         perfil["atualizado"] = agora_utc().strftime("%Y-%m-%d")
-        _registrar_tokens("8b", r.usage.total_tokens if r.usage else 100)
         salvar_dados()
         log.debug(f"[PERFIL] {autor}: {novo_resumo[:80]}")
     except Exception as e:
@@ -6318,7 +6366,7 @@ async def _participar_debate(message: discord.Message, tema: str):
         "Se já participou muito nessa conversa ou não tem nada genuíno a acrescentar: responda SILÊNCIO."
     )
     try:
-        resp = await _groq_client().chat.completions.create(
+        resp = await _groq_create(
             model=_escolher_modelo(),
             max_tokens=100,
             temperature=0.92,
@@ -6327,7 +6375,6 @@ async def _participar_debate(message: discord.Message, tema: str):
                 {"role": "user", "content": ctx or f"{message.author.display_name}: {message.content[:300]}"},
             ],
         )
-        _registrar_tokens("8b", resp.usage.total_tokens if resp.usage else 150)
         texto = resp.choices[0].message.content.strip()
         if texto and "SILÊNCIO" not in texto.upper() and len(texto) > 8:
             await asyncio.sleep(random.uniform(2, 6))  # delay humano
@@ -6374,7 +6421,7 @@ async def _interjetar_conversa(message: discord.Message):
         "Responda apenas a palavra, sem explicação."
     )
     try:
-        triagem = await _groq_client().chat.completions.create(
+        triagem = await _groq_create(
             model="llama-3.1-8b-instant",
             max_tokens=5,
             temperature=0.0,
@@ -6383,7 +6430,6 @@ async def _interjetar_conversa(message: discord.Message):
                 {"role": "user", "content": ctx},
             ],
         )
-        _registrar_tokens("8b", triagem.usage.total_tokens if triagem.usage else 10)
         tipo = triagem.choices[0].message.content.strip().upper()
         if "PASS" in tipo or tipo not in ("OPINIAO", "PERGUNTA", "FATO", "DISCORDA"):
             return
@@ -6419,7 +6465,7 @@ async def _interjetar_conversa(message: discord.Message):
             "1 frase. Precisa, calibrada, sem introdução genérica. Sem emojis, sem markdown.\n"
             "Se não tiver nada genuíno a acrescentar nesse ângulo: responda SILÊNCIO."
         )
-        resp = await _groq_client().chat.completions.create(
+        resp = await _groq_create(
             model=_escolher_modelo(),
             max_tokens=90,
             temperature=0.88,
@@ -6428,7 +6474,6 @@ async def _interjetar_conversa(message: discord.Message):
                 {"role": "user", "content": ctx},
             ],
         )
-        _registrar_tokens("8b", resp.usage.total_tokens if resp.usage else 80)
         texto = resp.choices[0].message.content.strip()
         if texto and "SILÊNCIO" not in texto.upper() and len(texto) > 8:
             await asyncio.sleep(random.uniform(3, 9))  # delay humano
@@ -6472,7 +6517,7 @@ async def _reagir_midia_autonoma(message: discord.Message, descricao: str):
         "Se não tiver NADA genuíno a dizer sobre a mídia: responda SILÊNCIO."
     )
     try:
-        resp = await _groq_client().chat.completions.create(
+        resp = await _groq_create(
             model="llama-3.1-8b-instant",
             max_tokens=80,
             temperature=0.9,
@@ -6481,7 +6526,6 @@ async def _reagir_midia_autonoma(message: discord.Message, descricao: str):
                 {"role": "user", "content": prompt_midia},
             ],
         )
-        _registrar_tokens("8b", resp.usage.total_tokens if resp.usage else 50)
         texto = _limpar_markdown(resp.choices[0].message.content.strip())
         if texto and "SILÊNCIO" not in texto.upper() and len(texto) > 5:
             ultima_interjeccao[_canal_id] = _agora
@@ -6497,7 +6541,7 @@ async def traduzir_texto(texto: str, idioma: str = "ingles") -> str:
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return "Tradução indisponível no momento."
     try:
-        resp = await _groq_client().chat.completions.create(
+        resp = await _groq_create(
             model="llama-3.1-8b-instant",
             max_tokens=250,
             temperature=0,
@@ -6506,7 +6550,6 @@ async def traduzir_texto(texto: str, idioma: str = "ingles") -> str:
                 {"role": "user", "content": texto},
             ],
         )
-        _registrar_tokens("8b", resp.usage.total_tokens if resp.usage else 180)
         return resp.choices[0].message.content.strip()
     except Exception as e:
         return f"Erro na tradução: {e}"
@@ -7029,7 +7072,7 @@ async def _task_accountability_equipe():
                     ctx_mem = list(canal_memoria.get(cid, []))
                     ctx_txt = "\n".join(f"{m['autor']}: {m['conteudo'][:100]}" for m in ctx_mem[-6:])
                     try:
-                        r = await _groq_client().chat.completions.create(
+                        r = await _groq_create(
                             model="llama-3.1-8b-instant",
                             max_tokens=120,
                             temperature=0.5,
@@ -7045,7 +7088,6 @@ async def _task_accountability_equipe():
                             ],
                         )
                         texto_r = r.choices[0].message.content.strip()
-                        _registrar_tokens("8b", r.usage.total_tokens if r.usage else 120)
                         if texto_r and "SILÊNCIO" not in texto_r.upper():
                             await p["msg"].reply(texto_r, mention_author=False)
                             respondidos += 1
@@ -7097,7 +7139,7 @@ async def _task_accountability_equipe():
                     continue
                 ctx_q = "\n".join(f"{m['autor']}: {m['conteudo'][:100]}" for m in mem_canal[-8:])
                 try:
-                    rq = await _groq_client().chat.completions.create(
+                    rq = await _groq_create(
                         model="llama-3.1-8b-instant",
                         max_tokens=70,
                         temperature=0.9,
@@ -7113,7 +7155,6 @@ async def _task_accountability_equipe():
                         ],
                     )
                     txt_q = rq.choices[0].message.content.strip()
-                    _registrar_tokens("8b", rq.usage.total_tokens if rq.usage else 70)
                     if txt_q and "SILÊNCIO" not in txt_q.upper():
                         await canal_q.send(txt_q)
                         _ultima_iniciativa[cid] = agora
@@ -7198,7 +7239,7 @@ async def _task_iniciativa_proativa():
                 )
 
                 # Pede à IA se há algo genuinamente novo a dizer
-                r = await _groq_client().chat.completions.create(
+                r = await _groq_create(
                     model="llama-3.1-8b-instant",
                     max_tokens=60,
                     temperature=0.85,
@@ -7215,7 +7256,6 @@ async def _task_iniciativa_proativa():
                     ],
                 )
                 txt = r.choices[0].message.content.strip()
-                _registrar_tokens("8b", r.usage.total_tokens if r.usage else 60)
 
                 if txt and txt.upper() != "SILÊNCIO" and "SILÊNCIO" not in txt.upper():
                     canal = guild.get_channel(canal_id)
@@ -7321,7 +7361,7 @@ async def _task_engajamento_membros():
                 _ctx = _montar_ctx_canal(cid, n=3)
                 if not _ctx:
                     continue  # sem histórico suficiente
-                r = await _groq_client().chat.completions.create(
+                r = await _groq_create(
                     model="llama-3.1-8b-instant",
                     max_tokens=5,
                     temperature=0.0,
@@ -7333,13 +7373,12 @@ async def _task_engajamento_membros():
                         {"role": "user", "content": _ctx},
                     ],
                 )
-                _registrar_tokens("8b", r.usage.total_tokens if r.usage else 5)
                 decisao = r.choices[0].message.content.strip().upper()
                 if "POSTAR" not in decisao:
                     continue
 
                 humor_txt = f" Humor: {_humor_sessao}." if _humor_sessao else ""
-                r2 = await _groq_client().chat.completions.create(
+                r2 = await _groq_create(
                     model=_escolher_modelo(),
                     max_tokens=80,
                     temperature=0.9,
@@ -7353,7 +7392,6 @@ async def _task_engajamento_membros():
                     ],
                 )
                 txt2 = _limpar_markdown(r2.choices[0].message.content.strip())
-                _registrar_tokens("8b", r2.usage.total_tokens if r2.usage else 80)
                 if txt2 and "SILÊNCIO" not in txt2.upper():
                     await asyncio.sleep(random.uniform(10, 40))
                     await canal.send(txt2)
@@ -7489,7 +7527,7 @@ async def on_ready():
         try:
             hora = datetime.now().hour
             periodo = "madrugada" if hora < 6 else "manhã" if hora < 12 else "tarde" if hora < 18 else "noite"
-            r = await _groq_client().chat.completions.create(
+            r = await _groq_create(
                 model="llama-3.1-8b-instant",
                 max_tokens=20,
                 temperature=1.1,
@@ -7625,7 +7663,7 @@ async def on_member_join(member: discord.Member):
                     f"reentrada número {vezes}" if vezes > 1
                     else f"primeira entrada, conta com {idade_conta.days} dias"
                 )
-                r = await _groq_client().chat.completions.create(
+                r = await _groq_create(
                     model="llama-3.1-8b-instant",
                     max_tokens=25,
                     temperature=0.95,
@@ -7717,7 +7755,7 @@ async def on_member_remove(member: discord.Member):
                        or discord.utils.get(member.guild.text_channels, name="chat") \
                        or member.guild.system_channel
             if canal_geral and random.random() < 0.25:  # 25% de chance — não toda saída
-                r = await _groq_client().chat.completions.create(
+                r = await _groq_create(
                     model="llama-3.1-8b-instant",
                     max_tokens=30,
                     temperature=0.9,
@@ -7770,7 +7808,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
         if random.random() > 0.45:
             continue
         try:
-            r = await _groq_client().chat.completions.create(
+            r = await _groq_create(
                 model="llama-3.1-8b-instant",
                 max_tokens=30,
                 temperature=0.9,
@@ -7783,7 +7821,6 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                      f"{after.display_name} recebeu o cargo '{cargo.name}'."},
                 ],
             )
-            _registrar_tokens("8b", r.usage.total_tokens if r.usage else 30)
             txt = r.choices[0].message.content.strip()
             if txt:
                 await asyncio.sleep(random.uniform(4, 15))
@@ -7795,7 +7832,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
     # ── Mudança de apelido ─────────────────────────────────────────────────────
     if before.display_name != after.display_name and random.random() < 0.3:
         try:
-            r = await _groq_client().chat.completions.create(
+            r = await _groq_create(
                 model="llama-3.1-8b-instant",
                 max_tokens=25,
                 temperature=0.9,
@@ -7807,7 +7844,6 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                      f"{before.display_name} virou {after.display_name}."},
                 ],
             )
-            _registrar_tokens("8b", r.usage.total_tokens if r.usage else 25)
             txt = r.choices[0].message.content.strip()
             if txt:
                 await asyncio.sleep(random.uniform(3, 12))
@@ -7936,7 +7972,7 @@ async def on_thread_create(thread: discord.Thread):
         criador = thread.owner.display_name if thread.owner else "alguém"
         humor_txt = f" Humor: {_humor_sessao}." if _humor_sessao else ""
 
-        r = await _groq_client().chat.completions.create(
+        r = await _groq_create(
             model="llama-3.1-8b-instant",
             max_tokens=60,
             temperature=0.9,
@@ -7952,7 +7988,6 @@ async def on_thread_create(thread: discord.Thread):
                  + (f"Contexto do canal pai:\n{ctx_pai}" if ctx_pai else "")},
             ],
         )
-        _registrar_tokens("8b", r.usage.total_tokens if r.usage else 60)
         txt = _limpar_markdown(r.choices[0].message.content.strip())
         if txt and "SILÊNCIO" not in txt.upper():
             await thread.send(txt)
