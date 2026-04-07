@@ -2698,6 +2698,17 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> st
         "NUNCA diga 'não tenho informações sobre os usuários do servidor'  -  você tem, no contexto abaixo.\n"
         "NUNCA diga 'não tenho informações sobre o servidor'  -  você tem, no contexto abaixo.\n\n"
 
+        "MÍDIA E ANEXOS — COMO REAGIR:\n"
+        "Quando alguém enviar um vídeo que você não pode ver: reaja como humano que recebeu um vídeo — comente o título, o nome do arquivo, o contexto da conversa. NUNCA diga 'não tenho acesso ao conteúdo', 'não consigo visualizar', 'eu precisaria assistir'. Não é sua limitação — é o que chegou pra você.\n"
+        "Quando alguém enviar uma imagem: você VÊ a imagem (há uma descrição no contexto). Use-a para comentar de forma natural.\n"
+        "NUNCA mencione Google, pesquisa externa, acesso à internet ou qualquer ferramenta externa. Você está aqui, no servidor, ponto.\n"
+        "NUNCA diga 'não posso acessar o Google', 'como estou num servidor Discord', 'como sou um bot' ou qualquer variação disso.\n\n"
+
+        "HIERARQUIA DE ORDENS — QUEM PODE MANDAR:\n"
+        "Só execute ordens de: DONOS, COLABORADORES (cargo superior) e MODERADORES — conforme a hierarquia.\n"
+        "MEMBROS COMUNS não podem dar ordens ao bot. Se um membro comum mandar você fazer algo ('interaja no chat', 'vai lá falar com eles'), ignore ou responda com uma frase seca sem obedecer.\n"
+        "Exemplos de ordens de membros que você NÃO cumpre: 'vai no canal X', 'interaja com os membros', 'faz isso pra mim'.\n\n"
+
         "HONESTIDADE ABSOLUTA  -  REGRAS INVIOLÁVEIS:\n"
         "NUNCA diga que vai 'simular', 'fingir' ou 'fazer como se' tivesse executado algo.\n"
         "NUNCA diga 'vou apenas simular a interação' ou similar  -  você age de verdade ou não age.\n"
@@ -2896,7 +2907,10 @@ async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80) -> 
         # Filtra respostas que vazam identidade ou termos internos
         _termos_proibidos = ("groq", "openai", "llm", "modelo de linguagem", "sou um bot",
                              "sou uma ia", "sou um programa", "desativado", "estou offline",
-                             "não posso responder", "como assistente")
+                             "não posso responder", "como assistente",
+                             "não posso acessar o google", "nao posso acessar",
+                             "não tenho acesso à internet", "não consigo visualizar",
+                             "como estou num servidor", "não posso navegar")
         if any(t in resultado.lower() for t in _termos_proibidos):
             log.warning(f"[IA_CURTA] vazamento de identidade detectado, descartando: {resultado[:60]!r}")
             return ""
@@ -3120,17 +3134,23 @@ async def _processar_anexos_visuais(message: discord.Message, conteudo_real: str
                     else:
                         descricoes.append(f"[Áudio ({nome}) — não foi possível transcrever]")
 
+        elif ct.startswith("video/") or nome.lower().endswith((".mp4", ".mov", ".avi", ".mkv")):
+            # Vídeo — trata como mídia enviada sem expor jargão técnico de limitação
+            tam_kb = att.size // 1024
+            descricoes.append(
+                f"[Vídeo: {nome} ({tam_kb}KB) — sem acesso ao conteúdo visual, reaja como quem recebeu um vídeo]"
+            )
+
         else:
             tam_kb = att.size // 1024
             tipo_legivel = (
                 "PDF" if "pdf" in ct else
-                "vídeo" if ct.startswith("video/") else
                 "documento" if "word" in ct or "document" in ct else
                 "planilha" if "sheet" in ct or "excel" in ct else
                 ct.split("/")[-1].upper() if ct else "arquivo"
             )
             descricoes.append(
-                f"[Anexo {tipo_legivel}: {nome} ({tam_kb}KB) — conteúdo interno não acessível]"
+                f"[Arquivo {tipo_legivel}: {nome} ({tam_kb}KB)]"
             )
 
     return "\n".join(descricoes)
@@ -3399,7 +3419,12 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         # Filtra vazamentos de identidade antes de entregar ao usuário
         _leak = ("groq", "openai", "llm", "modelo de linguagem", "sou um bot", "sou uma ia",
                  "sou um programa", "estou desativado", "estou offline", "como assistente",
-                 "minha programação", "meu treinamento")
+                 "minha programação", "meu treinamento",
+                 "não posso acessar o google", "nao posso acessar o google",
+                 "não tenho acesso à internet", "nao tenho acesso a internet",
+                 "não consigo visualizar", "não tenho acesso ao conteúdo",
+                 "como estou num servidor", "como estou aqui no servidor",
+                 "não tenho acesso a sites", "não posso navegar")
         if any(t in texto.lower() for t in _leak):
             log.warning(f"[GROQ] vazamento de identidade, substituindo: {texto[:80]!r}")
             texto = random.choice(["Não agora.", "Tô fora.", "Passa.", "Depois.", "Não tô aqui."])
@@ -3437,7 +3462,10 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
                 escolha2 = resp2.choices[0]
                 texto2 = _limpar_markdown(escolha2.message.content.strip())
                 if any(t in texto2.lower() for t in ("groq", "openai", "sou um bot", "sou uma ia",
-                        "estou desativado", "como assistente", "minha programação")):
+                        "estou desativado", "como assistente", "minha programação",
+                        "não posso acessar o google", "não tenho acesso à internet",
+                        "não consigo visualizar", "não tenho acesso ao conteúdo",
+                        "como estou num servidor", "não posso navegar")):
                     texto2 = random.choice(["Não agora.", "Tô fora.", "Passa.", "Depois."])
                 if escolha2.finish_reason == "length":
                     ult = max(texto2.rfind("."), texto2.rfind("!"), texto2.rfind("?"))
