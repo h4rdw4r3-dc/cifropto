@@ -2471,19 +2471,20 @@ def build_server_context_compact(guild: discord.Guild) -> str:
 
 
 def _hora_contexto() -> str:
-    """Retorna contexto de horário/dia para calibrar o tom da resposta."""
+    """Retorna hora real BRT e período para calibrar o tom da resposta."""
     br = datetime.now(timezone(timedelta(hours=-3)))
     hora = br.hour
     dia = ["segunda", "terca", "quarta", "quinta", "sexta", "sabado", "domingo"][br.weekday()]
+    hora_str = br.strftime("%H:%M")
     if 0 <= hora < 6:
-        periodo = "madrugada (servidor provavelmente quieto)"
+        periodo = "madrugada"
     elif 6 <= hora < 12:
         periodo = "manha"
     elif 12 <= hora < 18:
         periodo = "tarde"
     else:
         periodo = "noite"
-    return f"{dia}, {periodo} (Brasilia)"
+    return f"{hora_str} BRT, {dia}, {periodo}"
 
 
 def _contexto_usuario(user_id: int) -> str:
@@ -2690,7 +2691,12 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> st
         "Nunca explique suas limitações em parágrafos. Nunca reflita sobre sua natureza de bot.\n"
         "Nunca aja de forma infantil, exagerada ou servil. Sem exclamações forçadas, sem bajulação.\n"
         "NUNCA encerre conversas com frases de assistente genérico: parece que a conversa terminou, não hesite em perguntar, estou aqui para ajudar, fico à disposição. Se não tem mais o que dizer: cale.\n"
-        "Se alguém pedir banir/silenciar/expulsar alguém pelo NOME (sem @), resolva pelo nome — não peça ID, não redirecione.\n\n"
+        "Se alguém pedir banir/silenciar/expulsar alguém pelo NOME (sem @), resolva pelo nome — não peça ID, não redirecione.\n"
+        "OUTROS BOTS NO SERVIDOR: você pode e deve acionar comandos de outros bots quando fizer sentido.\n"
+        "Ex: se alguém pede para limpar mensagens e há um bot com +clear, use +clear 100 diretamente no canal.\n"
+        "Bots comuns: Loritta (+), MEE6 (!), Carl-bot (!), Dyno (?), entre outros. Use o prefixo certo.\n"
+        "Quando acionar outro bot: execute o comando diretamente, sem anunciar que vai fazer isso.\n\n"
+        "MENSAGENS: responda sempre em UMA única mensagem, nunca divida em duas ou mais.\n\n"
     )
     ctx_srv = _contexto_servidor_comprimido(None, mencoes_nomes)
     if ctx_srv:
@@ -6404,10 +6410,10 @@ async def _audit_ia(canal: discord.TextChannel, evento: str, dados: dict) -> Non
     """
     dados_txt = ", ".join(f"{k}: {v}" for k, v in dados.items())
     prompt = (
-        f"Evento: {evento}. Dados reais: {dados_txt}. "
-        "Escreva uma frase curta de registro usando APENAS esses dados. "
-        "Não invente nada. Não adicione contexto, motivação, especulação ou opinião. "
-        "Só os fatos fornecidos, em texto corrido natural. Sem prefixos, sem colchetes."
+        f"Evento: {evento}. Dados: {dados_txt}. "
+        "Escreva UMA frase curta usando exatamente os valores acima — eles já são reais e definitivos. "
+        "Use os valores literalmente como estão. Nunca escreva placeholders como [hora], [nome] ou similares. "
+        "Sem invenção, sem contexto extra, sem colchetes."
     )
     texto = await _ia_curta(prompt, max_tokens=60)
     if not texto:
