@@ -6482,12 +6482,12 @@ async def _interjetar_conversa(message: discord.Message):
     # Etapa 1: triagem qualificada — não só GO/PASS, mas define o ângulo
     system_triagem = (
         "Você avalia se um bot de Discord deve entrar numa conversa e como.\n"
-        "Responda com UMA das opções: OPINIAO, PERGUNTA, FATO, DISCORDA, PASS\n"
-        "OPINIAO — o tema dá para tomar posição própria interessante\n"
-        "PERGUNTA — algo na conversa merece uma pergunta que force reflexão\n"
-        "FATO — há informação concreta e relevante que pode ser acrescentada\n"
-        "DISCORDA — alguém disse algo questionável ou factualmente errado\n"
-        "PASS — bate-papo trivial, emojis, cumprimentos, nada com substância\n"
+        "Responda com UMA das opções: OPINIAO, PERGUNTA, DISCORDA, PASS\n"
+        "OPINIAO — o tema dá para tomar posição própria com base no que foi dito na conversa\n"
+        "PERGUNTA — algo na conversa merece uma pergunta que force reflexão sobre o que foi dito\n"
+        "DISCORDA — alguém disse algo questionável ou claramente errado dentro da conversa\n"
+        "PASS — bate-papo trivial, emojis, cumprimentos, resenha entre membros, assuntos externos ao servidor, nada com substância real\n"
+        "IMPORTANTE: se a conversa é uma resenha casual entre membros (troca de zoeiras, gírias, frases soltas), responda PASS.\n"
         "Responda apenas a palavra, sem explicação."
     )
     try:
@@ -6501,28 +6501,23 @@ async def _interjetar_conversa(message: discord.Message):
             ],
         )
         tipo = triagem.choices[0].message.content.strip().upper()
-        if "PASS" in tipo or tipo not in ("OPINIAO", "PERGUNTA", "FATO", "DISCORDA"):
+        if "PASS" in tipo or tipo not in ("OPINIAO", "PERGUNTA", "DISCORDA"):
             return
 
         # Etapa 2: geração com instrução específica por tipo
         instrucao_tipo = {
             "OPINIAO": (
                 "Você tem uma opinião sobre esse tema e vai expressá-la diretamente. "
-                "Tome uma posição clara — não fique em cima do muro. "
-                "Pode ser controverso se for honesto."
+                "Baseie-se APENAS no que foi dito na conversa — sem trazer informações externas. "
+                "Tome uma posição clara — não fique em cima do muro."
             ),
             "PERGUNTA": (
-                "Faça UMA pergunta que force as pessoas a pensarem diferente. "
-                "Não pergunte o óbvio — pergunte o que ninguém pensou ainda. "
+                "Faça UMA pergunta que force as pessoas a pensarem diferente sobre o que ELAS mesmas disseram. "
+                "Não pergunte o óbvio — pergunte o que ninguém pensou ainda dentro desse contexto. "
                 "Pergunta real, não retórica vazia."
             ),
-            "FATO": (
-                "Você tem uma informação concreta e relevante sobre o tema. "
-                "Coloque o fato de forma direta, sem rodeios. "
-                "Pode contextualizar em 1 frase adicional se necessário."
-            ),
             "DISCORDA": (
-                "Você discorda de algo que foi dito. "
+                "Você discorda de algo que foi dito na conversa. "
                 "Seja direto: cite o ponto específico e diga por que está errado ou incompleto. "
                 "Sem ser grosseiro, mas sem suavizar demais."
             ),
@@ -7212,20 +7207,25 @@ async def _task_accountability_equipe():
                     rq = await _groq_create(
                         model="llama-3.1-8b-instant",
                         max_tokens=70,
-                        temperature=0.9,
+                        temperature=0.85,
                         messages=[
                             {"role": "system", "content":
                              f"{system_com_contexto()}\n"
-                             "O canal está quieto. Você pode postar algo como membro normal: uma pergunta provocativa, "
-                             "uma observação sobre o que foi discutido, uma notícia de tech, ou retomar um ponto interessante. "
-                             "Só poste se tiver algo genuinamente interessante a dizer. "
-                             "Se não há nada relevante, responda exatamente: SILÊNCIO"},
+                             "O canal está quieto. Se o histórico recente tiver um ponto interessante que ficou solto "
+                             "— uma pergunta não respondida, uma afirmação questionável, um tema que dá para aprofundar — "
+                             "retome isso em 1-2 frases. "
+                             "NÃO traga assuntos externos (notícias, tech, política) que não estavam na conversa. "
+                             "NÃO force engajamento com perguntas genéricas como 'o que vocês acham de X?'. "
+                             "Se o histórico não tiver nada concreto para retomar: responda exatamente SILÊNCIO."},
                             {"role": "user", "content":
                              f"Canal quieto há {int(silencio_min)}min. Histórico recente:\n{ctx_q}"},
                         ],
                     )
                     txt_q = rq.choices[0].message.content.strip()
-                    if txt_q and "SILÊNCIO" not in txt_q.upper():
+                    # Filtra respostas genéricas mesmo sem a palavra SILÊNCIO
+                    _gen_q = ("o que vocês", "o que você", "alguém aí", "algum de vocês", "o que acham",
+                              "curiosidade:", "sabia que", "falando nisso")
+                    if txt_q and "SILÊNCIO" not in txt_q.upper() and not any(g in txt_q.lower() for g in _gen_q):
                         await canal_q.send(txt_q)
                         _ultima_iniciativa[cid] = agora
                         log.info(f"[ACCOUNT] participação autônoma em #{canal_q.name}: {txt_q[:50]}")
@@ -7308,31 +7308,40 @@ async def _task_iniciativa_proativa():
                     for m in ultimas
                 )
 
-                # Pede à IA se há algo genuinamente novo a dizer
+                # Pede à IA se há algo genuinamente novo a dizer — referenciando a conversa concreta
                 r = await _groq_create(
                     model="llama-3.1-8b-instant",
-                    max_tokens=60,
-                    temperature=0.85,
+                    max_tokens=70,
+                    temperature=0.75,
                     messages=[
                         {"role": "system", "content":
-                         "Você é um bot de Discord. Às vezes volta a uma conversa com algo genuinamente útil ou interessante. "
-                         "CRITÉRIO RÍGIDO: só continue se tiver algo NOVO e CONCRETO a acrescentar — um link, uma informação relevante, "
-                         "uma reflexão que muda algo. Não repita o que já foi dito. Não force. "
-                         "Se não há nada novo, responda exatamente: SILÊNCIO. "
-                         "Se há algo novo, responda diretamente (1-2 frases), sem saudação nem 'aliás' ou 'a propósito'."},
+                         "Você é o shell_engenheiro — direto, observador, econômico.\n"
+                         "Você está relendo uma conversa que teve com alguém e avaliando se vale retomar.\n"
+                         "CRITÉRIO RÍGIDO: só retome se tiver algo DIRETAMENTE ligado ao que foi dito — "
+                         "uma pergunta que ficou sem resposta, uma contradição que você notou, um ponto que evoluiu.\n"
+                         "NÃO retome com: observações genéricas, frases motivacionais, 'aliás', 'a propósito', elogios.\n"
+                         "NÃO retome se o assunto já foi resolvido ou se só repetiria o que já foi dito.\n"
+                         "Se não há nada concreto: responda exatamente SILÊNCIO.\n"
+                         "Se há: responda diretamente em 1-2 frases, sem saudação, sem introdução."},
                         {"role": "user", "content":
                          f"Conversa de {delta.seconds // 60} minutos atrás:\n{resumo}\n\n"
-                         "Há algo genuinamente novo a acrescentar?"},
+                         "Há algo CONCRETO e DIRETAMENTE ligado a essa conversa que vale retomar? "
+                         "Se sim, escreva. Se não: SILÊNCIO."},
                     ],
                 )
                 txt = r.choices[0].message.content.strip()
 
-                if txt and txt.upper() != "SILÊNCIO" and "SILÊNCIO" not in txt.upper():
-                    canal = guild.get_channel(canal_id)
-                    if canal:
-                        await canal.send(txt)
-                        _ultima_iniciativa[canal_id] = agora
-                        log.info(f"[INICIATIVA] postou em #{canal.name}: {txt[:60]}")
+                # Filtro extra: rejeita respostas genéricas mesmo que não sejam literalmente "SILÊNCIO"
+                _genericos = ("claro", "com certeza", "com prazer", "interessante", "boa pergunta",
+                              "entendo", "posso ajudar", "tô aqui", "qualquer coisa", "fique à vontade")
+                if not txt or "SILÊNCIO" in txt.upper() or any(g in txt.lower() for g in _genericos):
+                    continue
+
+                canal = guild.get_channel(canal_id)
+                if canal:
+                    await canal.send(txt)
+                    _ultima_iniciativa[canal_id] = agora
+                    log.info(f"[INICIATIVA] retomada em #{canal.name}: {txt[:60]}")
 
         except Exception as e:
             log.debug(f"[INICIATIVA] erro: {e}")
@@ -8374,12 +8383,13 @@ async def _on_message_impl(message: discord.Message):
             _ultima = ultima_interjeccao.get(_canal_id, datetime(1970, 1, 1, tzinfo=timezone.utc))
             _secs = (_agora - _ultima).total_seconds()
             _monitorado = _canal_id in canais_monitorados
-            # Canais monitorados: chance maior e cooldown menor (90s → 35-55%)
-            # Outros canais: chance menor e cooldown maior (3min → 8-20%)
+            # Canais monitorados: cooldown de 3min, chance máx 20% (era 55% — muito agressivo)
+            # Outros canais: cooldown de 8min, chance máx 8% (era 20%)
+            # Objetivo: o bot entra quando tem algo concreto a dizer, não por impulso
             if _monitorado:
-                _chance = min(0.55, 0.20 + (_secs - 90) / 900 * 0.35) if _secs > 90 else 0
+                _chance = min(0.20, 0.05 + (_secs - 180) / 1800 * 0.15) if _secs > 180 else 0
             else:
-                _chance = min(0.20, 0.08 + (_secs - 180) / 1800 * 0.12) if _secs > 180 else 0
+                _chance = min(0.08, 0.02 + (_secs - 480) / 3600 * 0.06) if _secs > 480 else 0
             if _chance > 0 and random.random() < _chance:
                 ultima_interjeccao[_canal_id] = _agora
                 asyncio.ensure_future(_interjetar_conversa(message))
