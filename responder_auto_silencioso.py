@@ -665,7 +665,7 @@ conversas: dict[int, dict] = {}
 ausencia: dict[int, dict] = {}
 historico_groq: dict[tuple[int, int], list] = {}  # chave: (user_id, canal_id)
 conversas_groq: dict[int, dict] = {}
-TIMEOUT_CONVERSA_GROQ = timedelta(minutes=5)
+TIMEOUT_CONVERSA_GROQ = timedelta(minutes=2)
 
 # ── Participação ativa em canais ──────────────────────────────────────────────
 debates_ativos: dict[int, dict] = {}       # canal_id → {tema, fim, msgs}
@@ -3277,7 +3277,17 @@ async def confirmar_acao(descricao: str, fallback: str) -> str:
 
 async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None, canal_id: int = None) -> str:
     if canal_id:
-        conversas_groq[user_id] = {"canal": canal_id, "ultima": agora_utc()}
+        estado_atual = conversas_groq.get(user_id)
+        if estado_atual and estado_atual.get("canal") == canal_id:
+            # Mantém ts_inicio imutável — só atualiza ultima para controle de ociosidade
+            conversas_groq[user_id]["ultima"] = agora_utc()
+        else:
+            # Nova conversa ou mudou de canal — registra início
+            conversas_groq[user_id] = {
+                "canal": canal_id,
+                "ultima": agora_utc(),
+                "ts_inicio": agora_utc(),
+            }
 
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return random.choice([
@@ -8757,7 +8767,10 @@ async def _on_message_impl(message: discord.Message):
     if estado_groq and client.user not in message.mentions and not GATILHOS_NOME.search(conteudo) and not _e_trivial:
         if estado_groq["canal"] == message.channel.id:
             tempo_ocioso = agora_utc() - estado_groq["ultima"]
-            if tempo_ocioso <= TIMEOUT_CONVERSA_GROQ:
+            # Limite absoluto desde o início da conversa (evita loop eterno por renovação)
+            ts_inicio = estado_groq.get("ts_inicio", estado_groq["ultima"])
+            duracao_total = agora_utc() - ts_inicio
+            if tempo_ocioso <= TIMEOUT_CONVERSA_GROQ and duracao_total <= timedelta(minutes=15):
                 # Queries factuais respondem direto sem IA
                 if message.guild:
                     resp_direta = await query_servidor_direto(message.guild, message.content)
