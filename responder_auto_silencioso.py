@@ -2076,6 +2076,8 @@ def _detectar_intencao(conteudo: str, guild=None) -> dict:
         r'|(?:data\s+de\s+cria[cç][aã]o|quando\s+(?:foi\s+)?cria[dD][aA]?).{0,25}\b(?:minha|meu|da\s+minha|do\s+meu)\b.{0,15}\b(?:conta|perfil)'
         r'|(?:minha|meu)\b.{0,25}\b(?:conta|perfil)\b.{0,25}\b(?:cria[dD][aA]|cria[cç][aã]o|data)'
         r'|(?:data|quando).{0,15}\b(?:minha|meu)\b.{0,10}\b(?:conta|perfil|discord)'
+        r'|pelo\s+perfil|no\s+(?:meu\s+)?perfil|checar?\s+(?:meu\s+)?perfil'
+        r'|pelo\s+hist[oó]rico|minha\s+conta|quando\s+(?:eu\s+)?fui\s+criado'
         r')',
         re.IGNORECASE
     )
@@ -3666,10 +3668,13 @@ async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, 
             return await stats_servidor(guild)
         return f"Sem acesso ao servidor agora."
 
-    if any(p in msg for p in ["tempo no servidor", "quando entrou", "idade da conta", "há quanto tempo", "a quanto tempo", "estou aqui"]):
+    if any(p in msg for p in ["tempo no servidor", "quando entrou", "idade da conta", "há quanto tempo",
+                               "a quanto tempo", "estou aqui", "minha conta", "meu perfil",
+                               "pelo perfil", "no perfil", "pelo histórico", "pelo historico",
+                               "quando foi criada", "quando fui criado", "data da minha"]):
         if membro:
             return await info_membro(membro)
-        return f"Menciona quem quer consultar."
+        return "Menciona quem quer consultar."
 
     if any(p in msg for p in ["obrigado", "obrigada", "valeu", "vlw", "thanks", "grato", "grata"]):
         return await _ia_curta("Receber agradecimento de forma seca e natural.", contexto=f"quem agradeceu: {autor}", max_tokens=15)
