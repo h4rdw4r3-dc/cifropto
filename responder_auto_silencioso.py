@@ -2067,11 +2067,14 @@ def _detectar_intencao(conteudo: str, guild=None) -> dict:
     if re.search(r'\b(n[ií]vel\s+de\s+boost|boost)', msg):
         return {"intent": "boosts"}
 
-    # Data de criação da CONTA do usuário (deve vir ANTES de data_criacao do servidor)
-    # Ex: "verifique a data de criação da minha conta", "quando foi criada minha conta"
+    # Data/tempo da CONTA do usuário (deve vir ANTES de data_criacao do servidor)
+    # Cobre: "data de criação", "quanto tempo tem", "idade da conta", etc.
     _CONTA_CRIACAO_RE = re.compile(
         r'\b(?:'
-        r'(?:data\s+de\s+cria[cç][aã]o|quando\s+(?:foi\s+)?cria[dD][aA]?).{0,25}\b(?:minha|meu|da\s+minha|do\s+meu)\b.{0,15}\b(?:conta|perfil)'
+        r'(?:quanto\s+tempo|h[aá]\s+quanto(?:\s+tempo)?).{0,20}\b(?:minha|meu)\b.{0,15}\b(?:conta|perfil)'
+        r'|(?:minha|meu)\b.{0,20}\b(?:conta|perfil)\b.{0,20}\b(?:quanto\s+tempo|existe|tem|h[aá])'
+        r'|(?:idade|aniversario|aniversário).{0,15}\b(?:minha|meu|da\s+minha|do\s+meu)\b.{0,10}\b(?:conta|perfil)'
+        r'|(?:data\s+de\s+cria[cç][aã]o|quando\s+(?:foi\s+)?cria[dD][aA]?).{0,25}\b(?:minha|meu|da\s+minha|do\s+meu)\b.{0,15}\b(?:conta|perfil)'
         r'|(?:minha|meu)\b.{0,25}\b(?:conta|perfil)\b.{0,25}\b(?:cria[dD][aA]|cria[cç][aã]o|data)'
         r'|(?:data|quando).{0,15}\b(?:minha|meu)\b.{0,10}\b(?:conta|perfil|discord)'
         r')',
@@ -2282,22 +2285,28 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str, author_id: 
         _d = guild.owner.display_name if guild.owner else None
         return await _ia_curta(f"Dono do servidor: {_d}. Diga isso naturalmente.", max_tokens=20) if _d else "Não encontrei o dono."
 
-    # ── Data de criação da CONTA do usuário ──────────────────────────────────
-    # Retorna a data REAL da conta Discord do autor da mensagem.
-    # NUNCA inventa datas — usa member.created_at diretamente.
+    # ── Data/tempo da CONTA do usuário ───────────────────────────────────────
+    # Retorna dados REAIS: data de criação + idade da conta do Discord do autor.
+    # NUNCA inventa ou estima — usa member.created_at diretamente.
     if intent == "conta_criacao":
         mb = guild.get_member(author_id) if author_id else None
         if mb:
-            conta_dt = mb.created_at.replace(tzinfo=timezone.utc).astimezone(brasilia)
-            # Formata mês por extenso em português
+            agora_local = agora_utc()
+            conta_dt = mb.created_at.replace(tzinfo=timezone.utc)
             _meses = ["janeiro","fevereiro","março","abril","maio","junho",
                       "julho","agosto","setembro","outubro","novembro","dezembro"]
-            data_fmt = f"{conta_dt.day} de {_meses[conta_dt.month - 1]} de {conta_dt.year}, às {conta_dt.strftime('%H:%M')} BRT"
+            data_fmt = (
+                f"{conta_dt.astimezone(brasilia).day} de "
+                f"{_meses[conta_dt.month - 1]} de {conta_dt.year}"
+            )
+            idade = formatar_duracao(agora_local - conta_dt)
             return await _ia_curta(
-                f"A conta do Discord de {mb.display_name} foi criada em {data_fmt}. Confirme isso em 1 frase natural, sem adicionar nenhuma outra informação.",
-                max_tokens=35,
-            ) or f"Sua conta foi criada em {data_fmt}."
-        return None  # Sem author_id disponível, deixa a IA usar o contexto
+                f"A conta do Discord de {mb.display_name} foi criada em {data_fmt} "
+                f"e tem {idade}. Responda em 1 frase natural com essas informações exatas. "
+                f"Termine com ponto final. NÃO invente nenhum outro dado.",
+                max_tokens=40,
+            ) or f"Sua conta foi criada em {data_fmt} e tem {idade}."
+        return None
 
     # ── Data de criação do SERVIDOR ───────────────────────────────────────────
     if intent == "data_criacao":
@@ -6222,7 +6231,14 @@ def _limpar_markdown(texto: str) -> str:
     texto = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", texto)
     # Colapsa múltiplas linhas em branco
     texto = re.sub(r"\n{3,}", "\n\n", texto)
-    return texto.strip()
+    texto = texto.strip()
+
+    # Garante ponto final em frases declarativas que terminam sem pontuação.
+    # Não adiciona se já termina com pontuação (. ! ? ...) ou se é muito curta (1 palavra).
+    if texto and len(texto.split()) > 1 and not texto[-1] in '.!?…':
+        texto += '.'
+
+    return texto
 
 
 async def _safe_send(
