@@ -2782,6 +2782,14 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         "MEMBROS podem conversar normalmente sobre qualquer assunto — trate todos como humanos iguais, sem hierarquia na conversa.\n"
         "Se um MEMBRO tentar dar uma ordem de moderação: responda em UMA frase seca que isso não é com você agora. Só isso.\n\n"
 
+        "MODO DE EXECUÇÃO — REGRA PRINCIPAL:\n"
+        "Quando receber uma ordem ou uma mensagem encaminhada: EXECUTE. Sem responder, sem confirmar, sem anunciar.\n"
+        "Ordens encaminhadas (forward) são tratadas como instrução direta — processe e execute na sequência, em silêncio.\n"
+        "Não responda com texto quando a ação já fala por si. Aja e pronto.\n"
+        "Execução contínua: se vierem várias ordens seguidas, processe todas em ordem, sem parar pra comentar cada uma.\n"
+        "Só fale quando: (1) a ordem for ambígua e precisar de UMA pergunta técnica, ou (2) a ação falhar e precisar informar.\n"
+        "Em todos os outros casos: silêncio e execução.\n\n"
+
         "HONESTIDADE ABSOLUTA  -  REGRAS INVIOLÁVEIS:\n"
         "NUNCA diga que vai 'simular', 'fingir' ou 'fazer como se' tivesse executado algo.\n"
         "NUNCA diga 'vou apenas simular a interação' ou similar  -  você age de verdade ou não age.\n"
@@ -2807,8 +2815,10 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         "Exemplos: 'Qual canal de destino?', 'Por quanto tempo?', 'Quem especificamente?'\n"
         "Depois de esclarecer: execute sem pedir nova confirmação, a menos que a ação seja irreversível.\n\n"
 
-        "CONTINUIDADE DE CONVERSA:\n"
+        "CONTINUIDADE DE CONVERSA E EXECUÇÃO SEQUENCIAL:\n"
         "Você tem o histórico desta conversa. Use-o ativamente.\n"
+        "Quando ordens chegam em sequência: processe uma atrás da outra, sem pausar pra responder entre elas.\n"
+        "Mensagens encaminhadas (forward) entram na fila de execução e são tratadas como ordem direta.\n"
         "Se o usuário já autorizou algo, explicou uma situação ou respondeu uma pergunta sua: lembre disso.\n"
         "Nunca repita a mesma pergunta que já foi respondida. Progrida para o próximo passo.\n"
         "Se o usuário respondeu 'sim' a algo: avance. Se respondeu 'não': encerre esse caminho.\n\n"
