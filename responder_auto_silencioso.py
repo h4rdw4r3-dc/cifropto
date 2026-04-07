@@ -2067,7 +2067,20 @@ def _detectar_intencao(conteudo: str, guild=None) -> dict:
     if re.search(r'\b(n[ií]vel\s+de\s+boost|boost)', msg):
         return {"intent": "boosts"}
 
-    # Data de criação
+    # Data de criação da CONTA do usuário (deve vir ANTES de data_criacao do servidor)
+    # Ex: "verifique a data de criação da minha conta", "quando foi criada minha conta"
+    _CONTA_CRIACAO_RE = re.compile(
+        r'\b(?:'
+        r'(?:data\s+de\s+cria[cç][aã]o|quando\s+(?:foi\s+)?cria[dD][aA]?).{0,25}\b(?:minha|meu|da\s+minha|do\s+meu)\b.{0,15}\b(?:conta|perfil)'
+        r'|(?:minha|meu)\b.{0,25}\b(?:conta|perfil)\b.{0,25}\b(?:cria[dD][aA]|cria[cç][aã]o|data)'
+        r'|(?:data|quando).{0,15}\b(?:minha|meu)\b.{0,10}\b(?:conta|perfil|discord)'
+        r')',
+        re.IGNORECASE
+    )
+    if _CONTA_CRIACAO_RE.search(msg):
+        return {"intent": "conta_criacao"}
+
+    # Data de criação do SERVIDOR
     if re.search(r'\b(quando\s+(foi\s+)?(criado|fundado)|data\s+de\s+cria[cç][aã]o)', msg):
         return {"intent": "data_criacao"}
 
@@ -2190,7 +2203,7 @@ def _detectar_intencao(conteudo: str, guild=None) -> dict:
     return {"intent": "nao_reconhecido"}
 
 
-async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | None:
+async def query_servidor_direto(guild: discord.Guild, conteudo: str, author_id: int = 0) -> str | None:
     """
     Detecta a intenção da mensagem via IA (Groq) e responde com dados reais do servidor.
     Retorna string com a resposta, ou None se não for uma query reconhecida.
@@ -2269,7 +2282,24 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str) -> str | No
         _d = guild.owner.display_name if guild.owner else None
         return await _ia_curta(f"Dono do servidor: {_d}. Diga isso naturalmente.", max_tokens=20) if _d else "Não encontrei o dono."
 
-    # ── Data de criação ───────────────────────────────────────────────────────
+    # ── Data de criação da CONTA do usuário ──────────────────────────────────
+    # Retorna a data REAL da conta Discord do autor da mensagem.
+    # NUNCA inventa datas — usa member.created_at diretamente.
+    if intent == "conta_criacao":
+        mb = guild.get_member(author_id) if author_id else None
+        if mb:
+            conta_dt = mb.created_at.replace(tzinfo=timezone.utc).astimezone(brasilia)
+            # Formata mês por extenso em português
+            _meses = ["janeiro","fevereiro","março","abril","maio","junho",
+                      "julho","agosto","setembro","outubro","novembro","dezembro"]
+            data_fmt = f"{conta_dt.day} de {_meses[conta_dt.month - 1]} de {conta_dt.year}, às {conta_dt.strftime('%H:%M')} BRT"
+            return await _ia_curta(
+                f"A conta do Discord de {mb.display_name} foi criada em {data_fmt}. Confirme isso em 1 frase natural, sem adicionar nenhuma outra informação.",
+                max_tokens=35,
+            ) or f"Sua conta foi criada em {data_fmt}."
+        return None  # Sem author_id disponível, deixa a IA usar o contexto
+
+    # ── Data de criação do SERVIDOR ───────────────────────────────────────────
     if intent == "data_criacao":
         dt = guild.created_at.astimezone(brasilia).strftime("%d/%m/%Y às %H:%M")
         return await _ia_curta(f"Servidor criado em {dt} BRT. Diga isso naturalmente.", max_tokens=25) or f"Servidor criado em {dt}."
@@ -2664,6 +2694,7 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> st
         "Gírias brasileiras quando o contexto pede: 'cara', 'mano', 'po', 'né', 'véi', 'brabo', 'saca'.\n"
         "Nunca force informalidade. Ela aparece natural quando você decide que vale.\n"
         "Sem emojis, sem markdown, sem listas, sem asteriscos. Discord não é relatório.\n"
+        "Use ponto final ao encerrar frases completas. Informalidade não significa falta de pontuação — até em chat, frases terminam com ponto.\n"
         "Tamanho: 1 frase por padrão. 2-3 quando a complexidade exige. Silêncio é melhor que ruído.\n"
         "Varie estrutura, ângulo, ponto de entrada. Nunca repita o mesmo formato de resposta.\n\n"
 
@@ -8888,7 +8919,7 @@ async def _on_message_impl(message: discord.Message):
 
     # ── Queries factuais do servidor (cargos, membros por cargo, etc.) ────────
     if mencionado and message.guild:
-        resp_direta = await query_servidor_direto(message.guild, message.content)
+        resp_direta = await query_servidor_direto(message.guild, message.content, message.author.id)
         if resp_direta:
             await _digitar_e_enviar(message.channel, resp_direta, message)
             return
@@ -8922,7 +8953,7 @@ async def _on_message_impl(message: discord.Message):
             if tempo_ocioso <= TIMEOUT_CONVERSA_GROQ and duracao_total <= timedelta(minutes=15):
                 # Queries factuais respondem direto sem IA
                 if message.guild:
-                    resp_direta = await query_servidor_direto(message.guild, message.content)
+                    resp_direta = await query_servidor_direto(message.guild, message.content, message.author.id)
                     if resp_direta:
                         await message.reply(resp_direta)
                         return
