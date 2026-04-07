@@ -2885,6 +2885,14 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         "Quando acionar outro bot: execute o comando diretamente, sem anunciar que vai fazer isso.\n\n"
         "MENSAGENS: responda sempre em UMA única mensagem, nunca divida em duas ou mais.\n"
         "COMPLETUDE: NUNCA deixe uma frase no meio. Se for longa, encurte — mas sempre termine.\n\n"
+
+        "IDIOMA — REGRA INVIOLÁVEL:\n"
+        "Você responde SEMPRE no mesmo idioma que a pessoa usou na mensagem mais recente.\n"
+        "Se a pessoa escreveu em português: responda em português. Se escreveu em inglês: responda em inglês.\n"
+        "Se a pessoa trocou de idioma no meio da conversa: acompanhe imediatamente.\n"
+        "NUNCA responda em inglês quando a pessoa falou em português, e vice-versa.\n"
+        "Seu raciocínio interno é irrelevante — só o texto final enviado importa, e ele DEVE estar no idioma correto.\n\n"
+        "/no_think\n"
     )
     ctx_srv = _contexto_servidor_comprimido(None, mencoes_nomes)
     if ctx_srv:
@@ -2976,7 +2984,9 @@ async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80) -> 
         f"Você é o shell_engenheiro — carioca, membro fixo de servidor Discord.{humor_txt}\n"
         "Fala com gíria carioca natural: 'mano', 'pô', 'cê', 'parça', 'na moral', 'firmeza', 'da hora', 'tá ligado', 'vacilão'. Sem forçar, sem cerimônia.\n"
         "Gere UMA frase curta e casual para a situação. Sem template, sem clichê, variado.\n"
-        "Sem emojis, sem markdown, sem 'Olá', sem formalidade. Só a frase, como quem fala no chat."
+        "Sem emojis, sem markdown, sem 'Olá', sem formalidade. Só a frase, como quem fala no chat.\n"
+        "IDIOMA: responda SEMPRE em português brasileiro, independentemente de qualquer coisa.\n"
+        "/no_think"
     )
     prompt = situacao + (f"\nContexto adicional: {contexto}" if contexto else "")
     try:
@@ -3522,7 +3532,11 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
             messages=mensagens,
         )
         escolha = resp.choices[0]
-        texto = _limpar_markdown(escolha.message.content.strip())
+        _raw = escolha.message.content or ""
+        # Auto-depuração: loga se houver <think> ou resposta em idioma inesperado
+        if re.search(r"<think>", _raw, re.IGNORECASE):
+            log.warning(f"[AUTO-DEBUG] Modelo {modelo} gerou <think> tags — removendo. Raw: {_raw[:120]!r}")
+        texto = _limpar_markdown(_raw.strip())
         # Filtra vazamentos de identidade antes de entregar ao usuário
         _leak = ("groq", "openai", "llm", "modelo de linguagem", "sou um bot", "sou uma ia",
                  "sou um programa", "estou desativado", "estou offline", "como assistente",
@@ -3571,7 +3585,10 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
                     messages=mensagens,
                 )
                 escolha2 = resp2.choices[0]
-                texto2 = _limpar_markdown(escolha2.message.content.strip())
+                _raw2 = escolha2.message.content or ""
+                if re.search(r"<think>", _raw2, re.IGNORECASE):
+                    log.warning(f"[AUTO-DEBUG] Fallback {_fb_modelo} gerou <think> tags — removendo. Raw: {_raw2[:120]!r}")
+                texto2 = _limpar_markdown(_raw2.strip())
                 if any(t in texto2.lower() for t in ("groq", "openai", "sou um bot", "sou uma ia",
                         "estou desativado", "como assistente", "minha programação",
                         "não posso acessar o google", "não tenho acesso à internet",
@@ -6264,6 +6281,11 @@ async def _manter_digitando(channel: discord.TextChannel, parar: asyncio.Event) 
 
 def _limpar_markdown(texto: str) -> str:
     """Remove formatação markdown do texto para envio como usuário comum."""
+    # ── Remove bloco de raciocínio <think>...</think> (Qwen3, DeepSeek R1, etc.) ──
+    # Caso completo: <think>...</think>
+    texto = re.sub(r"<think>[\s\S]*?</think>", "", texto, flags=re.IGNORECASE)
+    # Caso incompleto: só a abertura sem fechamento (modelo cortado no meio do raciocínio)
+    texto = re.sub(r"<think>[\s\S]*", "", texto, flags=re.IGNORECASE)
     # Remove blocos de código
     texto = re.sub(r"```[\s\S]*?```", "", texto)
     texto = re.sub(r"`[^`]+`", lambda m: m.group(0)[1:-1], texto)
