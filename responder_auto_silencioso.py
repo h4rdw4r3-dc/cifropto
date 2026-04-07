@@ -661,6 +661,14 @@ ultima_interjeccao: dict[int, datetime] = {}  # cooldown por canal
 atividade_mensagens: dict[int, int] = defaultdict(int)  # user_id → contagem
 citacoes: list[dict] = []  # {texto, autor, canal, ts}
 
+# ── Tom e frequência de voz por usuário ───────────────────────────────────────
+# Acumula histórico de tons detectados para adaptar resposta ao padrão vocal
+_voz_historico: dict[int, list[dict]] = defaultdict(list)
+# {user_id: [{ts, tom, ritmo, intensidade}, ...]} — mantém últimos 10 registros
+
+# Tom pendente: preenchido após transcrição de áudio inline, consumido em responder_com_groq
+_tom_audio_pendente: dict[int, dict] = {}
+
 # ── Anti-raid e lockdown ──────────────────────────────────────────────────────
 _joins_recentes: list[datetime] = []          # timestamps das entradas recentes (janela 30s)
 _lockdown_ativo: bool = False                  # True quando o lockdown está em vigor
@@ -2725,6 +2733,70 @@ async def _transcrever_audio(url: str, filename: str = "") -> str:
         return ""
 
 
+async def _analisar_tom_audio(transcricao: str, user_id: int) -> dict:
+    """
+    Analisa tom, ritmo e intensidade de uma transcrição de áudio.
+    Retorna dict com: tom, ritmo, intensidade, padrao_vocal
+    Considera histórico acumulado do usuário para detectar padrão.
+    """
+    if not transcricao or not GROQ_DISPONIVEL:
+        return {}
+
+    # Histórico do usuário para dar contexto ao modelo
+    hist = _voz_historico.get(user_id, [])
+    hist_txt = ""
+    if hist:
+        tons_ant = [h["tom"] for h in hist[-5:]]
+        hist_txt = f"\nHistórico recente dos tons do usuário: {', '.join(tons_ant)}"
+
+    system_tom = (
+        "Você analisa o tom de uma transcrição de mensagem de voz em Discord brasileiro.\n"
+        "Responda APENAS com JSON no formato:\n"
+        '{"tom": "VALOR", "ritmo": "VALOR", "intensidade": "VALOR"}\n'
+        "tom: URGENTE | IRRITADO | ANIMADO | CASUAL | SERIO | IRONICO | TRISTE | NEUTRO\n"
+        "ritmo: RAPIDO | MODERADO | LENTO  (velocidade/cadência percebida no texto)\n"
+        "intensidade: ALTA | MEDIA | BAIXA  (força emocional da mensagem)\n"
+        "Analise vocabulário, pontuação, repetições, gírias, palavrões, tamanho das frases.\n"
+        "Nenhum outro texto além do JSON."
+    ) + hist_txt
+
+    try:
+        resp = await _groq_client().chat.completions.create(
+            model="llama-3.1-8b-instant",
+            max_tokens=40,
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": system_tom},
+                {"role": "user", "content": transcricao[:500]},
+            ],
+        )
+        _registrar_tokens("8b", resp.usage.total_tokens if resp.usage else 20)
+        raw = resp.choices[0].message.content.strip()
+        import json as _json
+        dados = _json.loads(raw)
+        tom = dados.get("tom", "NEUTRO").upper()
+        ritmo = dados.get("ritmo", "MODERADO").upper()
+        intensidade = dados.get("intensidade", "MEDIA").upper()
+
+        # Detectar padrão vocal acumulado
+        hist.append({"ts": agora_utc().isoformat(), "tom": tom, "ritmo": ritmo, "intensidade": intensidade})
+        _voz_historico[user_id] = hist[-10:]  # mantém últimos 10
+
+        # Padrão vocal: se >= 3 das últimas 5 forem do mesmo tom, é padrão
+        padrao = ""
+        if len(hist) >= 3:
+            from collections import Counter
+            freq = Counter(h["tom"] for h in hist[-5:])
+            dominante, cnt = freq.most_common(1)[0]
+            if cnt >= 3:
+                padrao = dominante
+
+        return {"tom": tom, "ritmo": ritmo, "intensidade": intensidade, "padrao": padrao}
+    except Exception as e:
+        log.debug(f"[AUDIO] _analisar_tom falhou: {e}")
+        return {}
+
+
 async def _processar_anexos_visuais(message: discord.Message) -> str:
     """
     Analisa anexos da mensagem atual e da mensagem referenciada (reply).
@@ -2913,6 +2985,46 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
             )
 
     membro_info = f"['{autor}' | nível: {nivel}.{autorizacao_extra}]{_instrucao_collab}"
+
+    # ── Tom de voz: injeta contexto vocal se a mensagem veio de áudio ────────────
+    _tom_ctx = _tom_audio_pendente.pop(user_id, None)
+    if _tom_ctx:
+        _tom_tag = _tom_ctx.get("tom", "")
+        _ritmo_tag = _tom_ctx.get("ritmo", "")
+        _int_tag = _tom_ctx.get("intensidade", "")
+        _padrao_tag = _tom_ctx.get("padrao", "")
+
+        _tom_descricao = {
+            "URGENTE":  "está urgente, quer resposta rápida",
+            "IRRITADO": "está irritado ou frustrado",
+            "ANIMADO":  "está animado e empolgado",
+            "CASUAL":   "está relaxado, tom de papo",
+            "SERIO":    "está sério, tom formal ou denso",
+            "IRONICO":  "está irônico ou sarcástico",
+            "TRISTE":   "parece desanimado ou triste",
+            "NEUTRO":   "tom neutro",
+        }.get(_tom_tag, "tom indefinido")
+
+        _ritmo_descricao = {
+            "RAPIDO": "fala rápido — resposta direta e sem enrolação",
+            "LENTO":  "fala devagar — pode desenvolver mais",
+            "MODERADO": "",
+        }.get(_ritmo_tag, "")
+
+        _padrao_descricao = (
+            f" Padrão recorrente do usuário por voz: costuma ser {_padrao_tag.lower()} com frequência."
+            if _padrao_tag else ""
+        )
+
+        _tom_instr = (
+            f"\n[MENSAGEM POR VOZ | Tom: {_tom_tag} — {_tom_descricao}. "
+            f"Intensidade: {_int_tag}."
+            + (f" {_ritmo_descricao}." if _ritmo_descricao else "")
+            + _padrao_descricao
+            + " Calibre sua resposta ao tom detectado — se urgente, seja ágil; se irritado, seja firme mas objetivo; "
+            "se animado, entre no clima; se sério, responda com seriedade.]"
+        )
+        membro_info += _tom_instr
 
     mensagens = [
         {"role": "system", "content": system_com_contexto(user_id=user_id, mencoes_nomes=_nomes_mencionados) + ctx_canal},
@@ -7303,6 +7415,7 @@ async def _on_message_impl(message: discord.Message):
     # detecta gatilhos nem processa ordens ditas no áudio.
     _conteudo_base = message.content
     _transcricao_audio_inline: str = ""
+    _tom_audio: dict = {}        # tom detectado para injetar no contexto da resposta
     _att_audio_inline = None
     if not message.author.bot and not _conteudo_base.strip() and message.attachments:
         _att_audio_inline = next(
@@ -7319,6 +7432,15 @@ async def _on_message_impl(message: discord.Message):
                 if _transcricao_audio_inline:
                     _conteudo_base = _transcricao_audio_inline
                     log.info(f"[AUDIO] inline de {message.author.display_name}: {_conteudo_base[:80]!r}")
+                    # Analisa tom em paralelo — não bloqueia o fluxo principal
+                    _tom_audio = await _analisar_tom_audio(_transcricao_audio_inline, message.author.id)
+                    if _tom_audio:
+                        _tom_audio_pendente[message.author.id] = _tom_audio
+                        log.info(
+                            f"[AUDIO] tom={_tom_audio.get('tom')} ritmo={_tom_audio.get('ritmo')} "
+                            f"intensidade={_tom_audio.get('intensidade')} "
+                            f"padrão={_tom_audio.get('padrao') or 'variado'}"
+                        )
             else:
                 log.warning(
                     f"[AUDIO] arquivo de {message.author.display_name} grande demais "
