@@ -3920,8 +3920,8 @@ INTENCOES = {
         "revoga o ban", "tira o ban", "remove o ban", "unban",
     ],
     "expulsar": [
-        "expulsa", "expulsar", "kick", "tira", "bota pra fora", "remove",
-        "chuta", "manda embora",
+        "expulsa", "expulsar", "kick",
+        "bota pra fora", "chuta", "manda embora",
     ],
     "avisar": [
         "avisa", "avisar", "adverte", "advertir", "manda um aviso",
@@ -4504,25 +4504,9 @@ async def processar_ordem(message: discord.Message) -> bool:
                 _err = await _ia_curta(f"Erro ao desbanir ID {uid}. Erro: {str(e)[:60]}.", max_tokens=25)
                 await message.channel.send(_err or f"Não consegui desbanir {uid}.")
 
-    # ── expulsar @user motivo ──────────────────────────────────────────────────
-    elif cmd in ("expulsar", "kick"):
-        if not alvos:
-            await message.channel.send(await _pedir_alvo("expulsar"))
-            return True
-        motivo = re.sub(r"(<@!?\d+>\s*)+", "", resto).strip() or "Ordem do proprietário."
-        for alvo in alvos:
-            try:
-                await alvo.kick(reason=motivo)
-                txt = await confirmar_acao(
-                    f"Expulsei {alvo.display_name} ({alvo.mention}) do servidor. Motivo: {motivo}.",
-                    f"{alvo.mention} expulso. Motivo: {motivo}"
-                )
-                await message.channel.send(txt)
-            except Exception as e:
-                _err = await _ia_curta(f"Erro ao expulsar {alvo.display_name}. Erro: {str(e)[:60]}.", max_tokens=25)
-                await message.channel.send(_err or f"Não consegui expulsar {alvo.mention}.")
-
     # ── dar cargo @user cargo / tirar cargo @user cargo ───────────────────────
+    # IMPORTANTE: verificados via regex ANTES de expulsar/kick — evita que
+    # "tirar cargo" ou "remover cargo" seja capturado por cmd=="expulsar".
     elif re.search(r'\b(dar|d[aã]|atribuir|adicionar|colocar)\b.{0,15}\bcargo\b', conteudo.lower()):
         if not alvos:
             await message.channel.send(await _ia_curta("Pedir para mencionar quem deve receber o cargo. Breve.", max_tokens=15))
@@ -4569,6 +4553,24 @@ async def processar_ordem(message: discord.Message) -> bool:
                 except Exception as e:
                     _err = await _ia_curta(f"Erro ao remover cargo '{role.name}' de {alvo.display_name}. Erro: {str(e)[:60]}.", max_tokens=25)
                     await message.channel.send(_err or f"Não consegui remover {role.name}.")
+
+    # ── expulsar @user motivo ──────────────────────────────────────────────────
+    elif cmd in ("expulsar", "kick"):
+        if not alvos:
+            await message.channel.send(await _pedir_alvo("expulsar"))
+            return True
+        motivo = re.sub(r"(<@!?\d+>\s*)+", "", resto).strip() or "Ordem do proprietário."
+        for alvo in alvos:
+            try:
+                await alvo.kick(reason=motivo)
+                txt = await confirmar_acao(
+                    f"Expulsei {alvo.display_name} ({alvo.mention}) do servidor. Motivo: {motivo}.",
+                    f"{alvo.mention} expulso. Motivo: {motivo}"
+                )
+                await message.channel.send(txt)
+            except Exception as e:
+                _err = await _ia_curta(f"Erro ao expulsar {alvo.display_name}. Erro: {str(e)[:60]}.", max_tokens=25)
+                await message.channel.send(_err or f"Não consegui expulsar {alvo.mention}.")
 
     # ── avisar @user mensagem ──────────────────────────────────────────────────
     elif cmd in ("avisar", "aviso", "advertir"):
@@ -5860,8 +5862,12 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
     canal = message.channel
     autor = message.author.display_name
 
-    # Ações destrutivas/irreversíveis exigem @menção explícita — não apenas gatilho de nome
-    if acao in _ACOES_DESTRUTIVAS and client.user not in message.mentions:
+    # Ações destrutivas/irreversíveis exigem @menção explícita — não apenas gatilho de nome.
+    # Exceção: donos e superiores têm privilégio de dispensar @menção.
+    _autor_privilegiado = (
+        message.author.id in DONOS_IDS or eh_superior(message.author)
+    )
+    if acao in _ACOES_DESTRUTIVAS and not _autor_privilegiado and client.user not in message.mentions:
         log.info(f"[IA] acao destrutiva '{acao}' bloqueada: sem @mencao direta (autor={autor})")
         return False
 
@@ -5887,14 +5893,6 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
             log.info(f"[IA] silenciar {alvo.display_name} {minutos}min  -  {autor}")
         except Exception as e:
             await canal.send(f"Não foi possível silenciar: {e}")
-        return True
-
-    if acao in ("banir", "silenciar"):
-        # Punições nunca são executadas via IA — requerem comando explícito do operador.
-        await canal.send(
-            "Punições (banir/silenciar) precisam ser feitas via comando direto. "
-            "Use: `banir @usuário motivo` ou `silenciar @usuário minutos`"
-        )
         return True
 
     if acao == "enviar_canal":
