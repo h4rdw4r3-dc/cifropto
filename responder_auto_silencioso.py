@@ -821,14 +821,26 @@ _contexto_compacto: str = ""        # versão curta injetada no Groq (economiza 
 categorias_vistas: set = set()
 
 # ── Token budget diário ───────────────────────────────────────────────────────
-# llama-3.3-70b-versatile: 100k TPD (limite Groq gratuito)
-# llama-3.1-8b-instant:    500k TPD (limite Groq gratuito)  -  modelo padrão
-# Estratégia: usar 8b-instant por padrão; 70b só para pedidos explicitamente complexos
+# Cascata de modelos (ordem de preferência):
+#   Nível 1 — llama-3.1-8b-instant:              500k TPD  — padrão, mais rápido
+#   Nível 2 — llama-3.3-70b-versatile:           100k TPD  — qualidade superior
+#   Nível 3 — meta-llama/llama-4-scout-17b:      500k TPD  — fallback 1
+#   Nível 4 — qwen/qwen3-32b:                    500k TPD  — fallback 2 (último recurso)
 _tokens_70b_hoje: int = 0       # tokens gastos hoje no modelo 70b
 _tokens_8b_hoje: int = 0        # tokens gastos hoje no modelo 8b
+_tokens_scout_hoje: int = 0     # tokens gastos hoje no llama-4-scout
+_tokens_qwen_hoje: int = 0      # tokens gastos hoje no qwen3-32b
 _tokens_data: str = ""          # data de referência (YYYY-MM-DD UTC)
-LIMITE_70B = 90_000             # 90k de 100k  -  margem de segurança
-LIMITE_8B  = 480_000            # 480k de 500k  -  margem de segurança
+LIMITE_70B    = 90_000          # 90k de 100k  -  margem de segurança
+LIMITE_8B     = 480_000         # 480k de 500k  -  margem de segurança
+LIMITE_SCOUT  = 480_000         # 480k de 500k  -  margem de segurança
+LIMITE_QWEN   = 480_000         # 480k de 500k  -  margem de segurança
+
+# Nomes completos dos modelos
+_MODELO_8B    = "llama-3.1-8b-instant"
+_MODELO_70B   = "llama-3.3-70b-versatile"
+_MODELO_SCOUT = "meta-llama/llama-4-scout-17b-16e-instruct"
+_MODELO_QWEN  = "qwen/qwen3-32b"
 
 # ── Raid detection ────────────────────────────────────────────────────────────
 _joins_recentes: list[datetime] = []          # timestamps dos últimos joins
@@ -2853,15 +2865,15 @@ async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80) -> 
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return ""
 
-    # Respeita disponibilidade e budget — tenta 8b, depois verifica 70b como fallback reverso
-    modelo = "llama-3.1-8b-instant"
-    if not _modelo_disponivel(modelo):
-        # 8b indisponível — tenta 70b se disponível
-        if _modelo_disponivel("llama-3.3-70b-versatile") and _tokens_70b_hoje < LIMITE_70B:
-            modelo = "llama-3.3-70b-versatile"
-        else:
-            log.debug("[IA_CURTA] todos os modelos bloqueados, retornando vazio")
-            return ""
+    # Respeita disponibilidade e budget — percorre cascata de modelos
+    modelo = None
+    for _candidato in [_MODELO_8B, _MODELO_SCOUT, _MODELO_QWEN]:
+        if _modelo_disponivel(_candidato):
+            modelo = _candidato
+            break
+    if modelo is None:
+        log.debug("[IA_CURTA] todos os modelos bloqueados, retornando vazio")
+        return ""
 
     humor_txt = f" Humor atual: {_humor_sessao}." if _humor_sessao else ""
     system = (
@@ -3127,19 +3139,25 @@ async def _processar_anexos_visuais(message: discord.Message, conteudo_real: str
 # ── Gerenciamento de budget de tokens ────────────────────────────────────────
 
 def _resetar_tokens_se_novo_dia():
-    global _tokens_70b_hoje, _tokens_8b_hoje, _tokens_data
+    global _tokens_70b_hoje, _tokens_8b_hoje, _tokens_scout_hoje, _tokens_qwen_hoje, _tokens_data
     hoje = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if _tokens_data != hoje:
-        log.info(f"[TOKENS] Reset diário. 70b={_tokens_70b_hoje} 8b={_tokens_8b_hoje} | Novo dia: {hoje}")
+        log.info(f"[TOKENS] Reset diário. 70b={_tokens_70b_hoje} 8b={_tokens_8b_hoje} scout={_tokens_scout_hoje} qwen={_tokens_qwen_hoje} | Novo dia: {hoje}")
         _tokens_70b_hoje = 0
         _tokens_8b_hoje = 0
+        _tokens_scout_hoje = 0
+        _tokens_qwen_hoje = 0
         _tokens_data = hoje
 
 def _registrar_tokens(modelo: str, total: int):
-    global _tokens_70b_hoje, _tokens_8b_hoje
+    global _tokens_70b_hoje, _tokens_8b_hoje, _tokens_scout_hoje, _tokens_qwen_hoje
     _resetar_tokens_se_novo_dia()
     if "70b" in modelo or "versatile" in modelo:
         _tokens_70b_hoje += total
+    elif "scout" in modelo or "llama-4" in modelo:
+        _tokens_scout_hoje += total
+    elif "qwen" in modelo:
+        _tokens_qwen_hoje += total
     else:
         _tokens_8b_hoje += total
 
@@ -3175,34 +3193,45 @@ def _extrair_retry_after(erro_str: str) -> float:
 
 def _escolher_modelo(forcar_rapido: bool = False) -> str:
     """
-    Retorna o modelo mais adequado dado o budget disponível.
+    Cascata de 4 modelos por disponibilidade e budget (TPD):
+      1. llama-3.1-8b-instant     — padrão (500k TPD, mais rápido)
+      2. llama-3.3-70b-versatile  — melhor qualidade (100k TPD)
+      3. llama-4-scout-17b        — fallback 1 (500k TPD)
+      4. qwen/qwen3-32b           — fallback 2 / último recurso (500k TPD)
     Respeita bloqueios por rate limit real da API (retry-after).
-    - 8b-instant: padrão (500k TPD), rápido e econômico.
-    - 70b-versatile: só quando disponível E budget ok.
-    Retorna None se ambos estão bloqueados.
     """
     _resetar_tokens_se_novo_dia()
-    oito_b = "llama-3.1-8b-instant"
-    setenta_b = "llama-3.3-70b-versatile"
 
-    # Tenta 70b primeiro (quando budget permite e não forçando rápido)
-    if not forcar_rapido and _tokens_70b_hoje < LIMITE_70B and _modelo_disponivel(setenta_b):
-        return setenta_b
+    # Nível 1 — 8b padrão
+    if _modelo_disponivel(_MODELO_8B) and _tokens_8b_hoje < LIMITE_8B:
+        return _MODELO_8B
 
-    # Padrão: 8b-instant
-    if _modelo_disponivel(oito_b):
-        return oito_b
+    # Nível 2 — 70b (se budget disponível e não forçando rápido)
+    if not forcar_rapido and _modelo_disponivel(_MODELO_70B) and _tokens_70b_hoje < LIMITE_70B:
+        return _MODELO_70B
 
-    # Ambos bloqueados — retorna o que desbloqueará primeiro
-    ate_70b = _modelo_bloqueado_ate.get(setenta_b)
-    ate_8b  = _modelo_bloqueado_ate.get(oito_b)
-    if ate_70b and ate_8b:
-        log.warning("[BUDGET] ambos os modelos bloqueados por rate limit")
-    return oito_b  # retorna 8b de qualquer forma; o caller trata o 429
+    # Nível 3 — llama-4-scout (500k TPD, nova arquitetura)
+    if _modelo_disponivel(_MODELO_SCOUT) and _tokens_scout_hoje < LIMITE_SCOUT:
+        log.info("[BUDGET] usando fallback nível 3: llama-4-scout")
+        return _MODELO_SCOUT
+
+    # Nível 4 — qwen3-32b (último recurso)
+    if _modelo_disponivel(_MODELO_QWEN) and _tokens_qwen_hoje < LIMITE_QWEN:
+        log.info("[BUDGET] usando fallback nível 4: qwen3-32b")
+        return _MODELO_QWEN
+
+    # Todos bloqueados/esgotados — retorna 8b; _groq_create vai rejeitar localmente
+    log.warning("[BUDGET] todos os modelos bloqueados ou esgotados hoje")
+    return _MODELO_8B
 
 def _budget_status() -> str:
     _resetar_tokens_se_novo_dia()
-    return f"70b: {_tokens_70b_hoje}/{LIMITE_70B} | 8b: {_tokens_8b_hoje}/{LIMITE_8B}"
+    return (
+        f"8b: {_tokens_8b_hoje}/{LIMITE_8B} | "
+        f"70b: {_tokens_70b_hoje}/{LIMITE_70B} | "
+        f"scout: {_tokens_scout_hoje}/{LIMITE_SCOUT} | "
+        f"qwen: {_tokens_qwen_hoje}/{LIMITE_QWEN}"
+    )
 
 
 async def confirmar_acao(descricao: str, fallback: str) -> str:
@@ -3389,20 +3418,24 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     except Exception as e:
         log.error(f"[GROQ] erro ({modelo}): {e}", exc_info=True)
 
-        # Fallback automático para 8b-instant se o 70b falhar (bloqueio local ou 429)
-        # _groq_create já aplicou o bloqueio — só verifica disponibilidade atual
-        if "8b" not in modelo and _modelo_disponivel("llama-3.1-8b-instant"):
+        # Cascata de fallback — tenta próximo modelo disponível na ordem de prioridade
+        # _groq_create já aplicou o bloqueio no modelo que falhou
+        _cascata = [_MODELO_8B, _MODELO_SCOUT, _MODELO_QWEN]
+        for _fb_modelo in _cascata:
+            if _fb_modelo == modelo:
+                continue  # não tenta o mesmo que falhou
+            if not _modelo_disponivel(_fb_modelo):
+                continue
             try:
-                log.info("[GROQ] fallback para 8b-instant")
+                log.info(f"[GROQ] fallback para {_fb_modelo}")
                 resp2 = await _groq_create(
-                    model="llama-3.1-8b-instant",
+                    model=_fb_modelo,
                     max_tokens=300,
                     temperature=0.6,
                     messages=mensagens,
                 )
                 escolha2 = resp2.choices[0]
                 texto2 = _limpar_markdown(escolha2.message.content.strip())
-                # Filtro de identidade no fallback também
                 if any(t in texto2.lower() for t in ("groq", "openai", "sou um bot", "sou uma ia",
                         "estou desativado", "como assistente", "minha programação")):
                     texto2 = random.choice(["Não agora.", "Tô fora.", "Passa.", "Depois."])
@@ -3412,11 +3445,14 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
                         texto2 = texto2[:ult + 1]
                     elif texto2:
                         texto2 = texto2.rstrip() + "..."
+                log.info(f"[GROQ] fallback OK via {_fb_modelo} ({len(texto2)} chars)")
                 hist.append({"role": "assistant", "content": texto2})
                 return texto2
             except Exception as e2:
-                log.error(f"[GROQ] fallback também falhou: {e2}")
+                log.error(f"[GROQ] fallback {_fb_modelo} também falhou: {e2}")
+                continue
 
+        # Todos os modelos falharam — resposta local sem IA
         return await _ia_curta(
             "Não conseguiu processar a resposta agora. Diga algo seco e breve, como quem está pensando ou ocupado. Sem mencionar tecnologia, sistema ou IA.",
             max_tokens=20,
