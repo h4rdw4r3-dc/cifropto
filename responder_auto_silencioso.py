@@ -8787,26 +8787,47 @@ async def _on_message_impl(message: discord.Message):
                 log.warning(f"[DONO] resposta vazia  -  enviando fallback")
                 await _digitar_e_enviar(message.channel, "Entendido.", message)
         elif not tratado and not _e_trivial:
-            # Continua conversa Groq ativa mesmo sem menção (follow-ups como "Pelo perfil.")
-            estado_groq = conversas_groq.get(user_id)
-            if estado_groq and estado_groq.get("canal") == message.channel.id:
-                tempo_ocioso = agora_utc() - estado_groq["ultima"]
-                duracao_total = agora_utc() - estado_groq.get("ts_inicio", estado_groq["ultima"])
-                if tempo_ocioso <= TIMEOUT_CONVERSA_GROQ and duracao_total <= timedelta(minutes=15):
-                    if message.guild:
-                        resp_direta = await query_servidor_direto(message.guild, conteudo, message.author.id)
-                        if resp_direta:
-                            await _digitar_e_enviar(message.channel, resp_direta, message)
-                            return
-                    _tp, _tt = await _iniciar_typing_antes(message.channel)
-                    try:
-                        resposta_fu = await responder_com_groq(conteudo, autor, user_id, message.guild, message.channel.id)
-                    finally:
+            # Donos interagem sem precisar mencionar o bot:
+            # 1. Queries factuais → dados reais
+            # 2. Conversa ativa (conversas ou conversas_groq) → continua
+            # 3. Qualquer mensagem não-trivial → resposta proativa
+            _tp, _tt = await _iniciar_typing_antes(message.channel)
+            try:
+                if message.guild:
+                    resp_direta = await query_servidor_direto(message.guild, conteudo, message.author.id)
+                    if resp_direta:
                         await _parar_typing(_tp, _tt)
-                    if resposta_fu:
-                        await _reagir_ou_responder(message, resposta_fu)
-                    return
-            await processar_links(message)
+                        await _reagir_ou_responder(message, resp_direta)
+                        asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resp_direta, message.channel.id))
+                        return
+                estado_conv = conversas.get(user_id)
+                if estado_conv and (estado_conv.get("canal") is None or estado_conv["canal"] == message.channel.id):
+                    resp_conv = await continuar_conversa(user_id, conteudo, autor, message.guild)
+                    if resp_conv:
+                        await _parar_typing(_tp, _tt)
+                        await _reagir_ou_responder(message, resp_conv)
+                        asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resp_conv, message.channel.id))
+                        return
+                estado_groq = conversas_groq.get(user_id)
+                if estado_groq and estado_groq.get("canal") == message.channel.id:
+                    tempo_ocioso = agora_utc() - estado_groq["ultima"]
+                    duracao_total = agora_utc() - estado_groq.get("ts_inicio", estado_groq["ultima"])
+                    if tempo_ocioso <= TIMEOUT_CONVERSA_GROQ and duracao_total <= timedelta(minutes=15):
+                        resp_fu = await responder_com_groq(conteudo, autor, user_id, message.guild, message.channel.id)
+                        await _parar_typing(_tp, _tt)
+                        if resp_fu:
+                            await _reagir_ou_responder(message, resp_fu)
+                            asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resp_fu, message.channel.id))
+                        return
+                # Sem conversa ativa: responde proativamente a qualquer mensagem de dono
+                resposta_p = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
+            finally:
+                await _parar_typing(_tp, _tt)
+            if resposta_p and not _e_resposta_generica(resposta_p):
+                await _reagir_ou_responder(message, resposta_p)
+                asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta_p, message.channel.id))
+            elif resposta_p:
+                await _digitar_e_enviar(message.channel, resposta_p, message)
         return
 
     # ── Superiores: isentos de punição, comandos + ordens gerais (sem precisar mencionar) ──
@@ -8856,25 +8877,44 @@ async def _on_message_impl(message: discord.Message):
             elif resposta:
                 await _digitar_e_enviar(message.channel, resposta, message)
         elif not tratado and not _e_trivial:
-            # Continua conversa Groq ativa mesmo sem menção
-            estado_groq = conversas_groq.get(user_id)
-            if estado_groq and estado_groq.get("canal") == message.channel.id:
-                tempo_ocioso = agora_utc() - estado_groq["ultima"]
-                duracao_total = agora_utc() - estado_groq.get("ts_inicio", estado_groq["ultima"])
-                if tempo_ocioso <= TIMEOUT_CONVERSA_GROQ and duracao_total <= timedelta(minutes=15):
-                    if message.guild:
-                        resp_direta = await query_servidor_direto(message.guild, conteudo, message.author.id)
-                        if resp_direta:
-                            await _digitar_e_enviar(message.channel, resp_direta, message)
-                            return
-                    _tp, _tt = await _iniciar_typing_antes(message.channel)
-                    try:
-                        resposta_fu = await responder_com_groq(conteudo, autor, user_id, message.guild, message.channel.id)
-                    finally:
+            # Superiores interagem sem precisar mencionar o bot
+            _tp, _tt = await _iniciar_typing_antes(message.channel)
+            try:
+                if message.guild:
+                    resp_direta = await query_servidor_direto(message.guild, conteudo, message.author.id)
+                    if resp_direta:
                         await _parar_typing(_tp, _tt)
-                    if resposta_fu:
-                        await _reagir_ou_responder(message, resposta_fu)
-                    return
+                        await _reagir_ou_responder(message, resp_direta)
+                        asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resp_direta, message.channel.id))
+                        return
+                estado_conv = conversas.get(user_id)
+                if estado_conv and (estado_conv.get("canal") is None or estado_conv["canal"] == message.channel.id):
+                    resp_conv = await continuar_conversa(user_id, conteudo, autor, message.guild)
+                    if resp_conv:
+                        await _parar_typing(_tp, _tt)
+                        await _reagir_ou_responder(message, resp_conv)
+                        asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resp_conv, message.channel.id))
+                        return
+                estado_groq = conversas_groq.get(user_id)
+                if estado_groq and estado_groq.get("canal") == message.channel.id:
+                    tempo_ocioso = agora_utc() - estado_groq["ultima"]
+                    duracao_total = agora_utc() - estado_groq.get("ts_inicio", estado_groq["ultima"])
+                    if tempo_ocioso <= TIMEOUT_CONVERSA_GROQ and duracao_total <= timedelta(minutes=15):
+                        resp_fu = await responder_com_groq(conteudo, autor, user_id, message.guild, message.channel.id)
+                        await _parar_typing(_tp, _tt)
+                        if resp_fu:
+                            await _reagir_ou_responder(message, resp_fu)
+                            asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resp_fu, message.channel.id))
+                        return
+                resposta_p = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
+            finally:
+                await _parar_typing(_tp, _tt)
+            if resposta_p and not _e_resposta_generica(resposta_p):
+                await _reagir_ou_responder(message, resposta_p)
+                asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta_p, message.channel.id))
+            elif resposta_p:
+                await _digitar_e_enviar(message.channel, resposta_p, message)
+            return
             await processar_links(message)
         return
 
