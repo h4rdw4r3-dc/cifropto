@@ -8758,7 +8758,7 @@ async def _on_message_impl(message: discord.Message):
                         _tp, _tt = await _iniciar_typing_antes(message.channel)
                 # Queries factuais do servidor: usa dados reais antes de cair no Groq
                 if message.guild:
-                    resp_direta = await query_servidor_direto(message.guild, message.content, message.author.id)
+                    resp_direta = await query_servidor_direto(message.guild, conteudo, message.author.id)
                     if resp_direta:
                         await _parar_typing(_tp, _tt)
                         await _reagir_ou_responder(message, resp_direta)
@@ -8786,7 +8786,26 @@ async def _on_message_impl(message: discord.Message):
             else:
                 log.warning(f"[DONO] resposta vazia  -  enviando fallback")
                 await _digitar_e_enviar(message.channel, "Entendido.", message)
-        elif not tratado:
+        elif not tratado and not _e_trivial:
+            # Continua conversa Groq ativa mesmo sem menção (follow-ups como "Pelo perfil.")
+            estado_groq = conversas_groq.get(user_id)
+            if estado_groq and estado_groq.get("canal") == message.channel.id:
+                tempo_ocioso = agora_utc() - estado_groq["ultima"]
+                duracao_total = agora_utc() - estado_groq.get("ts_inicio", estado_groq["ultima"])
+                if tempo_ocioso <= TIMEOUT_CONVERSA_GROQ and duracao_total <= timedelta(minutes=15):
+                    if message.guild:
+                        resp_direta = await query_servidor_direto(message.guild, conteudo, message.author.id)
+                        if resp_direta:
+                            await _digitar_e_enviar(message.channel, resp_direta, message)
+                            return
+                    _tp, _tt = await _iniciar_typing_antes(message.channel)
+                    try:
+                        resposta_fu = await responder_com_groq(conteudo, autor, user_id, message.guild, message.channel.id)
+                    finally:
+                        await _parar_typing(_tp, _tt)
+                    if resposta_fu:
+                        await _reagir_ou_responder(message, resposta_fu)
+                    return
             await processar_links(message)
         return
 
@@ -8812,6 +8831,14 @@ async def _on_message_impl(message: discord.Message):
                         if tratado_ia:
                             return
                         _tp, _tt = await _iniciar_typing_antes(message.channel)
+                # Queries factuais do servidor: usa dados reais antes de cair no Groq
+                if message.guild:
+                    resp_direta = await query_servidor_direto(message.guild, conteudo, message.author.id)
+                    if resp_direta:
+                        await _parar_typing(_tp, _tt)
+                        await _reagir_ou_responder(message, resp_direta)
+                        asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resp_direta, message.channel.id))
+                        return
                 estado_conv = conversas.get(user_id)
                 if estado_conv and (estado_conv.get("canal") is None or estado_conv["canal"] == message.channel.id):
                     resp_conv = await continuar_conversa(user_id, conteudo, autor, message.guild)
@@ -8828,7 +8855,26 @@ async def _on_message_impl(message: discord.Message):
                 asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta, message.channel.id))
             elif resposta:
                 await _digitar_e_enviar(message.channel, resposta, message)
-        elif not tratado:
+        elif not tratado and not _e_trivial:
+            # Continua conversa Groq ativa mesmo sem menção
+            estado_groq = conversas_groq.get(user_id)
+            if estado_groq and estado_groq.get("canal") == message.channel.id:
+                tempo_ocioso = agora_utc() - estado_groq["ultima"]
+                duracao_total = agora_utc() - estado_groq.get("ts_inicio", estado_groq["ultima"])
+                if tempo_ocioso <= TIMEOUT_CONVERSA_GROQ and duracao_total <= timedelta(minutes=15):
+                    if message.guild:
+                        resp_direta = await query_servidor_direto(message.guild, conteudo, message.author.id)
+                        if resp_direta:
+                            await _digitar_e_enviar(message.channel, resp_direta, message)
+                            return
+                    _tp, _tt = await _iniciar_typing_antes(message.channel)
+                    try:
+                        resposta_fu = await responder_com_groq(conteudo, autor, user_id, message.guild, message.channel.id)
+                    finally:
+                        await _parar_typing(_tp, _tt)
+                    if resposta_fu:
+                        await _reagir_ou_responder(message, resposta_fu)
+                    return
             await processar_links(message)
         return
 
