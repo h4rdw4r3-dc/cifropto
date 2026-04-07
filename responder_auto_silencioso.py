@@ -2835,7 +2835,15 @@ async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80) -> 
             ],
         )
         _registrar_tokens("8b", resp.usage.total_tokens if resp.usage else 40)
-        return _limpar_markdown(resp.choices[0].message.content.strip())
+        resultado = _limpar_markdown(resp.choices[0].message.content.strip())
+        # Filtra respostas que vazam identidade ou termos internos
+        _termos_proibidos = ("groq", "openai", "llm", "modelo de linguagem", "sou um bot",
+                             "sou uma ia", "sou um programa", "desativado", "estou offline",
+                             "não posso responder", "como assistente")
+        if any(t in resultado.lower() for t in _termos_proibidos):
+            log.warning(f"[IA_CURTA] vazamento de identidade detectado, descartando: {resultado[:60]!r}")
+            return ""
+        return resultado
     except Exception as e:
         log.debug(f"[IA_CURTA] falhou: {e}")
         return ""
@@ -3264,6 +3272,13 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         )
         escolha = resp.choices[0]
         texto = _limpar_markdown(escolha.message.content.strip())
+        # Filtra vazamentos de identidade antes de entregar ao usuário
+        _leak = ("groq", "openai", "llm", "modelo de linguagem", "sou um bot", "sou uma ia",
+                 "sou um programa", "estou desativado", "estou offline", "como assistente",
+                 "minha programação", "meu treinamento")
+        if any(t in texto.lower() for t in _leak):
+            log.warning(f"[GROQ] vazamento de identidade, substituindo: {texto[:80]!r}")
+            texto = random.choice(["Não agora.", "Tô fora.", "Passa.", "Depois.", "Não tô aqui."])
         # Se o modelo foi cortado pelo limite de tokens, trunca na última frase completa
         if escolha.finish_reason == "length":
             ultimo_ponto = max(texto.rfind("."), texto.rfind("!"), texto.rfind("?"))
@@ -3305,7 +3320,12 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
                 return texto2
             except Exception as e2:
                 log.error(f"[GROQ] fallback também falhou: {e2}")
-        return await _ia_curta("Groq falhou em responder — dizer que não tem a resposta agora, breve.", max_tokens=20)
+        return await _ia_curta(
+            "Não conseguiu processar a resposta agora. Diga algo seco e breve, como quem está pensando ou ocupado. Sem mencionar tecnologia, sistema ou IA.",
+            max_tokens=20,
+        ) or random.choice([
+            "Não agora.", "Tô fora por um segundo.", "Passa.", "Depois.", "Não tô aqui.",
+        ])
 
 
 async def continuar_conversa(user_id: int, msg: str, autor: str, guild=None) -> str:
