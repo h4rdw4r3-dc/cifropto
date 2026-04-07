@@ -5568,8 +5568,11 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
         "monitorar(canal=null), parar_monitorar(canal=null), "
         "gdoc(tipo=relatorio|historico|regras,canal=null,dias=7), "
         "gsheet(tipo=membros|infracoes|atividade|citacoes), "
-        "enviar_canal(texto,canal) — envia uma mensagem específica em um canal (ex: 'manda X no #geral'), "
-        "encaminhar(canal) — encaminha a mensagem referenciada para outro canal (ex: 'encaminha isso pro #anuncios'). "
+        "enviar_canal(texto,canal) — envia mensagem em canal específico, "
+        "encaminhar(canal) — encaminha mensagem referenciada para outro canal. "
+        "IMPORTANTE para enviar_canal: o campo 'texto' deve conter APENAS a INTENÇÃO ou ASSUNTO "
+        "da mensagem (ex: 'avisar a moderação sobre suas responsabilidades'), NÃO a mensagem literal. "
+        "Um segundo passo de IA irá redigir a mensagem final a partir dessa intenção. "
         "NUNCA retorne acao banir, silenciar ou qualquer punição — punições requerem comando explícito. "
         "Se for pergunta, conversa, menção a raid/invasão/punição, retorne {\"acao\":\"conversa\"}. "
         f"Membros do servidor: {membros_txt}."
@@ -5648,6 +5651,7 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
     if acao == "enviar_canal":
         texto_env = params.get("texto", "").strip()
         canal_nome_env = params.get("canal", "").strip().lstrip("#")
+        mencoes_env = params.get("mencoes", [])  # cargos/usuários a mencionar
         if not texto_env:
             await canal.send("Qual é o texto que devo enviar?")
             return True
@@ -5663,12 +5667,42 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
         if not dest_env:
             await canal.send(f"Canal '{canal_nome_env}' não encontrado.")
             return True
+
+        # Resolve menções de cargos/usuários presentes no texto original da ordem
+        mencao_str = ""
+        if guild:
+            # Busca cargos mencionados como @cargo na mensagem original
+            for role in guild.roles:
+                padrao = re.compile(rf'@{re.escape(role.name)}', re.IGNORECASE)
+                if padrao.search(message.content):
+                    mencao_str += f"{role.mention} "
+            # Busca membros mencionados diretamente
+            for m_ref in message.mentions:
+                if not m_ref.bot and m_ref != client.user:
+                    mencao_str += f"{m_ref.mention} "
+
+        # Redige a mensagem real usando IA — evita enviar a instrução literal
+        _sit = (
+            f"Redija uma mensagem clara e direta para ser enviada no canal #{canal_nome_env} de um servidor Discord brasileiro. "
+            f"Instrução recebida: '{texto_env}'. "
+            f"A mensagem deve ser natural, sem markdown excessivo, sem emojis desnecessários, "
+            f"e deve soar como um aviso ou comunicado real do servidor. "
+            f"Retorne APENAS o texto da mensagem, sem aspas, sem prefixo, sem explicação."
+        )
+        mensagem_redigida = await _ia_curta(_sit, max_tokens=120)
+        if not mensagem_redigida:
+            # Fallback: usa o texto extraído pelo parser diretamente
+            mensagem_redigida = texto_env
+
+        # Monta o envio final: menções (se houver) + mensagem redigida
+        conteudo_final = (mencao_str.strip() + " " + mensagem_redigida).strip() if mencao_str else mensagem_redigida
+
         try:
-            await dest_env.send(texto_env)
+            await dest_env.send(conteudo_final)
             if dest_env.id != canal.id:
                 _c = await _ia_curta(f"Mensagem enviada em {dest_env.name}. Confirmar brevemente.", max_tokens=15)
                 await canal.send(_c or f"Enviado em {dest_env.mention}.")
-            log.info(f"[IA] enviar_canal #{dest_env.name} | {autor}")
+            log.info(f"[IA] enviar_canal #{dest_env.name} | {autor} | {len(conteudo_final)} chars")
         except Exception as e:
             await canal.send(f"Não consegui enviar em {dest_env.mention}: {e}")
         return True
