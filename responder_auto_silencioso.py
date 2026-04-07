@@ -2705,7 +2705,7 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> st
         "Nunca force informalidade. Ela aparece natural quando você decide que vale.\n"
         "Sem emojis, sem markdown, sem listas, sem asteriscos. Discord não é relatório.\n"
         "Use ponto final ao encerrar frases completas. Informalidade não significa falta de pontuação — até em chat, frases terminam com ponto.\n"
-        "Tamanho: 1 frase por padrão. 2-3 quando a complexidade exige. Silêncio é melhor que ruído.\n"
+        "Tamanho: 1 frase por padrão. 2 quando a complexidade real exige. NUNCA 3 ou mais sem necessidade absoluta. Parágrafo longo = falha.\n"
         "Varie estrutura, ângulo, ponto de entrada. Nunca repita o mesmo formato de resposta.\n\n"
 
         "LEITURA DE PESSOAS E SITUAÇÕES:\n"
@@ -3478,7 +3478,7 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     try:
         resp = await _groq_create(
             model=modelo,
-            max_tokens=420,
+            max_tokens=180,
             temperature=0.78,
             top_p=0.92,
             messages=mensagens,
@@ -3528,7 +3528,7 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
                 log.info(f"[GROQ] fallback para {_fb_modelo}")
                 resp2 = await _groq_create(
                     model=_fb_modelo,
-                    max_tokens=300,
+                    max_tokens=180,
                     temperature=0.6,
                     messages=mensagens,
                 )
