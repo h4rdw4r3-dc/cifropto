@@ -3175,7 +3175,7 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
                 return texto2
             except Exception as e2:
                 log.error(f"[GROQ] fallback também falhou: {e2}")
-        return random.choice(["Não sei disso.", "Sem informação.", "Tenta a moderação."])
+        return await _ia_curta("Groq falhou em responder — dizer que não tem a resposta agora, breve.", max_tokens=20)
 
 
 async def continuar_conversa(user_id: int, msg: str, autor: str, guild=None) -> str:
@@ -3275,20 +3275,11 @@ async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, 
         return f"Menciona quem quer consultar."
 
     if any(p in msg for p in ["obrigado", "obrigada", "valeu", "vlw", "thanks", "grato", "grata"]):
-        return random.choice([
-            ".", "Tá.", "Certo.", "Ok.", "Tmj.", "Nada não.",
-            f"Isso aí, {autor}.", "De nada.", "Tranquilo.",
-        ])
+        return await _ia_curta("Receber agradecimento de forma seca e natural.", contexto=f"quem agradeceu: {autor}", max_tokens=15)
 
     if any(p in msg for p in ["oi", "olá", "ola", "hey", "salve", "eai", "tudo bem", "tudo bom", "boa tarde", "bom dia", "boa noite"]):
         iniciar_conversa(user_id, "saudacao", canal_id=canal_id)
-        return random.choice([
-            f"Fala, {autor}.",
-            f"Oi.",
-            f"Tô aqui.",
-            f"O que há?",
-            f"Sim?",
-        ])
+        return await _ia_curta("Responder saudação casual de forma breve e natural.", contexto=f"quem saudou: {autor}", max_tokens=15)
 
     return await responder_com_groq(conteudo, autor, user_id, guild, canal_id)
 
@@ -3644,8 +3635,14 @@ async def _verificar_confirmacao_pendente(message: discord.Message) -> bool:
 
 # ── Wizard de geração ─────────────────────────────────────────────────────────
 
-def _wizard_pergunta(campo: str) -> str:
-    return random.choice(WIZARD_PERGUNTAS[campo])
+async def _wizard_pergunta(campo: str) -> str:
+    _descricoes = {
+        "formato": "Perguntar qual formato de arquivo: PDF (1), TXT (2) ou CSV/planilha (3). Breve.",
+        "titulo": "Perguntar o título do arquivo. Dizer que pode pular se quiser padrão. Breve.",
+        "logo": "Perguntar se quer adicionar uma logo. Dizer para mandar como anexo ou link, ou digitar não para pular.",
+        "extras": "Perguntar se há observações ou detalhes extras para o arquivo, ou se pode gerar já.",
+    }
+    return await _ia_curta(_descricoes.get(campo, f"Perguntar sobre {campo} para o arquivo."), max_tokens=40)
 
 
 async def _iniciar_wizard(message: discord.Message, tipo_conteudo: str):
@@ -3662,13 +3659,12 @@ async def _iniciar_wizard(message: discord.Message, tipo_conteudo: str):
         "canal_mentions": [c.id for c in message.channel_mentions],
         "ts": agora_utc(),
     }
-    abertura = random.choice([
-        f"Certo, vou montar **{tipo_conteudo}**.",
-        f"Beleza, preparando **{tipo_conteudo}**.",
-        f"Ok, vou gerar **{tipo_conteudo}**.",
-        f"Entendido. Antes de gerar **{tipo_conteudo}**, preciso de algumas informações.",
-    ])
-    await message.channel.send(f"{abertura}\n\n{_wizard_pergunta('formato')}")
+    abertura = await _ia_curta(
+        f"Confirmar que vai gerar '{tipo_conteudo}' e dizer que precisa de algumas informações antes. Natural, sem template.",
+        max_tokens=30,
+    )
+    pergunta = await _wizard_pergunta('formato')
+    await message.channel.send(f"{abertura}\n\n{pergunta}")
     return True
 
 
@@ -3701,12 +3697,7 @@ async def _processar_wizard(message: discord.Message) -> bool:
     )
     if _cancela:
         del wizard_geracao[user_id]
-        await message.channel.send(random.choice([
-            "Entendido, cancelado.",
-            "Ok, deixa pra la.",
-            "Certo, nao gero nada.",
-            "Beleza, arquivei.",
-        ]))
+        await message.channel.send(await _ia_curta("Confirmar cancelamento do wizard de geração de arquivo. Bem curto.", max_tokens=15))
         return True
 
     # ── formato ───────────────────────────────────────────────────────────────
@@ -3719,11 +3710,10 @@ async def _processar_wizard(message: discord.Message) -> bool:
         elif r in ("3", "csv", "planilha", "calc", "tabela"):
             estado["formato"] = "csv"
         else:
-            await message.channel.send(random.choice([
-                "Não peguei. É **1** pra PDF, **2** pra texto ou **3** pra planilha.",
-                "Manda **1**, **2** ou **3** — PDF, TXT ou CSV.",
-                "PDF, texto ou planilha? Só o número ou o nome mesmo.",
-            ]))
+            await message.channel.send(await _ia_curta(
+                "Usuário mandou formato inválido. Pedir 1 pra PDF, 2 pra TXT ou 3 pra CSV. Natural.",
+                max_tokens=30,
+            ))
             return True
 
     # ── título ────────────────────────────────────────────────────────────────
@@ -3739,10 +3729,10 @@ async def _processar_wizard(message: discord.Message) -> bool:
             elif resp.startswith("http"):
                 estado["logo_url"] = resp.split()[0]
             else:
-                await message.channel.send(random.choice([
-                    "Manda a imagem como anexo ou cola o link direto. Ou responde `não` pra pular.",
-                    "Precisa ser um anexo ou um link começando com http. Se não tiver, fala `não`.",
-                ]))
+                await message.channel.send(await _ia_curta(
+                    "Logo inválida. Pedir para mandar como anexo ou link http, ou digitar não para pular.",
+                    max_tokens=30,
+                ))
                 return True
 
     # ── extras ────────────────────────────────────────────────────────────────
@@ -3756,7 +3746,7 @@ async def _processar_wizard(message: discord.Message) -> bool:
 
     if estado["step"] < len(WIZARD_CAMPOS):
         proximo = WIZARD_CAMPOS[estado["step"]]
-        await message.channel.send(_wizard_pergunta(proximo))
+        await message.channel.send(await _wizard_pergunta(proximo))
         return True
 
     # Concluído
@@ -3776,7 +3766,7 @@ async def _executar_geracao(message: discord.Message, params: dict):
     extras = params["extras"] or ""
     canal_mentions = params.get("canal_mentions", [])
 
-    await message.channel.send("Gerando arquivo, aguarde...")
+    await message.channel.send(await _ia_curta(f"Avisar que está gerando o arquivo '{tipo}'. Bem curto.", max_tokens=15))
 
     try:
         # ── Coleta o conteúdo textual ─────────────────────────────────────────
@@ -3838,7 +3828,7 @@ async def _executar_geracao(message: discord.Message, params: dict):
         # ── Gera no formato escolhido ─────────────────────────────────────────
         if fmt == "pdf":
             if not FPDF_DISPONIVEL:
-                await message.channel.send("fpdf2 nao instalado — enviando como .txt.")
+                await message.channel.send(await _ia_curta("fpdf2 não instalado, vai enviar como .txt mesmo. Natural.", max_tokens=20))
                 fmt = "txt"
             else:
                 pdf = FPDF()
@@ -3869,7 +3859,8 @@ async def _executar_geracao(message: discord.Message, params: dict):
                     pdf.multi_cell(0, 5, _pdf_str(linha), new_x="LMARGIN", new_y="NEXT")
                 arq_bytes = bytes(pdf.output())
                 arq = discord.File(io.BytesIO(arq_bytes), filename=f"{nome_base}.pdf")
-                await message.channel.send(f"**{titulo_final}** gerado:", file=arq)
+                _leg = await _ia_curta(f"Avisar que o arquivo '{titulo_final}' foi gerado. Breve.", max_tokens=20)
+                await message.channel.send(_leg or f"{titulo_final} gerado.", file=arq)
                 log.info(f"[WIZARD] {message.author.display_name} gerou {nome_base}.pdf")
                 return
 
@@ -3881,17 +3872,20 @@ async def _executar_geracao(message: discord.Message, params: dict):
             for linha in texto_base.split("\n"):
                 w.writerow([linha])
             arq = discord.File(io.BytesIO(buf.getvalue().encode("utf-8-sig")), filename=f"{nome_base}.csv")
-            await message.channel.send(f"**{titulo_final}** gerado:", file=arq)
+            _leg = await _ia_curta(f"Avisar que o arquivo '{titulo_final}' foi gerado. Breve.", max_tokens=20)
+            await message.channel.send(_leg or f"{titulo_final} gerado.", file=arq)
         else:
             # TXT
             conteudo_txt = f"{titulo_final}\n{'=' * len(titulo_final)}\n\n{texto_base}"
             arq = discord.File(io.BytesIO(conteudo_txt.encode("utf-8")), filename=f"{nome_base}.txt")
-            await message.channel.send(f"**{titulo_final}** gerado:", file=arq)
+            _leg = await _ia_curta(f"Avisar que o arquivo '{titulo_final}' foi gerado. Breve.", max_tokens=20)
+            await message.channel.send(_leg or f"{titulo_final} gerado.", file=arq)
 
         log.info(f"[WIZARD] {message.author.display_name} gerou {nome_base}.{fmt}")
 
     except Exception as e:
-        await message.channel.send(f"Erro ao gerar: {e}")
+        _err = await _ia_curta(f"Erro ao gerar arquivo. Erro técnico: {str(e)[:80]}. Avisar brevemente.", max_tokens=25)
+        await message.channel.send(_err or "Não consegui gerar o arquivo.")
         log.error(f"[WIZARD] _executar_geracao: {e}", exc_info=True)
 
 
@@ -3937,7 +3931,8 @@ async def processar_ordem(message: discord.Message) -> bool:
                 )
                 await message.channel.send(txt)
             except Exception as e:
-                await message.channel.send(f"Não foi possível silenciar {alvo.mention}: {e}")
+                _err = await _ia_curta(f"Erro ao silenciar {alvo.display_name}. Erro: {str(e)[:60]}.", max_tokens=25)
+                await message.channel.send(_err or f"Não consegui silenciar {alvo.mention}.")
 
     # ── dessilenciar @user ─────────────────────────────────────────────────────
     elif cmd in ("dessilenciar", "unmute", "desmutar"):
@@ -3953,7 +3948,8 @@ async def processar_ordem(message: discord.Message) -> bool:
                 )
                 await message.channel.send(txt)
             except Exception as e:
-                await message.channel.send(f"Não foi possível dessilenciar {alvo.mention}: {e}")
+                _err = await _ia_curta(f"Erro ao dessilenciar {alvo.display_name}. Erro: {str(e)[:60]}.", max_tokens=25)
+                await message.channel.send(_err or f"Não consegui dessilenciar {alvo.mention}.")
 
     # ── banir @user / ID [duração] [motivo] ───────────────────────────────────
     elif cmd in ("banir", "ban"):
@@ -3994,7 +3990,8 @@ async def processar_ordem(message: discord.Message) -> bool:
                     )
                 await message.channel.send(txt)
             except Exception as e:
-                await message.channel.send(f"Não foi possível banir **{membro_nome}**: {e}")
+                _err = await _ia_curta(f"Erro ao banir {membro_nome}. Erro: {str(e)[:60]}.", max_tokens=25)
+                await message.channel.send(_err or f"Não consegui banir {membro_nome}.")
 
     # ── desbanir @user / ID ────────────────────────────────────────────────────
     elif cmd in ("desbanir", "unban"):
@@ -4013,9 +4010,11 @@ async def processar_ordem(message: discord.Message) -> bool:
                 )
                 await message.channel.send(txt)
             except discord.NotFound:
-                await message.channel.send(f"ID {uid} não está na lista de banimentos.")
+                _err = await _ia_curta(f"ID {uid} não está na lista de banimentos do servidor.", max_tokens=20)
+                await message.channel.send(_err or f"ID {uid} não está banido.")
             except Exception as e:
-                await message.channel.send(f"Não foi possível desbanir {uid}: {e}")
+                _err = await _ia_curta(f"Erro ao desbanir ID {uid}. Erro: {str(e)[:60]}.", max_tokens=25)
+                await message.channel.send(_err or f"Não consegui desbanir {uid}.")
 
     # ── expulsar @user motivo ──────────────────────────────────────────────────
     elif cmd in ("expulsar", "kick"):
@@ -4032,12 +4031,13 @@ async def processar_ordem(message: discord.Message) -> bool:
                 )
                 await message.channel.send(txt)
             except Exception as e:
-                await message.channel.send(f"Não foi possível expulsar {alvo.mention}: {e}")
+                _err = await _ia_curta(f"Erro ao expulsar {alvo.display_name}. Erro: {str(e)[:60]}.", max_tokens=25)
+                await message.channel.send(_err or f"Não consegui expulsar {alvo.mention}.")
 
     # ── dar cargo @user cargo / tirar cargo @user cargo ───────────────────────
     elif re.search(r'\b(dar|d[aã]|atribuir|adicionar|colocar)\b.{0,15}\bcargo\b', conteudo.lower()):
         if not alvos:
-            await message.channel.send("Menciona quem deve receber o cargo.")
+            await message.channel.send(await _ia_curta("Pedir para mencionar quem deve receber o cargo. Breve.", max_tokens=15))
             return True
         roles_alvo = message.role_mentions
         if not roles_alvo:
@@ -4046,20 +4046,22 @@ async def processar_ordem(message: discord.Message) -> bool:
             role_encontrado = _buscar_role_por_nome(guild, nome_r) if nome_r else None
             roles_alvo = [role_encontrado] if role_encontrado else []
         if not roles_alvo:
-            await message.channel.send("Menciona qual cargo devo atribuir (use @cargo ou escreva o nome).")
+            await message.channel.send(await _ia_curta("Pedir para mencionar ou escrever o nome do cargo a atribuir.", max_tokens=20))
             return True
         for alvo in alvos:
             for role in roles_alvo:
                 try:
                     await alvo.add_roles(role, reason=f"Ordem de {message.author.display_name}")
-                    await message.channel.send(f"Cargo {role.name} atribuído a {alvo.mention}.")
+                    _txt = await _ia_curta(f"Confirmar atribuição do cargo '{role.name}' a {alvo.display_name}. Natural.", max_tokens=25)
+                    await message.channel.send(_txt or f"Cargo {role.name} dado a {alvo.mention}.")
                     log.info(f"Cargo {role.name} atribuído a {alvo.display_name}")
                 except Exception as e:
-                    await message.channel.send(f"Não foi possível atribuir {role.name} a {alvo.mention}: {e}")
+                    _err = await _ia_curta(f"Erro ao atribuir cargo '{role.name}' a {alvo.display_name}. Erro: {str(e)[:60]}.", max_tokens=25)
+                    await message.channel.send(_err or f"Não consegui atribuir {role.name}.")
 
     elif re.search(r'\b(tirar|remover|revogar|retirar)\b.{0,15}\bcargo\b', conteudo.lower()):
         if not alvos:
-            await message.channel.send("Menciona de quem devo retirar o cargo.")
+            await message.channel.send(await _ia_curta("Pedir para mencionar de quem retirar o cargo. Breve.", max_tokens=15))
             return True
         roles_alvo = message.role_mentions
         if not roles_alvo:
@@ -4067,16 +4069,18 @@ async def processar_ordem(message: discord.Message) -> bool:
             role_encontrado = _buscar_role_por_nome(guild, nome_r) if nome_r else None
             roles_alvo = [role_encontrado] if role_encontrado else []
         if not roles_alvo:
-            await message.channel.send("Menciona qual cargo devo retirar (use @cargo ou escreva o nome).")
+            await message.channel.send(await _ia_curta("Pedir para mencionar ou escrever o nome do cargo a retirar.", max_tokens=20))
             return True
         for alvo in alvos:
             for role in roles_alvo:
                 try:
                     await alvo.remove_roles(role, reason=f"Ordem de {message.author.display_name}")
-                    await message.channel.send(f"Cargo {role.name} removido de {alvo.mention}.")
+                    _txt = await _ia_curta(f"Confirmar remoção do cargo '{role.name}' de {alvo.display_name}. Natural.", max_tokens=25)
+                    await message.channel.send(_txt or f"Cargo {role.name} removido de {alvo.mention}.")
                     log.info(f"Cargo {role.name} removido de {alvo.display_name}")
                 except Exception as e:
-                    await message.channel.send(f"Não foi possível remover {role.name} de {alvo.mention}: {e}")
+                    _err = await _ia_curta(f"Erro ao remover cargo '{role.name}' de {alvo.display_name}. Erro: {str(e)[:60]}.", max_tokens=25)
+                    await message.channel.send(_err or f"Não consegui remover {role.name}.")
 
     # ── avisar @user mensagem ──────────────────────────────────────────────────
     elif cmd in ("avisar", "aviso", "advertir"):
@@ -4094,7 +4098,8 @@ async def processar_ordem(message: discord.Message) -> bool:
     # ── chamar mod ─────────────────────────────────────────────────────────────
     elif cmd in ("chamar-mod", "chamarmod", "mod", "moderação", "moderacao", "chamar"):
         motivo = resto or "sem motivo especificado."
-        await message.channel.send(f"{mod}, atenção necessária  -  {motivo}")
+        _txt_mod = await _ia_curta(f"Chamar a moderação com atenção para: {motivo}. Tom direto.", max_tokens=30)
+        await message.channel.send(f"{mod} {_txt_mod or f'— atenção: {motivo}'}")
 
     # ── regras ─────────────────────────────────────────────────────────────────
     elif cmd == "regras":
@@ -7019,24 +7024,48 @@ async def on_ready():
 async def on_guild_channel_create(channel):
     if channel.guild.id == SERVIDOR_ID:
         _atualizar_contexto(channel.guild)
+        canal_audit = channel.guild.get_channel(_canal_auditoria_id())
+        if canal_audit and canal_audit.id != channel.id:
+            asyncio.ensure_future(_audit_ia(canal_audit, "canal criado", {
+                "nome": f"#{channel.name}",
+                "tipo": str(channel.type),
+            }))
 
 
 @client.event
 async def on_guild_channel_delete(channel):
     if channel.guild.id == SERVIDOR_ID:
         _atualizar_contexto(channel.guild)
+        canal_audit = channel.guild.get_channel(_canal_auditoria_id())
+        if canal_audit:
+            asyncio.ensure_future(_audit_ia(canal_audit, "canal removido", {
+                "nome": f"#{channel.name}",
+                "tipo": str(channel.type),
+            }))
 
 
 @client.event
 async def on_guild_role_create(role):
     if role.guild.id == SERVIDOR_ID:
         _atualizar_contexto(role.guild)
+        canal_audit = role.guild.get_channel(_canal_auditoria_id())
+        if canal_audit:
+            asyncio.ensure_future(_audit_ia(canal_audit, "cargo criado", {
+                "nome": role.name,
+                "id": str(role.id),
+            }))
 
 
 @client.event
 async def on_guild_role_delete(role):
     if role.guild.id == SERVIDOR_ID:
         _atualizar_contexto(role.guild)
+        canal_audit = role.guild.get_channel(_canal_auditoria_id())
+        if canal_audit:
+            asyncio.ensure_future(_audit_ia(canal_audit, "cargo removido", {
+                "nome": role.name,
+                "id": str(role.id),
+            }))
 
 
 @client.event
@@ -7321,8 +7350,16 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
     if entrou:
         log.info(f"[VOZ] {member.display_name} entrou em #{after.channel.name}")
+        asyncio.ensure_future(_audit_ia(canal_audit, "entrou em canal de voz", {
+            "membro": member.display_name,
+            "canal": f"#{after.channel.name}",
+        }))
     elif saiu:
         log.info(f"[VOZ] {member.display_name} saiu de #{before.channel.name}")
+        asyncio.ensure_future(_audit_ia(canal_audit, "saiu de canal de voz", {
+            "membro": member.display_name,
+            "canal": f"#{before.channel.name}",
+        }))
 
 
 @client.event
@@ -7353,16 +7390,86 @@ async def on_reaction_add(reaction: discord.Reaction, user):
             except Exception:
                 pass
             try:
+                _aviso = await _ia_curta(
+                    "Avisar membro que emoji ofensivo não é permitido e que deve ler as regras. Tom firme, breve.",
+                    contexto=f"canal de regras: {CANAL_REGRAS()}, emoji: {emoji.name}",
+                    max_tokens=30,
+                )
                 await reaction.message.channel.send(
-                    f"{membro.mention}, emojis com esse nome não são permitidos aqui. "
-                    f"Leia as regras em {CANAL_REGRAS()}."
+                    f"{membro.mention} {_aviso or f'emojis ofensivos não são permitidos. Regras: {CANAL_REGRAS()}.'}"
                 )
             except Exception:
                 pass
             infracoes[membro.id] += 1
             salvar_dados()
+            canal_audit = reaction.message.guild.get_channel(_canal_auditoria_id())
+            if canal_audit:
+                asyncio.ensure_future(_audit_ia(canal_audit, "emoji ofensivo removido", {
+                    "membro": membro.display_name,
+                    "id": str(membro.id),
+                    "emoji": emoji.name,
+                    "canal": f"#{reaction.message.channel.name}",
+                }))
             log.info(f"Reação removida: {membro.display_name}: {emoji.name}")
             break
+
+
+@client.event
+async def on_message_delete(message: discord.Message):
+    """Registra exclusão de mensagens no canal de auditoria."""
+    if not message.guild or message.guild.id != SERVIDOR_ID:
+        return
+    if message.author == client.user:
+        return
+    if not message.content and not message.attachments:
+        return
+    canal_audit = message.guild.get_channel(_canal_auditoria_id())
+    if not canal_audit:
+        return
+    _preview = (message.content or "[sem texto]")[:120]
+    asyncio.ensure_future(_audit_ia(canal_audit, "mensagem apagada", {
+        "autor": message.author.display_name,
+        "canal": f"#{message.channel.name}",
+        "conteúdo": _preview,
+        "anexos": str(len(message.attachments)) if message.attachments else "nenhum",
+    }))
+
+
+@client.event
+async def on_message_edit(before: discord.Message, after: discord.Message):
+    """Detecta edições com conteúdo potencialmente ofensivo e audita mudanças relevantes."""
+    if not after.guild or after.guild.id != SERVIDOR_ID:
+        return
+    if after.author == client.user:
+        return
+    if before.content == after.content:
+        return
+
+    # Verifica se a edição introduziu conteúdo ofensivo
+    _txt = after.content.lower()
+    _palavras = [p for cat in palavras_custom.values() for p in cat] + PALAVRAS_VULGARES
+    _ofensivo = any(p in _txt for p in _palavras)
+
+    canal_audit = after.guild.get_channel(_canal_auditoria_id())
+    if canal_audit and _ofensivo:
+        asyncio.ensure_future(_audit_ia(canal_audit, "mensagem editada com conteúdo ofensivo", {
+            "autor": after.author.display_name,
+            "canal": f"#{after.channel.name}",
+            "antes": (before.content or "")[:80],
+            "depois": (after.content or "")[:80],
+        }))
+        try:
+            await after.delete()
+        except Exception:
+            pass
+    elif canal_audit and len(before.content or "") > 30:
+        # Audita edições relevantes (mensagens longas editadas)
+        asyncio.ensure_future(_audit_ia(canal_audit, "mensagem editada", {
+            "autor": after.author.display_name,
+            "canal": f"#{after.channel.name}",
+            "antes": (before.content or "")[:60],
+            "depois": (after.content or "")[:60],
+        }))
 
 
 @client.event
