@@ -6102,7 +6102,7 @@ async def _interjetar_conversa(message: discord.Message):
         system_resp = (
             f"Você é o shell_engenheiro — calmo, lúcido, observador.{humor_txt}{perfil_txt}\n"
             f"{instrucao_tipo}\n"
-            "Jane fala quando tem algo que vale. Quando não tem: silêncio.\n"
+            "Fale quando tem algo que vale. Quando não tem: silêncio.\n"
             "1 frase. Precisa, calibrada, sem introdução genérica. Sem emojis, sem markdown.\n"
             "Se não tiver nada genuíno a acrescentar nesse ângulo: responda SILÊNCIO."
         )
@@ -6912,6 +6912,182 @@ async def _task_iniciativa_proativa():
             log.debug(f"[INICIATIVA] erro: {e}")
 
 
+# ── Engajamento proativo com membros ─────────────────────────────────────────
+
+# Rastreamento de novos membros para follow-up
+_novos_membros_pendentes: dict[int, datetime] = {}  # user_id → ts de entrada
+
+
+async def _task_engajamento_membros():
+    """
+    Background task: inicia comunicação proativa com membros.
+    Roda a cada 20 minutos e identifica situações para agir:
+      - Novos membros que entraram mas não falaram nada (follow-up após 10-30min)
+      - Membros que sumiram após serem ativos (percebe a ausência)
+      - Canal monitorado em silêncio prolongado (quebra o gelo com algo genuíno)
+    """
+    await client.wait_until_ready()
+    await asyncio.sleep(180)  # 3min após iniciar
+    while not client.is_closed():
+        await asyncio.sleep(1200)  # a cada 20min
+        if not GROQ_API_KEY:
+            continue
+        try:
+            guild = client.get_guild(SERVIDOR_ID)
+            if not guild:
+                continue
+            agora = agora_utc()
+
+            # ── 1. Follow-up de novos membros silenciosos ─────────────────────
+            for uid, ts_entrada in list(_novos_membros_pendentes.items()):
+                delta = (agora - ts_entrada).total_seconds()
+                # Após 10-35 minutos sem falar, quebra o gelo
+                if delta < 600 or delta > 2100:
+                    if delta > 2100:
+                        del _novos_membros_pendentes[uid]
+                    continue
+                membro = guild.get_member(uid)
+                if not membro:
+                    del _novos_membros_pendentes[uid]
+                    continue
+                # Verifica se o membro já falou em algum canal
+                _falou = any(
+                    uid in [m.id for m in canal_memoria.get(c.id, [])]
+                    for c in guild.text_channels
+                )
+                # Verificação simplificada — checa se tem mensagens no histórico de memória
+                _msgs_membro = []
+                for _cid, _deq in canal_memoria.items():
+                    for _entry in _deq:
+                        if _entry.get("autor") == membro.display_name:
+                            _msgs_membro.append(_entry)
+                if _msgs_membro:
+                    del _novos_membros_pendentes[uid]
+                    continue
+
+                # Membro novo que ainda não falou — age naturalmente num canal geral
+                canal_geral = (
+                    discord.utils.get(guild.text_channels, name="geral")
+                    or discord.utils.get(guild.text_channels, name="chat")
+                    or discord.utils.get(guild.text_channels, name="・testes")
+                    or guild.system_channel
+                )
+                if not canal_geral:
+                    continue
+
+                txt = await _ia_curta(
+                    f"Novo membro '{membro.display_name}' entrou há {int(delta // 60)} minutos "
+                    f"mas não falou nada ainda. Quebrar o gelo de forma natural, sem parecer protocolar. "
+                    "Pode ser uma pergunta leve, uma observação, algo que convide sem forçar.",
+                    max_tokens=60,
+                )
+                if txt:
+                    await asyncio.sleep(random.uniform(5, 20))
+                    await canal_geral.send(f"{membro.mention} {txt}")
+                    log.info(f"[ENGAJ] follow-up novo membro: {membro.display_name}")
+                del _novos_membros_pendentes[uid]
+
+            # ── 2. Canal monitorado em silêncio prolongado ────────────────────
+            for cid in list(canais_monitorados):
+                canal = guild.get_channel(cid)
+                if not canal:
+                    continue
+                _ultima_post = ultima_interjeccao.get(cid)
+                _ultima_msg_canal = None
+                _hist = list(canal_memoria.get(cid, []))
+                if _hist:
+                    # Pega o timestamp mais recente via atividade_mensagens (aproximado)
+                    pass  # usa cooldown da iniciativa
+                _ultimo_post_ini = _ultima_iniciativa.get(cid)
+                if _ultimo_post_ini and (agora - _ultimo_post_ini) < timedelta(hours=1, minutes=30):
+                    continue
+                # Verifica se o canal está vazio há mais de 45min
+                _ctx = _montar_ctx_canal(cid, n=3)
+                if not _ctx:
+                    continue  # sem histórico suficiente
+                r = await _groq_client().chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    max_tokens=5,
+                    temperature=0.0,
+                    messages=[
+                        {"role": "system", "content":
+                         "Canal de Discord em silêncio. Responda apenas: POSTAR ou AGUARDAR.\n"
+                         "POSTAR se o tema anterior dá margem para uma contribuição genuína agora.\n"
+                         "AGUARDAR se não há nada relevante a acrescentar."},
+                        {"role": "user", "content": _ctx},
+                    ],
+                )
+                _registrar_tokens("8b", r.usage.total_tokens if r.usage else 5)
+                decisao = r.choices[0].message.content.strip().upper()
+                if "POSTAR" not in decisao:
+                    continue
+
+                humor_txt = f" Humor: {_humor_sessao}." if _humor_sessao else ""
+                r2 = await _groq_client().chat.completions.create(
+                    model=_escolher_modelo(),
+                    max_tokens=80,
+                    temperature=0.9,
+                    messages=[
+                        {"role": "system", "content":
+                         f"Você é o shell_engenheiro — presente, observador, direto.{humor_txt}\n"
+                         "O canal ficou em silêncio. Retome a conversa com algo genuíno: "
+                         "uma pergunta que provoque, um fato interessante, uma observação sobre o que foi dito. "
+                         "1-2 frases. Sem saudação, sem emojis, sem markdown."},
+                        {"role": "user", "content": _ctx},
+                    ],
+                )
+                txt2 = _limpar_markdown(r2.choices[0].message.content.strip())
+                _registrar_tokens("8b", r2.usage.total_tokens if r2.usage else 80)
+                if txt2 and "SILÊNCIO" not in txt2.upper():
+                    await asyncio.sleep(random.uniform(10, 40))
+                    await canal.send(txt2)
+                    _ultima_iniciativa[cid] = agora
+                    log.info(f"[ENGAJ] quebrou silêncio em #{canal.name}: {txt2[:60]}")
+
+            # ── 3. Perceber ausência de membro recorrente ─────────────────────
+            # Membros que costumavam ser ativos (>10 msgs registradas) e sumiram há >48h
+            _ausentes = []
+            for uid, cnt in atividade_mensagens.items():
+                if cnt < 10:
+                    continue
+                membro = guild.get_member(uid)
+                if not membro or membro.bot:
+                    continue
+                # Verifica se tem alguma mensagem recente no histórico de canal
+                _visto_recente = False
+                for _cid, _deq in canal_memoria.items():
+                    for _entry in _deq:
+                        if _entry.get("autor") == membro.display_name:
+                            _visto_recente = True
+                            break
+                    if _visto_recente:
+                        break
+                if not _visto_recente:
+                    _ausentes.append(membro)
+
+            if _ausentes and random.random() < 0.3:  # 30% de chance por ciclo para não spammar
+                ausente = random.choice(_ausentes[:5])
+                canal_geral = (
+                    discord.utils.get(guild.text_channels, name="geral")
+                    or discord.utils.get(guild.text_channels, name="chat")
+                    or guild.system_channel
+                )
+                if canal_geral:
+                    txt = await _ia_curta(
+                        f"Perceber sutilmente a ausência de '{ausente.display_name}', membro ativo que sumiu. "
+                        "Pode ser uma referência leve, uma pergunta ao canal sobre ele, algo que lembre sem chamar atenção direta. "
+                        "Natural, não dramático.",
+                        max_tokens=50,
+                    )
+                    if txt:
+                        await asyncio.sleep(random.uniform(15, 60))
+                        await canal_geral.send(txt)
+                        log.info(f"[ENGAJ] percebeu ausência de {ausente.display_name}")
+
+        except Exception as e:
+            log.debug(f"[ENGAJ] erro: {e}")
+
+
 # ── Suporte a canais de voz ───────────────────────────────────────────────────
 
 async def _entrar_canal_voz(guild: discord.Guild, nome_canal: str | None = None) -> discord.VoiceChannel | None:
@@ -7018,6 +7194,7 @@ async def on_ready():
     asyncio.ensure_future(_task_relatorio_semanal())
     asyncio.ensure_future(_task_iniciativa_proativa())
     asyncio.ensure_future(_task_accountability_equipe())
+    asyncio.ensure_future(_task_engajamento_membros())
 
 
 @client.event
@@ -7088,6 +7265,7 @@ async def on_member_join(member: discord.Member):
         registro_entradas[member.id] = []
     registro_entradas[member.id].append(ts)
     nomes_historico[member.id] = member.display_name
+    _novos_membros_pendentes[member.id] = agora  # registra para follow-up proativo
     salvar_dados()
 
     idade_conta = agora - member.created_at.replace(tzinfo=timezone.utc)
@@ -7412,6 +7590,46 @@ async def on_reaction_add(reaction: discord.Reaction, user):
                 }))
             log.info(f"Reação removida: {membro.display_name}: {emoji.name}")
             break
+
+
+@client.event
+async def on_thread_create(thread: discord.Thread):
+    """Participa automaticamente de threads novas com algo genuíno."""
+    if not thread.guild or thread.guild.id != SERVIDOR_ID:
+        return
+    if not GROQ_API_KEY:
+        return
+    try:
+        await asyncio.sleep(random.uniform(8, 25))  # delay natural antes de entrar
+        # Monta contexto do canal pai se disponível
+        ctx_pai = _montar_ctx_canal(thread.parent_id, n=5) if thread.parent_id else ""
+        nome_thread = thread.name
+        criador = thread.owner.display_name if thread.owner else "alguém"
+        humor_txt = f" Humor: {_humor_sessao}." if _humor_sessao else ""
+
+        r = await _groq_client().chat.completions.create(
+            model="llama-3.1-8b-instant",
+            max_tokens=60,
+            temperature=0.9,
+            messages=[
+                {"role": "system", "content":
+                 f"Você é o shell_engenheiro — observador, presente.{humor_txt}\n"
+                 "Uma thread nova foi criada no servidor. Faça UMA contribuição inicial genuína: "
+                 "pode ser uma pergunta sobre o tema, uma observação, ou simplesmente demonstrar que notou. "
+                 "1 frase. Sem saudação formal, sem emojis, sem markdown. "
+                 "Se o tema não dá para contribuir de forma genuína: responda SILÊNCIO."},
+                {"role": "user", "content":
+                 f"Thread criada por {criador}: '{nome_thread}'\n"
+                 + (f"Contexto do canal pai:\n{ctx_pai}" if ctx_pai else "")},
+            ],
+        )
+        _registrar_tokens("8b", r.usage.total_tokens if r.usage else 60)
+        txt = _limpar_markdown(r.choices[0].message.content.strip())
+        if txt and "SILÊNCIO" not in txt.upper():
+            await thread.send(txt)
+            log.info(f"[THREAD] entrou em thread '{nome_thread}': {txt[:60]}")
+    except Exception as e:
+        log.debug(f"[THREAD] on_thread_create falhou: {e}")
 
 
 @client.event
