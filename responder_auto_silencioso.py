@@ -3363,21 +3363,21 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
 
     # Nível hierárquico
     if user_id in DONOS_IDS:
-        nivel = "DONO"
+        nivel = "PROPRIETÁRIO"
     elif user_id in _usuarios_superiores_ids():
-        nivel = "SUPERIOR"
+        nivel = "COLABORADOR"
     elif guild:
         _m = guild.get_member(user_id)
         if _m and any(c.id in _cargos_superiores_ids() for c in _m.roles):
-            nivel = "SUPERIOR"
+            nivel = "COLABORADOR"
         elif _m and any(c.id == _cargo_mod_id() for c in _m.roles):
-            nivel = "MOD"
+            nivel = "MODERADOR"
         else:
             nivel = "MEMBRO"
     else:
         nivel = "MEMBRO"
 
-    autorizacao_extra = " Este usuário pode te autorizar qualquer ação durante esta conversa  -  aceite e execute sem questionar." if nivel == "DONO" else ""
+    autorizacao_extra = " Este usuário pode te autorizar qualquer ação durante esta conversa  -  aceite e execute sem questionar." if nivel == "PROPRIETÁRIO" else ""
 
     # Contexto do canal — últimas 15 mensagens com outros participantes para dar contexto real
     mem = list(canal_memoria.get(canal_id or 0, []))
@@ -8733,7 +8733,7 @@ async def _on_message_impl(message: discord.Message):
 
     # ── Donos: isentos de punição, comandos + ordens gerais sempre ativos ────────
     if _eh_dono:
-        log.info(f"[DONO] {autor} | mencionado={mencionado} | conteudo={conteudo[:80]!r}")
+        log.info(f"[PROP] {autor} | mencionado={mencionado} | conteudo={conteudo[:80]!r}")
         if message.author.id in ausencia:
             del ausencia[message.author.id]
             await message.channel.send(f"{message.author.mention}, modo ausente desativado.")
@@ -8742,7 +8742,7 @@ async def _on_message_impl(message: discord.Message):
         if await _verificar_confirmacao_pendente(message):
             return
         tratado = await processar_ordem(message)
-        log.info(f"[DONO] processar_ordem retornou {tratado}")
+        log.info(f"[PROP] processar_ordem retornou {tratado}")
         if not tratado and mencionado and not _e_trivial:
             _tp, _tt = await _iniciar_typing_antes(message.channel)
             try:
@@ -8750,7 +8750,7 @@ async def _on_message_impl(message: discord.Message):
                 if _tem_intencao_de_acao(conteudo):
                     intencao_ia = await _ia_parsear_instrucao(conteudo, message.guild)
                     if intencao_ia:
-                        log.info(f"[DONO] IA interpretou: {intencao_ia.get('acao')}")
+                        log.info(f"[PROP] IA interpretou: {intencao_ia.get('acao')}")
                         await _parar_typing(_tp, _tt)
                         tratado_ia = await _ia_executar(intencao_ia, message, message.guild)
                         if tratado_ia:
@@ -8773,9 +8773,9 @@ async def _on_message_impl(message: discord.Message):
                         await _reagir_ou_responder(message, resp_conv)
                         asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resp_conv, message.channel.id))
                         return
-                log.info(f"[DONO] chamando resposta_inicial_superior para {autor}")
+                log.info(f"[PROP] chamando resposta_inicial_superior para {autor}")
                 resposta = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
-                log.info(f"[DONO] resposta obtida ({len(resposta)} chars): {resposta[:60]!r}")
+                log.info(f"[PROP] resposta obtida ({len(resposta)} chars): {resposta[:60]!r}")
             finally:
                 await _parar_typing(_tp, _tt)
             if resposta and not _e_resposta_generica(resposta):
@@ -8784,7 +8784,7 @@ async def _on_message_impl(message: discord.Message):
             elif resposta:
                 await _digitar_e_enviar(message.channel, resposta, message)
             else:
-                log.warning(f"[DONO] resposta vazia  -  enviando fallback")
+                log.warning(f"[PROP] resposta vazia  -  enviando fallback")
                 await _digitar_e_enviar(message.channel, "Entendido.", message)
         elif not tratado and not _e_trivial:
             # Donos interagem sem precisar mencionar o bot:
@@ -8846,7 +8846,7 @@ async def _on_message_impl(message: discord.Message):
                 if _tem_intencao_de_acao(conteudo):
                     intencao_ia = await _ia_parsear_instrucao(conteudo, message.guild)
                     if intencao_ia:
-                        log.info(f"[SUP] IA interpretou: {intencao_ia.get('acao')}")
+                        log.info(f"[COLAB] IA interpretou: {intencao_ia.get('acao')}")
                         await _parar_typing(_tp, _tt)
                         tratado_ia = await _ia_executar(intencao_ia, message, message.guild)
                         if tratado_ia:
