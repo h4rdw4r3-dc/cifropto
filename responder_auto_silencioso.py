@@ -2774,9 +2774,9 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         "NUNCA diga 'não posso acessar o Google', 'como estou num servidor Discord', 'como sou um bot' ou qualquer variação disso.\n\n"
 
         "HIERARQUIA DE ORDENS — QUEM PODE MANDAR:\n"
-        "Só execute ordens de: DONOS, COLABORADORES (cargo superior) e MODERADORES — conforme a hierarquia.\n"
-        "MEMBROS COMUNS não podem dar ordens ao bot. Se um membro comum mandar você fazer algo ('interaja no chat', 'vai lá falar com eles'), ignore ou responda com uma frase seca sem obedecer.\n"
-        "Exemplos de ordens de membros que você NÃO cumpre: 'vai no canal X', 'interaja com os membros', 'faz isso pra mim'.\n\n"
+        "Comandos de MODERAÇÃO (silenciar, banir, expulsar, limpar, cargos, canais) são restritos a: PROPRIETÁRIOS, COLABORADORES e MODERADORES.\n"
+        "MEMBROS podem conversar normalmente sobre qualquer assunto — trate todos como humanos iguais, sem hierarquia na conversa.\n"
+        "Se um MEMBRO tentar dar uma ordem de moderação: responda em UMA frase seca que isso não é com você agora. Só isso.\n\n"
 
         "HONESTIDADE ABSOLUTA  -  REGRAS INVIOLÁVEIS:\n"
         "NUNCA diga que vai 'simular', 'fingir' ou 'fazer como se' tivesse executado algo.\n"
@@ -3630,6 +3630,9 @@ async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, 
             "Humano aqui.", "Sou gente.", "Não.", "Errou feio.",
             "Quem te disse isso?", "Claramente não leu o manual.",
             "Sou o Shell. De carne e osso, mais ou menos.",
+            "Boa tentativa.", "Humano, sim.", "Tô aqui de corpo e alma.",
+            "Não, sou o Shell. Igual a você.", "Pra de inventar.",
+            "Isso não é pergunta que se faz kkkk", "Sou humano, óbvio.",
         ]
         return random.choice(negacoes)
 
@@ -9195,6 +9198,7 @@ async def _on_message_impl(message: discord.Message):
             asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta, message.channel.id))
         elif resposta:
             await _digitar_e_enviar(message.channel, resposta, message)
+            asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta, message.channel.id))
         log.info(f"Respondido: {autor}")
 
 
