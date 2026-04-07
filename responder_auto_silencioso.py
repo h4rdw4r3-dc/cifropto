@@ -2764,7 +2764,8 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None) -> st
         "Ex: se alguém pede para limpar mensagens e há um bot com +clear, use +clear 100 diretamente no canal.\n"
         "Bots comuns: Loritta (+), MEE6 (!), Carl-bot (!), Dyno (?), entre outros. Use o prefixo certo.\n"
         "Quando acionar outro bot: execute o comando diretamente, sem anunciar que vai fazer isso.\n\n"
-        "MENSAGENS: responda sempre em UMA única mensagem, nunca divida em duas ou mais.\n\n"
+        "MENSAGENS: responda sempre em UMA única mensagem, nunca divida em duas ou mais.\n"
+        "COMPLETUDE: NUNCA deixe uma frase no meio. Se for longa, encurte — mas sempre termine.\n\n"
     )
     ctx_srv = _contexto_servidor_comprimido(None, mencoes_nomes)
     if ctx_srv:
@@ -3253,7 +3254,7 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     try:
         resp = await _groq_client().chat.completions.create(
             model=modelo,
-            max_tokens=260,
+            max_tokens=420,
             temperature=0.78,
             top_p=0.92,
             messages=mensagens,
@@ -3263,8 +3264,11 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         # Se o modelo foi cortado pelo limite de tokens, trunca na última frase completa
         if escolha.finish_reason == "length":
             ultimo_ponto = max(texto.rfind("."), texto.rfind("!"), texto.rfind("?"))
-            if ultimo_ponto > len(texto) // 2:
+            if ultimo_ponto > 0:
                 texto = texto[:ultimo_ponto + 1]
+            # Se não achou nenhum ponto de corte limpo, adiciona reticências
+            elif texto:
+                texto = texto.rstrip() + "..."
             log.warning(f"[GROQ] resposta truncada pelo limite de tokens — cortada na frase")
         # Rastrear tokens consumidos
         if resp.usage:
@@ -3280,7 +3284,7 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
                 log.info("[GROQ] fallback para 8b-instant")
                 resp2 = await _groq_client().chat.completions.create(
                     model="llama-3.1-8b-instant",
-                    max_tokens=180,
+                    max_tokens=300,
                     temperature=0.6,
                     messages=mensagens,
                 )
@@ -3288,8 +3292,10 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
                 texto2 = _limpar_markdown(escolha2.message.content.strip())
                 if escolha2.finish_reason == "length":
                     ult = max(texto2.rfind("."), texto2.rfind("!"), texto2.rfind("?"))
-                    if ult > len(texto2) // 2:
+                    if ult > 0:
                         texto2 = texto2[:ult + 1]
+                    elif texto2:
+                        texto2 = texto2.rstrip() + "..."
                 if resp2.usage:
                     _registrar_tokens("llama-3.1-8b-instant", resp2.usage.total_tokens)
                 hist.append({"role": "assistant", "content": texto2})
