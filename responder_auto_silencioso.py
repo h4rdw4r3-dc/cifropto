@@ -6287,6 +6287,47 @@ async def _enviar_em_sequencia(
             await asyncio.sleep(random.uniform(0.8, 1.8))
 
 
+# ── Regex para detectar comandos de outros bots embutidos na resposta da IA ──
+# PROBLEMA QUE RESOLVE:
+#   A IA gera texto como "Vou tentar novamente. +clear 300."
+#   O Discord precisa receber "+clear 300" como mensagem ISOLADA para acionar
+#   outros bots (ex: Burra). Dentro de uma frase, o comando simplesmente não funciona.
+#
+# COMO FUNCIONA:
+#   Detecta padrões do tipo "+palavra" ou "+palavra número" que não fazem parte
+#   de URLs ou texto normal, extrai esses comandos e os envia separadamente.
+_CMD_EXTERNO_RE = re.compile(
+    r'(?<![/\w])(\+[a-z][a-z0-9_-]*(?:\s+\d+)?)(?![/\w])',
+    re.IGNORECASE
+)
+
+def _separar_comandos_externos(texto: str) -> tuple[str, list[str]]:
+    """
+    Separa comandos de bots externos (padrão +cmd N) do texto conversacional.
+
+    Exemplo de entrada : "Vou tentar novamente. +clear 300."
+    Exemplo de saída   : ("Vou tentar novamente.", ["+clear 300"])
+
+    Por que isso é necessário:
+      Quando a IA inclui "+clear 300" dentro de uma frase, o Discord envia
+      tudo como uma única mensagem. O bot externo (ex: Burra) só reage ao
+      comando se ele estiver sozinho na mensagem — sem texto antes ou depois.
+      Essa função separa os dois para que o bot possa enviar cada um no
+      momento certo.
+    """
+    comandos: list[str] = []
+
+    def _capturar(m: re.Match) -> str:
+        cmd = m.group(1).strip().rstrip('.,;')
+        comandos.append(cmd)
+        return ''
+
+    texto_limpo = _CMD_EXTERNO_RE.sub(_capturar, texto)
+    # Remove espaços duplos e pontuação solta que sobrou após remover o comando
+    texto_limpo = re.sub(r'\s{2,}', ' ', texto_limpo).strip().strip('.,; ')
+    return texto_limpo, comandos
+
+
 async def _reagir_ou_responder(
     message: discord.Message,
     texto: str,
@@ -6295,6 +6336,7 @@ async def _reagir_ou_responder(
     Decide se reage com emoji ou responde em texto.
     Mensagens muito curtas e afirmativas viram reação.
     Remove markdown e deduplica antes de enviar.
+    Extrai e envia comandos de bots externos (ex: +clear 300) separadamente.
     """
     if not texto:
         return
@@ -6304,11 +6346,22 @@ async def _reagir_ou_responder(
     if not texto:
         return
 
+    # ── EXTRAI COMANDOS DE BOTS EXTERNOS EMBUTIDOS NA RESPOSTA ───────────────
+    # Ex: "Vou tentar novamente. +clear 300." →
+    #     texto_conv = "Vou tentar novamente."
+    #     cmds_ext   = ["+clear 300"]
+    # Os comandos serão enviados como mensagens isoladas logo abaixo.
+    texto, _cmds_externos = _separar_comandos_externos(texto)
+
     # Deduplicação: não envia resposta idêntica para o mesmo usuário no mesmo canal
     _chave_dup = texto.strip().lower()[:120]
     _dedup_key = (message.channel.id, message.author.id)
     if _ultima_resposta_canal.get(_dedup_key) == _chave_dup:
         log.debug(f"[DEDUP] resposta idêntica ignorada em #{message.channel.name}")
+        # Mesmo deduplucando o texto, ainda envia os comandos externos pendentes
+        for _cmd in _cmds_externos:
+            await asyncio.sleep(0.4)
+            await message.channel.send(_cmd)
         return
     _ultima_resposta_canal[_dedup_key] = _chave_dup
 
@@ -6323,17 +6376,35 @@ async def _reagir_ou_responder(
         try:
             await message.add_reaction("👍")
         except Exception:
-            await _digitar_e_enviar(message.channel, texto, message)
+            if texto:
+                await _digitar_e_enviar(message.channel, texto, message)
+        # Envia comandos externos mesmo quando vira reação
+        for _cmd in _cmds_externos:
+            await asyncio.sleep(0.4)
+            await message.channel.send(_cmd)
         return
 
     if _curta and _negativa and random.random() < 0.45:
         try:
             await message.add_reaction("👎")
         except Exception:
-            await _digitar_e_enviar(message.channel, texto, message)
+            if texto:
+                await _digitar_e_enviar(message.channel, texto, message)
+        for _cmd in _cmds_externos:
+            await asyncio.sleep(0.4)
+            await message.channel.send(_cmd)
         return
 
-    await _enviar_em_sequencia(message.channel, texto, message)
+    # Envia o texto conversacional primeiro (se ainda restou algum após a extração)
+    if texto:
+        await _enviar_em_sequencia(message.channel, texto, message)
+
+    # Envia cada comando externo como mensagem isolada — sem reply, sem texto junto
+    # É assim que outros bots como Burra reconhecem o comando (+clear 300, etc.)
+    for _cmd in _cmds_externos:
+        await asyncio.sleep(0.5)  # Pequena pausa para não parecer spam
+        await message.channel.send(_cmd)
+        log.info(f"[CMD_EXT] Enviado comando externo: {_cmd}")
 
 
 async def _atualizar_perfil_usuario(user_id: int, autor: str, mensagem: str, resposta: str, canal_id: int = 0) -> None:
