@@ -2486,19 +2486,39 @@ def _hora_contexto() -> str:
 
 
 def _contexto_usuario(user_id: int) -> str:
-    """Retorna resumo e episódios do perfil do usuário se disponível."""
+    """Retorna perfil completo do usuário: resumo, episódios e dados comportamentais."""
     perfil = perfis_usuarios.get(user_id)
     if not perfil:
         return ""
     n = perfil.get("n", 0)
     partes = []
+
     if perfil.get("resumo"):
-        partes.append(f"[Historico com esse usuario ({n} interacoes): {perfil['resumo']}]")
+        partes.append(f"[Histórico com esse usuário ({n} interações): {perfil['resumo']}]")
+
     episodios = perfil.get("episodios", [])
     if episodios:
-        # Injeta os últimos 5 episódios como memória episódica
         eps_txt = " | ".join(episodios[-5:])
         partes.append(f"[Memória episódica: {eps_txt}]")
+
+    # Dados comportamentais — horário e presença
+    _horarios = perfil.get("horarios", [])
+    if _horarios:
+        from collections import Counter
+        _hora_mais_comum = Counter(_horarios).most_common(1)[0][0]
+        _hora_brt = (_hora_mais_comum - 3) % 24
+        partes.append(f"[Padrão: costuma estar ativo por volta das {_hora_brt}h BRT]")
+
+    _ultima = perfil.get("ultima_vez_visto", "")
+    if _ultima:
+        try:
+            _dt = datetime.fromisoformat(_ultima)
+            _delta = agora_utc() - _dt.replace(tzinfo=timezone.utc)
+            if _delta.days >= 3:
+                partes.append(f"[Ausente há {_delta.days} dias — pode ter esfriado]")
+        except Exception:
+            pass
+
     return "\n".join(partes)
 
 
@@ -3077,7 +3097,11 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
                 f"Responda como quem acompanhou a conversa toda, não só a última mensagem.]"
             )
 
-    membro_info = f"['{autor}' | nível: {nivel}.{autorizacao_extra}]{_instrucao_collab}"
+    # Perfil comportamental do usuário — injetado no contexto de cada resposta
+    _perfil_ctx = _contexto_usuario(user_id)
+    _perfil_inj = f"\n{_perfil_ctx}" if _perfil_ctx else ""
+
+    membro_info = f"['{autor}' | nível: {nivel}.{autorizacao_extra}{_perfil_inj}]{_instrucao_collab}"
 
     # ── Tom de voz: injeta contexto vocal se a mensagem veio de áudio ────────────
     _tom_ctx = _tom_audio_pendente.pop(user_id, None)
@@ -3132,9 +3156,9 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     try:
         resp = await _groq_client().chat.completions.create(
             model=modelo,
-            max_tokens=220,
-            temperature=0.6,
-            top_p=0.9,
+            max_tokens=260,
+            temperature=0.78,
+            top_p=0.92,
             messages=mensagens,
         )
         escolha = resp.choices[0]
@@ -5651,11 +5675,15 @@ _DISCORD_BAN_DELETE_MAX = 7     # delete_message_days máximo permitido
 _DISCORD_CHANNEL_LIMIT = 490    # deixa 10 de folga antes do limite de 500
 _GROQ_AUDIO_MAX_BYTES = 25 * 1024 * 1024   # 25 MB — limite do Groq Whisper
 
-# Avisos de flood sem Groq (instantâneos, variados)
+# Avisos de flood sem Groq (instantâneos — Groq tem latência, flood não espera)
 _AVISOS_FLOOD = [
     "{m} para.", "{m}, chega.", "spam não, {m}.",
     "{m} menos.", "para {m}.", "{m}, corta isso.",
-    "{m} — flood.", "não {m}.", "{m} já chega.",
+    "{m} — flood.", "{m} já chega.",
+    "{m}, respira.", "devagar {m}.", "{m} — uma de cada vez.",
+    "chega de spam {m}.", "{m}, bora calmar.", "flood não, {m}.",
+    "{m} — lentidão proposital.", "{m} tô vendo.", "para com isso {m}.",
+    "{m}, isso não vai rolar.", "{m} — uma mensagem serve.",
 ]
 
 
@@ -5870,12 +5898,13 @@ async def _reagir_ou_responder(
     if not texto:
         return
 
-    # Deduplicação: não envia resposta idêntica à última neste canal
+    # Deduplicação: não envia resposta idêntica para o mesmo usuário no mesmo canal
     _chave_dup = texto.strip().lower()[:120]
-    if _ultima_resposta_canal.get(message.channel.id) == _chave_dup:
+    _dedup_key = (message.channel.id, message.author.id)
+    if _ultima_resposta_canal.get(_dedup_key) == _chave_dup:
         log.debug(f"[DEDUP] resposta idêntica ignorada em #{message.channel.name}")
         return
-    _ultima_resposta_canal[message.channel.id] = _chave_dup
+    _ultima_resposta_canal[_dedup_key] = _chave_dup
 
     _curta = len(texto.split()) <= 4
     _afirmativa = re.search(
@@ -5901,15 +5930,33 @@ async def _reagir_ou_responder(
     await _enviar_em_sequencia(message.channel, texto, message)
 
 
-async def _atualizar_perfil_usuario(user_id: int, autor: str, mensagem: str, resposta: str) -> None:
+async def _atualizar_perfil_usuario(user_id: int, autor: str, mensagem: str, resposta: str, canal_id: int = 0) -> None:
     """
     Atualiza o perfil do usuário após cada interação.
     A cada 5 interações gera um resumo via 8b para persistir.
     Também extrai episódios memoráveis (eventos específicos) para memória de longo prazo.
+    Rastreia dados comportamentais: horário ativo, canal frequente, contagem.
     """
-    perfil = perfis_usuarios.setdefault(user_id, {"resumo": "", "n": 0, "atualizado": "", "episodios": []})
+    perfil = perfis_usuarios.setdefault(user_id, {
+        "resumo": "", "n": 0, "atualizado": "", "episodios": [],
+        "ultima_vez_visto": "", "horarios": [], "canais": {},
+    })
     perfil.setdefault("episodios", [])
+    perfil.setdefault("horarios", [])
+    perfil.setdefault("canais", {})
     perfil["n"] = perfil.get("n", 0) + 1
+
+    # Rastreamento comportamental — horário e canal
+    _agora = agora_utc()
+    perfil["ultima_vez_visto"] = _agora.isoformat()
+    _hora = _agora.hour  # 0-23 (UTC)
+    horarios = perfil["horarios"]
+    horarios.append(_hora)
+    if len(horarios) > 50:
+        horarios[:] = horarios[-50:]
+    if canal_id:
+        canais = perfil["canais"]
+        canais[str(canal_id)] = canais.get(str(canal_id), 0) + 1
 
     # Extrai episódio memorável a cada interação (só se a mensagem tiver substância)
     if GROQ_API_KEY and len(mensagem.split()) >= 6:
@@ -5944,29 +5991,57 @@ async def _atualizar_perfil_usuario(user_id: int, autor: str, mensagem: str, res
     if perfil["n"] % 5 != 0 or not GROQ_API_KEY:
         return
 
-    historico_recente = f"Usuário: {mensagem[:200]}\nBot: {resposta[:200]}"
+    # Constrói contexto rico: últimas interações + episódios + dados comportamentais
     resumo_anterior = perfil.get("resumo", "")
+    _eps = perfil.get("episodios", [])[-5:]
+    _eps_txt = " | ".join(_eps) if _eps else ""
+
+    # Horário mais frequente (UTC → BRT -3)
+    _horarios = perfil.get("horarios", [])
+    _hora_ativa = ""
+    if _horarios:
+        from collections import Counter
+        _hora_mais_comum = Counter(_horarios).most_common(1)[0][0]
+        _hora_brt = (_hora_mais_comum - 3) % 24
+        _hora_ativa = f"Costuma aparecer por volta das {_hora_brt}h (BRT)."
+
+    # Canal mais usado
+    _canais = perfil.get("canais", {})
+    _canal_fav_id = max(_canais, key=_canais.get) if _canais else ""
+    _canal_fav = f"Canal mais frequente: {_canal_fav_id}." if _canal_fav_id else ""
+
+    _historico_recente = (
+        f"Última troca — Usuário: {mensagem[:200]}\nBot: {resposta[:150]}"
+    )
+
+    _contexto_perfil = (
+        f"Resumo anterior: {resumo_anterior}\n"
+        + (f"Episódios memoráveis: {_eps_txt}\n" if _eps_txt else "")
+        + (f"Comportamento: {_hora_ativa} {_canal_fav}\n" if (_hora_ativa or _canal_fav) else "")
+        + f"Total de interações: {perfil['n']}\n\n"
+        + f"Nova interação:\n{_historico_recente}"
+    )
 
     try:
         r = await _groq_client().chat.completions.create(
             model="llama-3.1-8b-instant",
-            max_tokens=80,
+            max_tokens=100,
             temperature=0.3,
             messages=[
                 {"role": "system", "content":
-                 "Você atualiza um resumo compacto de como um usuário se comunica e o que gosta. "
-                 "Máximo 2 frases. Foco em: tom, assuntos frequentes, preferências observadas. "
-                 "Se não há padrão claro ainda, diga 'sem padrão definido'."},
-                {"role": "user", "content":
-                 f"Resumo anterior: {resumo_anterior}\n\nNova interação:\n{historico_recente}"},
+                 "Você mantém um perfil compacto de como um usuário de Discord se comunica. "
+                 "Atualize o resumo em 2-3 frases. Inclua: tom predominante, assuntos recorrentes, "
+                 "comportamentos notáveis, horário ativo se relevante. "
+                 "Seja específico — nomes próprios, temas concretos. Não genérico."},
+                {"role": "user", "content": _contexto_perfil},
             ],
         )
         novo_resumo = r.choices[0].message.content.strip()
         perfil["resumo"] = novo_resumo
         perfil["atualizado"] = agora_utc().strftime("%Y-%m-%d")
-        _registrar_tokens("8b", r.usage.total_tokens if r.usage else 80)
+        _registrar_tokens("8b", r.usage.total_tokens if r.usage else 100)
         salvar_dados()
-        log.debug(f"[PERFIL] {autor}: {novo_resumo[:60]}")
+        log.debug(f"[PERFIL] {autor}: {novo_resumo[:80]}")
     except Exception as e:
         log.debug(f"[PERFIL] falha ao atualizar: {e}")
 
@@ -8052,7 +8127,7 @@ async def _on_message_impl(message: discord.Message):
                     if resp_conv:
                         await _parar_typing(_tp, _tt)
                         await _reagir_ou_responder(message, resp_conv)
-                        asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resp_conv))
+                        asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resp_conv, message.channel.id))
                         return
                 log.info(f"[DONO] chamando resposta_inicial_superior para {autor}")
                 resposta = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
@@ -8061,7 +8136,7 @@ async def _on_message_impl(message: discord.Message):
                 await _parar_typing(_tp, _tt)
             if resposta and not _e_resposta_generica(resposta):
                 await _reagir_ou_responder(message, resposta)
-                asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta))
+                asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta, message.channel.id))
             elif resposta:
                 await _digitar_e_enviar(message.channel, resposta, message)
             else:
@@ -8099,14 +8174,14 @@ async def _on_message_impl(message: discord.Message):
                     if resp_conv:
                         await _parar_typing(_tp, _tt)
                         await _reagir_ou_responder(message, resp_conv)
-                        asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resp_conv))
+                        asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resp_conv, message.channel.id))
                         return
                 resposta = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
             finally:
                 await _parar_typing(_tp, _tt)
             if resposta and not _e_resposta_generica(resposta):
                 await _reagir_ou_responder(message, resposta)
-                asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta))
+                asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta, message.channel.id))
             elif resposta:
                 await _digitar_e_enviar(message.channel, resposta, message)
         elif not tratado:
@@ -8124,7 +8199,7 @@ async def _on_message_impl(message: discord.Message):
                 await _parar_typing(_tp, _tt)
             if resposta and not _e_resposta_generica(resposta):
                 await _reagir_ou_responder(message, resposta)
-                asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta))
+                asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta, message.channel.id))
             elif resposta:
                 await _digitar_e_enviar(message.channel, resposta, message)
         return  # mods nunca são punidos
@@ -8198,16 +8273,24 @@ async def _on_message_impl(message: discord.Message):
                     itens.append(f"{partes[0]} (regra número {num})")
                 corpo = f"por se referir de {' e '.join(itens)}, conforme os termos em {CANAL_REGRAS()}"
 
+            _aviso_1 = await _ia_curta(
+                f"Avisar que mensagem foi removida por infração. Motivo: {corpo}. "
+                "Primeira vez — tom direto mas não agressivo, sem template burocrático.",
+                contexto=f"membro: {message.author.display_name}",
+                max_tokens=60,
+            )
             await message.channel.send(
-                f"Ei {message.author.mention}, sua mensagem foi removida {corpo}. "
-                f"Isso fica esclarecido só essa vez, caso se repita mais duas vezes, serão tomadas providências."
+                f"{message.author.mention} {_aviso_1 or f'mensagem removida — {corpo}.'}"
             )
         else:
-            motivo_texto = "pelo mesmo motivo" if mesmo_motivo else f"por outro motivo ({categoria_atual})"
+            _motivo_ctx = "mesmo motivo" if mesmo_motivo else f"motivo diferente: {categoria_atual}"
+            _aviso_2 = await _ia_curta(
+                f"Avisar que é a {count}ª infração, por {_motivo_ctx}. Próxima: silenciamento. Tom firme, sem clichê.",
+                contexto=f"membro: {message.author.display_name}",
+                max_tokens=60,
+            )
             await message.channel.send(
-                f"Ei {message.author.mention}, você está acumulando infrações, essa é a {count}ª {motivo_texto}, "
-                f"por isso a mensagem continua sendo anulada. Na próxima, você será silenciado temporariamente. "
-                f"Caso persista, serão tomadas medidas drásticas e moderativas sobre seu paradeiro."
+                f"{message.author.mention} {_aviso_2 or f'{count}ª infração — próxima resulta em silenciamento.'}"
             )
 
         return
@@ -8240,7 +8323,7 @@ async def _on_message_impl(message: discord.Message):
             if resposta:
                 log.info(f"Conversa: {autor}: {conteudo}")
                 await _reagir_ou_responder(message, resposta)
-                asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta))
+                asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta, message.channel.id))
                 return
         else:
             del conversas[user_id]
@@ -8264,7 +8347,7 @@ async def _on_message_impl(message: discord.Message):
                     await _parar_typing(_tp, _tt)
                 log.info(f"Claude cont: {autor}: {conteudo}")
                 await _reagir_ou_responder(message, resposta)
-                asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta))
+                asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta, message.channel.id))
                 return
             else:
                 # Conversa expirou  -  limpa histórico do canal para evitar drift
@@ -8296,7 +8379,7 @@ async def _on_message_impl(message: discord.Message):
         log.info(f"Menção de {autor}: {conteudo[:80]}")
         if resposta and not _e_resposta_generica(resposta):
             await _reagir_ou_responder(message, resposta)
-            asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta))
+            asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta, message.channel.id))
         elif resposta:
             await _digitar_e_enviar(message.channel, resposta, message)
         log.info(f"Respondido: {autor}")
