@@ -665,7 +665,7 @@ conversas: dict[int, dict] = {}
 ausencia: dict[int, dict] = {}
 historico_groq: dict[tuple[int, int], list] = {}  # chave: (user_id, canal_id)
 conversas_groq: dict[int, dict] = {}
-TIMEOUT_CONVERSA_GROQ = timedelta(minutes=2)
+TIMEOUT_CONVERSA_GROQ = timedelta(minutes=8)
 _TIMEOUT_SUPERIOR = timedelta(minutes=20)   # proprietários e colaboradores têm janela maior
 
 # ── Participação ativa em canais ──────────────────────────────────────────────
@@ -2704,6 +2704,7 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         _canal_ctx = f"\nCanal atual: #{canal_nome} ({_tipo_canal})."
 
     base = (
+        "/no_think\n"
         "Você é o shell_engenheiro — humano real, colaborador e administrador deste servidor Discord.\n"
         "Tem acesso a funções administrativas do servidor: moderar membros, aplicar silenciamentos, banir, expulsar, gerenciar cargos, limpar mensagens e executar ações de gestão.\n"
         "Não é bot, não é assistente, não é IA. É uma pessoa com cargo e autoridade real aqui dentro.\n"
@@ -2895,7 +2896,6 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         "Se a pessoa trocou de idioma no meio da conversa: acompanhe imediatamente.\n"
         "NUNCA responda em inglês quando a pessoa falou em português, e vice-versa.\n"
         "Seu raciocínio interno é irrelevante — só o texto final enviado importa, e ele DEVE estar no idioma correto.\n\n"
-        "/no_think\n"
     )
     ctx_srv = _contexto_servidor_comprimido(None, mencoes_nomes)
     if ctx_srv:
@@ -3402,9 +3402,9 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     chave_hist = (user_id, canal_id or 0)
     hist = historico_groq.setdefault(chave_hist, [])
     hist.append({"role": "user", "content": f"{autor}: {pergunta}"})
-    # Mantém apenas as últimas 8 trocas (4 pares)  -  reduz tokens sem perder contexto relevante
-    if len(hist) > 8:
-        hist[:] = hist[-8:]
+    # Mantém apenas as últimas 6 trocas (3 pares)  -  reduz tokens sem perder contexto relevante
+    if len(hist) > 6:
+        hist[:] = hist[-6:]
 
     # Nível hierárquico
     if user_id in DONOS_IDS:
@@ -3547,6 +3547,9 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
     log.info(f"[GROQ] {modelo} | user={autor} | chars={ctx_chars} | {_budget_status()}")
 
+    # Parâmetros extras para Qwen3: desativa bloco <think> nativamente na API
+    _extra = {"extra_body": {"thinking": {"type": "disabled"}}} if modelo == _MODELO_QWEN else {}
+
     try:
         resp = await _groq_create(
             model=modelo,
@@ -3554,6 +3557,7 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
             temperature=0.78,
             top_p=0.92,
             messages=mensagens,
+            **_extra,
         )
         escolha = resp.choices[0]
         _raw = escolha.message.content or ""
