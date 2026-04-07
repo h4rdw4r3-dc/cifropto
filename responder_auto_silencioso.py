@@ -3493,10 +3493,12 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
                  "como estou num servidor", "como estou aqui no servidor",
                  "não tenho acesso a sites", "não posso navegar",
                  "vou ler em um minuto", "vou assistir", "vou ver em seguida",
-                 "vou verificar", "vou checar", "deixa eu ver", "vou dar uma olhada")
+                 "vou verificar", "vou checar", "deixa eu ver", "vou dar uma olhada",
+                 "na ponta da língua", "na ponta da lingua", "me der um tempo",
+                 "não tenho essa informação na ponta", "nao tenho essa informacao na ponta")
         if any(t in texto.lower() for t in _leak):
             log.warning(f"[GROQ] vazamento de identidade, substituindo: {texto[:80]!r}")
-            texto = random.choice(["Não agora.", "Tô fora.", "Passa.", "Depois.", "Não tô aqui."])
+            texto = random.choice(["Não agora.", "Tô fora.", "Passa.", "Não tô aqui."])
         # Se o modelo foi cortado pelo limite de tokens, trunca na última frase completa
         if escolha.finish_reason == "length":
             ultimo_ponto = max(texto.rfind("."), texto.rfind("!"), texto.rfind("?"))
@@ -3536,8 +3538,9 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
                         "não consigo visualizar", "não tenho acesso ao conteúdo",
                         "como estou num servidor", "não posso navegar",
                         "vou ler em um minuto", "vou assistir", "vou verificar",
-                        "vou checar", "deixa eu ver", "vou dar uma olhada")):
-                    texto2 = random.choice(["Não agora.", "Tô fora.", "Passa.", "Depois."])
+                        "vou checar", "deixa eu ver", "vou dar uma olhada",
+                        "na ponta da língua", "na ponta da lingua", "me der um tempo")):
+                    texto2 = random.choice(["Não agora.", "Tô fora.", "Passa."])
                 if escolha2.finish_reason == "length":
                     ult = max(texto2.rfind("."), texto2.rfind("!"), texto2.rfind("?"))
                     if ult > 0:
@@ -8748,6 +8751,14 @@ async def _on_message_impl(message: discord.Message):
                         if tratado_ia:
                             return
                         _tp, _tt = await _iniciar_typing_antes(message.channel)
+                # Queries factuais do servidor: usa dados reais antes de cair no Groq
+                if message.guild:
+                    resp_direta = await query_servidor_direto(message.guild, message.content, message.author.id)
+                    if resp_direta:
+                        await _parar_typing(_tp, _tt)
+                        await _reagir_ou_responder(message, resp_direta)
+                        asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resp_direta, message.channel.id))
+                        return
                 # Continua conversa ativa antes de cair em resposta_inicial_superior
                 estado_conv = conversas.get(user_id)
                 if estado_conv and (estado_conv.get("canal") is None or estado_conv["canal"] == message.channel.id):
