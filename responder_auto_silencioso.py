@@ -8647,16 +8647,36 @@ async def _on_message_impl(message: discord.Message):
             _ultima = ultima_interjeccao.get(_canal_id, datetime(1970, 1, 1, tzinfo=timezone.utc))
             _secs = (_agora - _ultima).total_seconds()
             _monitorado = _canal_id in canais_monitorados
-            # Canais monitorados: cooldown de 3min, chance máx 20% (era 55% — muito agressivo)
-            # Outros canais: cooldown de 8min, chance máx 8% (era 20%)
-            # Objetivo: o bot entra quando tem algo concreto a dizer, não por impulso
-            if _monitorado:
-                _chance = min(0.20, 0.05 + (_secs - 180) / 1800 * 0.15) if _secs > 180 else 0
-            else:
-                _chance = min(0.08, 0.02 + (_secs - 480) / 3600 * 0.06) if _secs > 480 else 0
-            if _chance > 0 and random.random() < _chance:
+
+            # ── Detecção de convite direto: dispara sempre, ignora cooldown ────
+            _txt_lower = message.content.lower()
+            _convite = bool(re.search(
+                r'\b(?:fala\s+a[ií]|cadê\s+voc[eê]s?|algu[eé]m\s+(?:vivo|a[ií]|online|acord)'
+                r'|t[aá]\s+(?:dormindo|morto|mudo|quieto)'
+                r'|e\s+a[ií]\s+(?:galera|pessoal|todos?|servidor|voc[eê]s?)'
+                r'|tagarela|animem?\s+o\s+(?:chat|servidor|galera)'
+                r'|(?:galera|pessoal|todos?)\s+(?:sumiu|cadê|onde\s+est[aá])'
+                r'|algu[eé]m\s+(?:fala|fale|responde|me\s+responde)'
+                r')\b',
+                _txt_lower
+            ))
+            if _convite and _secs > 15:
                 ultima_interjeccao[_canal_id] = _agora
                 asyncio.ensure_future(_interjetar_conversa(message))
+            else:
+                # Canais monitorados: cooldown 90s, chance máx 40%
+                # Outros canais de chat: cooldown 3min, chance máx 20%
+                # Detecta canais de conversa pelo nome automaticamente
+                _nome_canal = getattr(message.channel, "name", "")
+                _eh_chat = any(p in _nome_canal.lower() for p in ["chat", "geral", "testes", "teste", "off", "conversa", "papo"])
+                _monitorado = _monitorado or _eh_chat
+                if _monitorado:
+                    _chance = min(0.40, 0.10 + (_secs - 90) / 900 * 0.30) if _secs > 90 else 0
+                else:
+                    _chance = min(0.20, 0.05 + (_secs - 180) / 1800 * 0.15) if _secs > 180 else 0
+                if _chance > 0 and random.random() < _chance:
+                    ultima_interjeccao[_canal_id] = _agora
+                    asyncio.ensure_future(_interjetar_conversa(message))
 
     autor = message.author.display_name
     user_id = message.author.id
