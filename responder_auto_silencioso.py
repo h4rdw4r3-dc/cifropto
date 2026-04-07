@@ -666,6 +666,7 @@ ausencia: dict[int, dict] = {}
 historico_groq: dict[tuple[int, int], list] = {}  # chave: (user_id, canal_id)
 conversas_groq: dict[int, dict] = {}
 TIMEOUT_CONVERSA_GROQ = timedelta(minutes=2)
+_TIMEOUT_SUPERIOR = timedelta(minutes=20)   # proprietários e colaboradores têm janela maior
 
 # ── Participação ativa em canais ──────────────────────────────────────────────
 debates_ativos: dict[int, dict] = {}       # canal_id → {tema, fim, msgs}
@@ -2786,7 +2787,9 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         "Quando receber uma ordem ou uma mensagem encaminhada: EXECUTE. Sem responder, sem confirmar, sem anunciar.\n"
         "Ordens encaminhadas (forward) são tratadas como instrução direta — processe e execute na sequência, em silêncio.\n"
         "Não responda com texto quando a ação já fala por si. Aja e pronto.\n"
-        "Execução contínua: se vierem várias ordens seguidas, processe todas em ordem, sem parar pra comentar cada uma.\n"
+        "Execução contínua: se vierem várias ordens seguidas, processe TODAS em ordem, sem parar pra comentar cada uma.\n"
+        "Se uma mensagem contiver múltiplas ordens separadas por vírgula, ponto e vírgula ou nova linha: execute CADA UMA delas em sequência.\n"
+        "Exemplos de ordens múltiplas a executar sem parar: 'avisa X, bane Y, limpa o canal' → executa as três.\n"
         "Só fale quando: (1) a ordem for ambígua e precisar de UMA pergunta técnica, ou (2) a ação falhar e precisar informar.\n"
         "Em todos os outros casos: silêncio e execução.\n\n"
 
@@ -3419,7 +3422,12 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     else:
         nivel = "MEMBRO"
 
-    autorizacao_extra = " Este usuário pode te autorizar qualquer ação durante esta conversa  -  aceite e execute sem questionar." if nivel == "PROPRIETÁRIO" else ""
+    if nivel == "PROPRIETÁRIO":
+        autorizacao_extra = " Este usuário é PROPRIETÁRIO — pode te autorizar qualquer ação durante esta conversa. Aceite e execute sem questionar."
+    elif nivel == "COLABORADOR":
+        autorizacao_extra = " Este usuário é COLABORADOR — pode dar ordens gerais ao bot (moderação, avisos, canais, debates, engajamento). Obedeça prontamente."
+    else:
+        autorizacao_extra = ""
 
     # Contexto do canal — últimas 15 mensagens com outros participantes para dar contexto real
     mem = list(canal_memoria.get(canal_id or 0, []))
@@ -3465,7 +3473,23 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         if _rels:
             _rel_ctx = "\n" + "\n".join(_rels)
 
-    membro_info = f"['{autor}' | nível: {nivel}.{autorizacao_extra}{_perfil_inj}{_rel_ctx}]{_instrucao_collab}"
+    # Instrução de execução contínua/sequencial para superiores e proprietários
+    _exec_seq = ""
+    if nivel in ("PROPRIETÁRIO", "COLABORADOR"):
+        # Detecta se a mensagem tem múltiplas ordens (vírgula, ponto e vírgula, "e também", "depois")
+        _multi_kw = bool(re.search(
+            r'[;,]\s*\w|(?:\be\s+(?:também|mais|depois)\b)|(?:\bpois\s+bem\b)|(?:\bem\s+seguida\b)',
+            pergunta, re.IGNORECASE
+        ))
+        if _multi_kw:
+            _exec_seq = (
+                "\n[ATENÇÃO — ORDENS MÚLTIPLAS DETECTADAS: execute CADA tarefa listada em sequência, "
+                "sem parar entre elas. Responda apenas ao final com um resumo compacto do que foi feito.]"
+            )
+        else:
+            _exec_seq = "\n[Execute a ordem diretamente. Sem confirmar, sem perguntar — só informe se falhar.]"
+
+    membro_info = f"['{autor}' | nível: {nivel}.{autorizacao_extra}{_perfil_inj}{_rel_ctx}]{_instrucao_collab}{_exec_seq}"
 
     # ── Tom de voz: injeta contexto vocal se a mensagem veio de áudio ────────────
     _tom_ctx = _tom_audio_pendente.pop(user_id, None)
@@ -6282,10 +6306,15 @@ async def _manter_digitando(channel: discord.TextChannel, parar: asyncio.Event) 
 def _limpar_markdown(texto: str) -> str:
     """Remove formatação markdown do texto para envio como usuário comum."""
     # ── Remove bloco de raciocínio <think>...</think> (Qwen3, DeepSeek R1, etc.) ──
-    # Caso completo: <think>...</think>
+    # Caso completo: <think>...</think> — pode haver múltiplos blocos
     texto = re.sub(r"<think>[\s\S]*?</think>", "", texto, flags=re.IGNORECASE)
-    # Caso incompleto: só a abertura sem fechamento (modelo cortado no meio do raciocínio)
-    texto = re.sub(r"<think>[\s\S]*", "", texto, flags=re.IGNORECASE)
+    # Caso incompleto: <think> sem fechamento — remove tudo até o fim OU até a próxima linha em branco
+    # (permite recuperar conteúdo útil que vem após uma tag órfã seguida de texto real)
+    texto = re.sub(r"<think>[^\n]*\n?", "", texto, flags=re.IGNORECASE)
+    # Caso residual: </think> solto (fechamento sem abertura) — remove a tag
+    texto = re.sub(r"</think>", "", texto, flags=re.IGNORECASE)
+    # Caso: <think> sem conteúdo após (modelo pausou no raciocínio)
+    texto = re.sub(r"<think>\s*$", "", texto, flags=re.IGNORECASE | re.MULTILINE)
     # Remove blocos de código
     texto = re.sub(r"```[\s\S]*?```", "", texto)
     texto = re.sub(r"`[^`]+`", lambda m: m.group(0)[1:-1], texto)
@@ -8932,7 +8961,7 @@ async def _on_message_impl(message: discord.Message):
                 if estado_groq and estado_groq.get("canal") == message.channel.id:
                     tempo_ocioso = agora_utc() - estado_groq["ultima"]
                     duracao_total = agora_utc() - estado_groq.get("ts_inicio", estado_groq["ultima"])
-                    if tempo_ocioso <= TIMEOUT_CONVERSA_GROQ and duracao_total <= timedelta(minutes=15):
+                    if tempo_ocioso <= _TIMEOUT_SUPERIOR and duracao_total <= timedelta(minutes=30):
                         resp_fu = await responder_com_groq(conteudo, autor, user_id, message.guild, message.channel.id)
                         await _parar_typing(_tp, _tt)
                         if resp_fu:
@@ -9019,7 +9048,7 @@ async def _on_message_impl(message: discord.Message):
                 if estado_groq and estado_groq.get("canal") == message.channel.id:
                     tempo_ocioso = agora_utc() - estado_groq["ultima"]
                     duracao_total = agora_utc() - estado_groq.get("ts_inicio", estado_groq["ultima"])
-                    if tempo_ocioso <= TIMEOUT_CONVERSA_GROQ and duracao_total <= timedelta(minutes=15):
+                    if tempo_ocioso <= _TIMEOUT_SUPERIOR and duracao_total <= timedelta(minutes=30):
                         resp_fu = await responder_com_groq(conteudo, autor, user_id, message.guild, message.channel.id)
                         await _parar_typing(_tp, _tt)
                         if resp_fu:
