@@ -6410,14 +6410,21 @@ _AVISOS_FLOOD = [
 
 
 async def _manter_digitando(channel: discord.TextChannel, parar: asyncio.Event) -> None:
-    """Background task: renova o indicador 'digitando...' até parar ser setado."""
+    """
+    Background task: mantém o indicador 'digitando...' visível até parar ser setado.
+    Usa POST direto na API REST — compatível com discord.py-self (self-bot / conta de usuário).
+    O indicador some após ~10s automaticamente, então renovamos a cada 8s.
+    """
+    url = f"{DISCORD_API}/channels/{channel.id}/typing"
     while not parar.is_set():
         try:
-            await channel.trigger_typing()
+            async with aiohttp.ClientSession() as _sess:
+                await _sess.post(url, headers=_headers_discord())
         except Exception:
             pass
+        # Aguarda 8s ou até parar ser setado (o indicador dura ~10s no Discord)
         try:
-            await asyncio.wait_for(asyncio.shield(parar.wait()), timeout=7.0)
+            await asyncio.wait_for(asyncio.shield(parar.wait()), timeout=8.0)
         except (asyncio.TimeoutError, asyncio.CancelledError):
             pass
 
