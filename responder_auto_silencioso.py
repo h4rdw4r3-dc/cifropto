@@ -4712,7 +4712,7 @@ def _get_regras_membro_str(nome_display: str) -> str:
     return "[REGRAS DO PROPRIETÁRIO SOBRE " + nome_display.upper() + ": " + " | ".join(regras) + "]"
 
 
-
+def _capturar_tom_override(user_id: int, conteudo: str) -> bool:
     """
     Detecta ordens de comportamento/tom e as salva em _tom_overrides.
     Retorna True se capturou uma override (não precisa continuar o fluxo normal).
