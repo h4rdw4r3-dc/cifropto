@@ -305,6 +305,28 @@ async def api_guild_info(guild_id: int) -> dict | None:
     return await api_get(f"/guilds/{guild_id}?with_counts=true")
 
 
+async def api_alterar_bio(nova_bio: str) -> bool:
+    """
+    Altera a bio/about me da conta propria via PATCH /users/@me.
+    Requer discord.py-self (self-bot). Limite: 190 chars.
+    Retorna True em sucesso, False em falha.
+    """
+    url = f"{DISCORD_API}/users/@me"
+    payload = {"bio": nova_bio[:190]}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.patch(url, headers=_headers_discord(), json=payload) as r:
+                if r.status == 200:
+                    log.info(f"[BIO] Bio atualizada: {nova_bio[:50]!r}")
+                    return True
+                body = await r.text()
+                log.warning(f"[BIO] Falha ao atualizar bio: HTTP {r.status} | {body[:120]}")
+                return False
+    except Exception as e:
+        log.error(f"[BIO] erro: {e}")
+        return False
+
+
 async def api_membros_todos(guild_id: int, limite: int = 1000) -> list[dict]:
     """Lista todos os membros via REST paginada."""
     return await api_get_paginado(f"/guilds/{guild_id}/members", limite)
@@ -2975,8 +2997,11 @@ async def _groq_create(**kwargs) -> object:
             _registrar_tokens(modelo, resp.usage.total_tokens)
         return resp
     except Exception as e:
-        if "429" in str(e):
-            _bloquear_modelo(modelo, _extrair_retry_after(str(e)))
+        err_str = str(e)
+        # 429 = rate limit por minuto | 413 = payload/tokens acima do limite TPM
+        # Ambos exigem bloqueio temporario do modelo para evitar loop de erros
+        if "429" in err_str or "413" in err_str:
+            _bloquear_modelo(modelo, _extrair_retry_after(err_str))
         raise
 
 
@@ -3256,13 +3281,26 @@ async def _processar_anexos_visuais(message: discord.Message, conteudo_real: str
 
         elif ct.startswith("video/") or nome.lower().endswith((".mp4", ".mov", ".avi", ".mkv")):
             tam_kb = att.size // 1024
-            # Instrução interna: não prometer assistir depois, não fingir ação futura
-            # O bot só pode reagir ao nome do arquivo, tamanho e contexto da conversa
-            descricoes.append(
-                f"[Vídeo recebido: {nome} ({tam_kb}KB). "
-                f"Você NÃO pode assistir. Reaja agora com base no nome do arquivo e no contexto da conversa. "
-                f"NUNCA diga 'vou ver', 'vou assistir', 'vou ler em um minuto' ou qualquer promessa futura.]"
-            )
+            # Groq Whisper aceita audio de arquivos de video (mp4/mov) diretamente.
+            # Tenta extrair a trilha de fala para dar contexto real ao modelo.
+            if tam_kb <= 25_000:  # limite de 25 MB da API Whisper
+                transcricao = await _transcrever_audio(att.url, nome)
+                if transcricao:
+                    descricoes.append(
+                        f"[Video {nome} ({tam_kb} KB) — transcricao do audio: {transcricao}]"
+                    )
+                else:
+                    descricoes.append(
+                        f"[Video {nome} ({tam_kb} KB) — sem fala detectada ou audio mudo. "
+                        f"Reaja com base no nome do arquivo e contexto da conversa. "
+                        f"NUNCA diga 'vou ver', 'vou assistir' ou qualquer promessa futura.]"
+                    )
+            else:
+                descricoes.append(
+                    f"[Video {nome} ({tam_kb} KB) — muito grande para transcrever (>25 MB). "
+                    f"Reaja com base no nome do arquivo e contexto da conversa. "
+                    f"NUNCA diga 'vou ver', 'vou assistir' ou qualquer promessa futura.]"
+                )
 
         else:
             tam_kb = att.size // 1024
@@ -4893,6 +4931,23 @@ async def processar_ordem(message: discord.Message) -> bool:
     elif cmd in ("servidor", "server") and any(p in conteudo.lower() for p in ["info", "resumo", "stats", "status"]):
         resultado = await api_resumo_servidor(guild)
         await message.channel.send(resultado)
+
+    # ── alterar bio / mudar bio  -  edita a bio da conta (apenas superiores) ──────
+    elif re.match(r'^(?:alterar|mudar|atualizar)\s+bio\b', conteudo.lower()):
+        if not eh_superior(message.author):
+            await message.channel.send("Sem permissao para isso.")
+            return True
+        m_bio = re.match(r'^(?:alterar|mudar|atualizar)\s+bio\s+(.*)', conteudo, re.IGNORECASE | re.DOTALL)
+        if not m_bio or not m_bio.group(1).strip():
+            await message.channel.send("Uso: `alterar bio <texto>`  (max 190 chars)")
+            return True
+        nova_bio = m_bio.group(1).strip()[:190]
+        ok = await api_alterar_bio(nova_bio)
+        if ok:
+            await message.channel.send(f"Bio atualizada: `{nova_bio}`")
+        else:
+            await message.channel.send("Falha ao atualizar bio. Verifique os logs.")
+        return True
 
     # ── info @membro  -  dados completos via REST ────────────────────────────────
     elif cmd == "info" and alvos:
@@ -7998,15 +8053,19 @@ async def _conectar_voz(canal: discord.VoiceChannel) -> tuple:
 
 
 async def _task_sumarizacao_diaria():
-    """Sumariza e limpa a memória vetorial uma vez por dia."""
+    """Sumariza e limpa a memoria vetorial.
+    Primeira execucao: 10 min apos startup (para DB estabilizar).
+    Ciclo seguinte: a cada 24 h.
+    """
+    await asyncio.sleep(600)   # 10 min inicial — evita sumarizar antes de ingestao
     while True:
-        await asyncio.sleep(86400)  # 24h
         if MEMORIA_OK and GROQ_API_KEY:
             try:
                 n = await _mem.sumarizar_e_limpar(GROQ_API_KEY)
-                log.info(f"[CEREBRO] Sumarização diária: {n} resumos gerados.")
+                log.info(f"[CEREBRO] Sumarizacao diaria: {n} resumos gerados.")
             except Exception as e:
-                log.warning(f"[CEREBRO] Falha na sumarização diária: {e}")
+                log.warning(f"[CEREBRO] Falha na sumarizacao diaria: {e}")
+        await asyncio.sleep(86400)  # 24 h ate proxima rodada
 
 
 @client.event
@@ -8778,19 +8837,31 @@ async def _on_message_impl(message: discord.Message):
                 log.info(f"[AUDIO] transcrição passiva em #{message.channel.name}: {_transcricao_passiva[:60]}")
 
         if _imagens_passivas:
-            # Descreve a imagem/vídeo e reage autonomamente
+            # Descreve a imagem e reage autonomamente; para videos, tenta transcrever o audio
             _att_img = _imagens_passivas[0]
             _ct_img = (_att_img.content_type or "").lower()
             if _ct_img.startswith("image/"):
                 _desc_img = await _descrever_imagem(_att_img.url, message.content or "")
+            elif (_ct_img.startswith("video/") or
+                  (_att_img.filename or "").lower().endswith((".mp4", ".mov", ".avi", ".mkv"))):
+                # Tenta transcrever audio do video via Groq Whisper (<=25 MB)
+                if _att_img.size <= 25 * 1024 * 1024:
+                    _trans_vid = await _transcrever_audio(_att_img.url, _att_img.filename or "")
+                    _desc_img = (
+                        f"[Video: {_att_img.filename}, {_att_img.size // 1024}KB — audio: {_trans_vid}]"
+                        if _trans_vid
+                        else f"[Video: {_att_img.filename}, {_att_img.size // 1024}KB — sem fala detectada]"
+                    )
+                else:
+                    _desc_img = f"[Video: {_att_img.filename}, {_att_img.size // 1024}KB — muito grande para transcrever]"
             else:
-                _desc_img = f"[Vídeo: {_att_img.filename}, {_att_img.size // 1024}KB]"
+                _desc_img = f"[Video: {_att_img.filename}, {_att_img.size // 1024}KB]"
             if _desc_img:
                 canal_memoria[message.channel.id].append({
                     "autor": message.author.display_name,
-                    "conteudo": f"[imagem/vídeo enviado]: {_desc_img[:200]}",
+                    "conteudo": f"[midia enviada]: {_desc_img[:200]}",
                 })
-                # Dispara reação autônoma em background
+                # Dispara reacao autonoma em background
                 asyncio.ensure_future(_reagir_midia_autonoma(message, _desc_img))
 
     # ── Memória do canal: registra toda mensagem humana ──────────────────────
@@ -9394,12 +9465,12 @@ while _tentativa < _MAX_TENTATIVAS:
     except discord.errors.HTTPException as e:
         if e.status == 429 or "1015" in str(e) or "Cloudflare" in str(e):
             _tentativa += 1
-            _espera = min(30 * (2 ** (_tentativa - 1)), 300)  # 30s, 60s, 120s... máx 5min
+            _espera = min(30 * (2 ** (_tentativa - 1)), 300)  # 30s, 60s, 120s... max 5min
             log.warning(f"[CLOUDFLARE] Rate limit detectado (tentativa {_tentativa}/{_MAX_TENTATIVAS}). "
                         f"Aguardando {_espera}s antes de reconectar...")
             _time.sleep(_espera)
-            # Reinicia o client para limpar estado HTTP
-            client = discord.Client()
+            # NAO recriar discord.Client() — apagaria todos os event handlers registrados
+            # via @client.event (on_ready, on_message, etc.). O mesmo objeto e retentado.
         else:
             log.error(f"[HTTP] Erro inesperado: {e}")
             _tentativa += 1

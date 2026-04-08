@@ -46,24 +46,24 @@ if TYPE_CHECKING:
     from memoria_vetorial import MemoriaVetorial
 
 
-# ── Mapeamento de eventos para emoji/descrição ────────────────────────────────
+# ── Mapeamento de eventos (texto técnico sem emoji — diretiva brutalista Shell) ─
 _EVENTOS = {
-    "push":              ("📦", "Push"),
-    "pull_request":      ("🔀", "Pull Request"),
-    "issues":            ("🐛", "Issue"),
-    "issue_comment":     ("💬", "Comentário"),
-    "create":            ("🌿", "Branch/Tag criado"),
-    "delete":            ("🗑️", "Branch/Tag deletado"),
-    "release":           ("🚀", "Release"),
-    "workflow_run":      ("⚙️", "Workflow"),
-    "check_run":         ("✅", "Check"),
-    "star":              ("⭐", "Star"),
-    "fork":              ("🍴", "Fork"),
-    "member":            ("👤", "Membro"),
-    "repository":        ("📁", "Repositório"),
-    "deployment":        ("🚢", "Deploy"),
-    "deployment_status": ("📊", "Status de deploy"),
-    "ping":              ("🏓", "Ping"),
+    "push":              ("[PUSH]",             "Push"),
+    "pull_request":      ("[PR]",               "Pull Request"),
+    "issues":            ("[ISSUE]",            "Issue"),
+    "issue_comment":     ("[COMMENT]",          "Comentario"),
+    "create":            ("[CREATE]",           "Branch/Tag criado"),
+    "delete":            ("[DELETE]",           "Branch/Tag deletado"),
+    "release":           ("[RELEASE]",          "Release"),
+    "workflow_run":      ("[WORKFLOW]",         "Workflow"),
+    "check_run":         ("[CHECK]",            "Check"),
+    "star":              ("[STAR]",             "Star"),
+    "fork":              ("[FORK]",             "Fork"),
+    "member":            ("[MEMBER]",           "Membro"),
+    "repository":        ("[REPO]",             "Repositorio"),
+    "deployment":        ("[DEPLOY]",           "Deploy"),
+    "deployment_status": ("[DEPLOY_STATUS]",    "Status de deploy"),
+    "ping":              ("[PING]",             "Ping"),
 }
 
 
@@ -196,15 +196,15 @@ class WebhookServer:
 
     async def _formatar_evento(self, evento: str, payload: dict) -> str:
         """Retorna string formatada para o Discord com base no tipo de evento."""
-        emoji, label = _EVENTOS.get(evento, ("🔔", evento.replace("_", " ").title()))
+        tag, label = _EVENTOS.get(evento, ("[EVENT]", evento.replace("_", " ").title()))
         repo = payload.get("repository", {})
         repo_nome = repo.get("full_name", "?")
         repo_url  = repo.get("html_url", "")
 
-        # ── Ping (teste de configuração) ──────────────────────────────────────
+        # ── Ping (teste de configuracao) ──────────────────────────────────────
         if evento == "ping":
             zen = payload.get("zen", "")
-            return f"🏓 **Webhook configurado!** `{repo_nome}`\n> _{zen}_"
+            return f"[PING] **Webhook configurado!** `{repo_nome}`\n> {zen}"
 
         # ── Push ──────────────────────────────────────────────────────────────
         if evento == "push":
@@ -236,25 +236,25 @@ class WebhookServer:
             ref      = payload.get("ref", "?")
             sender   = payload.get("sender", {}).get("login", "?")
             acao     = "criou" if evento == "create" else "deletou"
-            return f"{emoji} **{sender}** {acao} {ref_type} `{ref}` em **{repo_nome}**"
+            return f"{tag} **{sender}** {acao} {ref_type} `{ref}` em **{repo_nome}**"
 
         # ── Star ──────────────────────────────────────────────────────────────
         if evento == "star":
             sender = payload.get("sender", {}).get("login", "?")
             stars  = repo.get("stargazers_count", "?")
-            return f"⭐ **{sender}** deu star em **{repo_nome}** — total: {stars} ⭐"
+            return f"[STAR] **{sender}** deu star em **{repo_nome}** — total: {stars}"
 
         # ── Fork ──────────────────────────────────────────────────────────────
         if evento == "fork":
             forkee = payload.get("forkee", {})
             sender = payload.get("sender", {}).get("login", "?")
-            return f"🍴 **{sender}** fez fork de **{repo_nome}** → `{forkee.get('full_name', '?')}`"
+            return f"[FORK] **{sender}** fez fork de **{repo_nome}** -> `{forkee.get('full_name', '?')}`"
 
-        # ── Evento genérico ───────────────────────────────────────────────────
+        # ── Evento generico ───────────────────────────────────────────────────
         sender = payload.get("sender", {}).get("login", "?")
         action = payload.get("action", "")
         acao_str = f" ({action})" if action else ""
-        return f"{emoji} **{label}**{acao_str} em **{repo_nome}** por `{sender}`"
+        return f"{tag} **{label}**{acao_str} em **{repo_nome}** por `{sender}`"
 
     # ── Formatadores específicos ──────────────────────────────────────────────
 
@@ -265,12 +265,12 @@ class WebhookServer:
         compare_url = payload.get("compare", "")
 
         if not commits:
-            return f"📦 **Push** em `{ref}` de **{repo_nome}** por `{pusher}` (sem commits)"
+            return f"[PUSH] **Push** em `{ref}` de **{repo_nome}** por `{pusher}` (sem commits)"
 
         n = len(commits)
-        linhas = [f"📦 **Push** em `{ref}` de **{repo_nome}** por `{pusher}` — {n} commit(s)"]
+        linhas = [f"[PUSH] **Push** em `{ref}` de **{repo_nome}** por `{pusher}` -- {n} commit(s)"]
         if compare_url:
-            linhas[0] += f"\n🔗 {compare_url}"
+            linhas[0] += f"\n{compare_url}"
 
         # Lista até 5 commits
         for c in commits[:5]:
@@ -297,23 +297,23 @@ class WebhookServer:
         return texto
 
     async def _resumir_push(self, commits: list[dict]) -> str:
-        """Gera um resumo em linguagem natural das mudanças do push."""
-        msgs = [c.get("message", "").split("\n")[0] for c in commits]
-        # Limita o texto total enviado para evitar erro 413
-        texto_commits = "\n".join(f"- {m}" for m in msgs if m)[:2000]
-        
+        """Gera um resumo em linguagem natural das mudancas do push."""
+        msgs = [c.get("message", "").split("\n")[0][:120] for c in commits]
+        # Limite conservador: ~1 200 chars ≈ 300 tokens — margem segura para o prompt
+        # do sistema (~80 tokens) e resposta (60 tokens) dentro do TPM de 6 000 do modelo.
+        texto_commits = "\n".join(f"- {m}" for m in msgs if m)[:1200]
+
         if not texto_commits:
             return ""
         try:
             resp = await self._oai.chat.completions.create(
                 model="llama-3.1-8b-instant",
-                max_tokens=80,
+                max_tokens=60,
                 messages=[
                     {
                         "role": "system",
                         "content": (
-                            "Você resume commit messages de Git em 1 frase clara em português, "
-                            "descrevendo o que foi feito. Seja direto e técnico."
+                            "Resume commits Git em 1 frase objetiva em portugues. Seja direto."
                         ),
                     },
                     {"role": "user", "content": texto_commits},
@@ -336,22 +336,22 @@ class WebhookServer:
         body   = (pr.get("body") or "")[:200]
 
         emojis_acao = {
-            "opened":      "🟢 Aberto",
-            "closed":      "🔴 Fechado" + (" (merged)" if pr.get("merged") else ""),
-            "reopened":    "🔄 Reaberto",
-            "review_requested": "👀 Review solicitado",
-            "ready_for_review": "✅ Pronto para review",
-            "synchronize": "🔃 Atualizado",
+            "opened":      "ABERTO",
+            "closed":      "FECHADO" + (" (merged)" if pr.get("merged") else ""),
+            "reopened":    "REABERTO",
+            "review_requested": "REVIEW SOLICITADO",
+            "ready_for_review": "PRONTO PARA REVIEW",
+            "synchronize": "ATUALIZADO",
         }
         acao_str = emojis_acao.get(action, action)
 
         linhas = [
-            f"🔀 **PR #{numero}** {acao_str} — **{repo_nome}**",
+            f"[PR] **PR #{numero}** {acao_str} -- **{repo_nome}**",
             f"**{titulo}**",
-            f"`{head}` → `{base}` | por `{autor}`",
+            f"`{head}` -> `{base}` | por `{autor}`",
         ]
         if url:
-            linhas.append(f"🔗 {url}")
+            linhas.append(url)
         if body and action == "opened":
             linhas.append(f"_{body.strip()}_")
 
@@ -367,22 +367,22 @@ class WebhookServer:
         labels = ", ".join(lb.get("name", "") for lb in issue.get("labels", []))
 
         emojis_acao = {
-            "opened":   "🟢 Aberta",
-            "closed":   "🔴 Fechada",
-            "reopened": "🔄 Reaberta",
-            "assigned": "👤 Atribuída",
-            "labeled":  "🏷️ Rotulada",
+            "opened":   "ABERTA",
+            "closed":   "FECHADA",
+            "reopened": "REABERTA",
+            "assigned": "ATRIBUIDA",
+            "labeled":  "ROTULADA",
         }
         acao_str = emojis_acao.get(action, action)
 
         linhas = [
-            f"🐛 **Issue #{numero}** {acao_str} — **{repo_nome}**",
+            f"[ISSUE] **Issue #{numero}** {acao_str} -- **{repo_nome}**",
             f"**{titulo}** por `{autor}`",
         ]
         if labels:
-            linhas.append(f"🏷️ {labels}")
+            linhas.append(f"Labels: {labels}")
         if url:
-            linhas.append(f"🔗 {url}")
+            linhas.append(url)
 
         return "\n".join(linhas)
 
@@ -396,13 +396,13 @@ class WebhookServer:
         url     = comment.get("html_url", "")
 
         linhas = [
-            f"💬 **{autor}** comentou na **Issue #{numero}** — **{repo_nome}**",
+            f"[COMMENT] **{autor}** comentou na **Issue #{numero}** -- **{repo_nome}**",
             f"_{titulo}_",
         ]
         if corpo:
             linhas.append(f"> {corpo[:200]}")
         if url:
-            linhas.append(f"🔗 {url}")
+            linhas.append(url)
 
         return "\n".join(linhas)
 
@@ -415,14 +415,14 @@ class WebhookServer:
         pre     = release.get("prerelease", False)
         body    = (release.get("body") or "")[:300].strip()
 
-        tipo = "🧪 Pré-release" if pre else "🚀 Release"
+        tipo = "[PRE-RELEASE]" if pre else "[RELEASE]"
         linhas = [
-            f"{tipo} **{nome}** ({action}) — **{repo_nome}** por `{autor}`",
+            f"{tipo} **{nome}** ({action}) -- **{repo_nome}** por `{autor}`",
         ]
         if body:
             linhas.append(f"_{body[:200]}_")
         if url:
-            linhas.append(f"🔗 {url}")
+            linhas.append(url)
 
         return "\n".join(linhas)
 
@@ -435,20 +435,20 @@ class WebhookServer:
         url    = wf.get("html_url", "")
 
         status_emoji = {
-            "success":   "✅",
-            "failure":   "❌",
-            "cancelled": "⏹️",
-            "skipped":   "⏭️",
-            "in_progress": "🔄",
-            "queued":    "⏳",
+            "success":     "[OK]",
+            "failure":     "[FAIL]",
+            "cancelled":   "[CANCEL]",
+            "skipped":     "[SKIP]",
+            "in_progress": "[RUNNING]",
+            "queued":      "[QUEUED]",
         }
-        e = status_emoji.get(concl or status, "⚙️")
+        e = status_emoji.get(concl or status, "[WORKFLOW]")
 
-        linha = f"{e} **Workflow** `{nome}` — `{branch}` em **{repo_nome}**"
+        linha = f"{e} **Workflow** `{nome}` -- `{branch}` em **{repo_nome}**"
         if concl:
-            linha += f" → **{concl}**"
+            linha += f" -> **{concl}**"
         if url:
-            linha += f"\n🔗 {url}"
+            linha += f"\n{url}"
 
         return linha
 

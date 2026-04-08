@@ -325,7 +325,7 @@ class MemoriaVetorial:
                     SELECT DISTINCT canal_id, canal_nome
                     FROM mensagens
                     WHERE resumida = FALSE
-                      AND ts < NOW() - INTERVAL '48 hours'
+                      AND ts < NOW() - INTERVAL '12 hours'
                     """
                 )
         except Exception as e:
@@ -346,7 +346,7 @@ class MemoriaVetorial:
                         FROM mensagens
                         WHERE canal_id = $1
                           AND resumida = FALSE
-                          AND ts < NOW() - INTERVAL '48 hours'
+                          AND ts < NOW() - INTERVAL '12 hours'
                         ORDER BY ts ASC
                         LIMIT $2
                         """,
@@ -364,24 +364,24 @@ class MemoriaVetorial:
                 texto_raw = "\n".join(linhas)
 
                 # Chama IA para resumir
+                # Limite: 3 000 chars ≈ 750 tokens — seguro para llama-3.1-8b (TPM 6 000)
                 try:
                     resp = await resumidor.chat.completions.create(
                         model=modelo_sum,
-                        max_tokens=400,
+                        max_tokens=300,
                         messages=[
                             {
                                 "role": "system",
                                 "content": (
-                                    "Você é um assistente que resume conversas de Discord. "
-                                    "Gere um resumo conciso (máx. 300 palavras) preservando: "
-                                    "decisões tomadas, fatos importantes, sentimentos relevantes, "
-                                    "e quem disse o quê. Seja direto e factual."
+                                    "Voce resume conversas de Discord de forma concisa (max 250 palavras). "
+                                    "Preserve: decisoes tomadas, fatos importantes, quem disse o que. "
+                                    "Seja direto e factual."
                                 ),
                             },
                             {
                                 "role": "user",
                                 "content": (
-                                    f"Resumo do canal #{canal_nome}:\n\n{texto_raw[:6000]}"
+                                    f"Canal #{canal_nome}:\n\n{texto_raw[:3000]}"
                                 ),
                             },
                         ],
