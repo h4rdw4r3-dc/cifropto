@@ -3459,9 +3459,9 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     chave_hist = (user_id, canal_id or 0)
     hist = historico_groq.setdefault(chave_hist, [])
     hist.append({"role": "user", "content": f"{autor}: {pergunta}"})
-    # Mantém apenas as últimas 4 trocas (2 pares)  -  reduz tokens para evitar erro 413
-    if len(hist) > 4:
-        hist[:] = hist[-4:]
+    # Mantém apenas as últimas 3 trocas (3 pares user+assistant) — reduz tokens para evitar erro 413
+    if len(hist) > 6:
+        hist[:] = hist[-6:]
 
     # Nível hierárquico
     if user_id in DONOS_IDS:
@@ -3490,12 +3490,12 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     mem = list(canal_memoria.get(canal_id or 0, []))
     ctx_canal = ""
     if mem:
-        linhas_ctx = [f"{m['autor']}: {m['conteudo'][:100]}" for m in mem[-8:]]
+        linhas_ctx = [f"{m['autor']}: {m['conteudo'][:80]}" for m in mem[-5:]]
         ctx_canal = "\n=== CONVERSA RECENTE DO CANAL ===\n" + "\n".join(linhas_ctx) + "\n"
         # Detecta se há múltiplas pessoas falando (conversa em grupo)
-        autores_recentes = {m["autor"] for m in mem[-8:]}
+        autores_recentes = {m["autor"] for m in mem[-5:]}
         if len(autores_recentes) >= 3:
-            ctx_canal += f"[{len(autores_recentes)} pessoas estão conversando: {", ".join(list(autores_recentes)[:5])}]\n"
+            ctx_canal += f"[{len(autores_recentes)} pessoas: {', '.join(list(autores_recentes)[:4])}]\n"
 
     # Nomes mencionados na pergunta (para contexto comprimido relevante)
     _nomes_mencionados = [w for w in pergunta.split() if len(w) > 2 and w[0].isupper()]
@@ -3615,6 +3615,27 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         {"role": "system", "content": membro_info},
     ] + hist
 
+    # ── Anti-413: limita contexto a ~4500 tokens (~18000 chars) antes de chamar a API ──
+    _LIMITE_CHARS = 18000
+    ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
+    if ctx_chars > _LIMITE_CHARS:
+        # Passo 1: remove contexto vetorial do system
+        _sys_enxuto = _system_base.split("\n=== MEM")[0] if "=== MEM" in _system_base else _system_base
+        mensagens = [
+            {"role": "system", "content": _sys_enxuto},
+            {"role": "system", "content": membro_info},
+        ] + hist[-4:]
+        ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
+        log.warning(f"[GROQ] contexto reduzido (passo 1): {ctx_chars} chars")
+    if ctx_chars > _LIMITE_CHARS:
+        # Passo 2: apenas a ultima mensagem do usuário
+        mensagens = [
+            {"role": "system", "content": membro_info},
+            hist[-1],
+        ]
+        ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
+        log.warning(f"[GROQ] contexto reduzido (passo 2 emergência): {ctx_chars} chars")
+
     # Escolha do modelo: 8b-instant por padrão (500k TPD), 70b só quando budget disponível
     modelo = _escolher_modelo()
     ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
@@ -3679,11 +3700,13 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
                 continue
             try:
                 log.info(f"[GROQ] fallback para {_fb_modelo}")
+                # No fallback, usa contexto mínimo para evitar 413 no modelo alternativo
+                _msgs_fb = mensagens[-3:] if len(mensagens) > 3 else mensagens
                 resp2 = await _groq_create(
                     model=_fb_modelo,
-                    max_tokens=180,
+                    max_tokens=160,
                     temperature=0.6,
-                    messages=mensagens,
+                    messages=_msgs_fb,
                 )
                 escolha2 = resp2.choices[0]
                 _raw2 = escolha2.message.content or ""
@@ -6497,18 +6520,33 @@ async def _digitar_e_enviar(
     reply_msg: discord.Message | None = None,
 ) -> None:
     """
-    Exibe o indicador 'digitando...' por um tempo proporcional ao texto
-    antes de enviar — chamado APÓS a resposta já estar pronta.
+    Simula digitação humana real antes de enviar a mensagem.
+    Combina pausa de pensamento + velocidade variável (45-70 WPM) + ruído gaussiano.
     """
     palavras = max(len(texto.split()), 1)
-    # Delay proporcional ao texto — mais curto para respostas rápidas de chat
-    delay = min(0.3 + palavras * 0.04 + random.uniform(0.0, 0.2), 1.2)
-    delay = max(delay, 0.3)
+
+    # Pausa de pensamento antes de começar a digitar (varia por tamanho da resposta)
+    if palavras <= 3:
+        pausa_inicial = random.uniform(0.4, 1.2)   # resposta curtíssima — reação rápida
+    elif palavras <= 8:
+        pausa_inicial = random.uniform(0.8, 2.0)   # frase curta — pausa normal
+    else:
+        pausa_inicial = random.uniform(1.2, 3.0)   # resposta longa — "pensou" antes
+
+    # Velocidade de digitação: 45-70 WPM (humano médio a rápido)
+    wpm = random.uniform(45, 70)
+    tempo_digitando = (palavras / wpm) * 60  # segundos para digitar o texto
+
+    # Ruído gaussiano: ±15% de variação natural
+    delay_total = (pausa_inicial + tempo_digitando) * random.gauss(1.0, 0.12)
+
+    # Limites: mínimo 1s (nunca parece bot), máximo 7s (não frustra)
+    delay_total = max(1.0, min(delay_total, 7.0))
 
     parar = asyncio.Event()
     task = asyncio.ensure_future(_manter_digitando(channel, parar))
     try:
-        await asyncio.sleep(delay)
+        await asyncio.sleep(delay_total)
     finally:
         parar.set()
         task.cancel()
@@ -6594,7 +6632,8 @@ async def _enviar_em_sequencia(
         await _digitar_e_enviar(channel, bloco, reply_msg if primeiro else None)
         primeiro = False
         if len(blocos) > 1:
-            await asyncio.sleep(random.uniform(0.8, 1.8))
+            # Pausa entre mensagens consecutivas — humanos esperam 2-4s antes de continuar
+            await asyncio.sleep(random.uniform(2.0, 4.5))
 
 
 # ── Regex para detectar comandos de outros bots embutidos na resposta da IA ──
@@ -6685,6 +6724,8 @@ async def _reagir_ou_responder(
     _negativa = re.search(r'\b(nao|não|errado|discordo|negativo)\b', texto.lower())
 
     if _curta and _afirmativa and random.random() < 0.55:
+        # Delay humano antes de reagir — humanos não reagem instantaneamente
+        await asyncio.sleep(random.uniform(0.6, 1.8))
         try:
             await message.add_reaction("👍")
         except Exception:
@@ -6692,18 +6733,19 @@ async def _reagir_ou_responder(
                 await _digitar_e_enviar(message.channel, texto, message)
         # Envia comandos externos mesmo quando vira reação
         for _cmd in _cmds_externos:
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(random.uniform(0.8, 1.5))
             await message.channel.send(_cmd)
         return
 
     if _curta and _negativa and random.random() < 0.45:
+        await asyncio.sleep(random.uniform(0.6, 1.8))
         try:
             await message.add_reaction("👎")
         except Exception:
             if texto:
                 await _digitar_e_enviar(message.channel, texto, message)
         for _cmd in _cmds_externos:
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(random.uniform(0.8, 1.5))
             await message.channel.send(_cmd)
         return
 
