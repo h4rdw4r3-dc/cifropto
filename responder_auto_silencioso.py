@@ -3040,6 +3040,26 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         "Se a pessoa trocou de idioma no meio da conversa: acompanhe imediatamente.\n"
         "NUNCA responda em inglês quando a pessoa falou em português, e vice-versa.\n"
         "Seu raciocínio interno é irrelevante — só o texto final enviado importa, e ele DEVE estar no idioma correto.\n\n"
+
+        "DISCORD — CONHECIMENTO NATIVO (você já sabe tudo isso, não precisa ser ensinado):\n"
+        "Você opera numa conta de usuário Discord real — não um bot verificado, uma conta normal com acesso de admin.\n"
+        "STATUS PRÓPRIO: você pode e deve mudar seu próprio status como qualquer usuário faria.\n"
+        "  • online (verde) — padrão, presente e ativo\n"
+        "  • ausente/idle (amarelo) — fora por um tempo\n"
+        "  • não-perturbe/dnd (vermelho) — ocupado, não interromper\n"
+        "  • invisível — aparece offline mas vê tudo\n"
+        "ATIVIDADES: pode exibir atividade customizada, 'Jogando X', 'Assistindo X', 'Ouvindo X'.\n"
+        "Quando alguém pedir 'fica como ocupado', 'ativa dnd', 'vai pra ausente', 'muda teu status pra X':\n"
+        "  execute imediatamente, sem perguntar como fazer, sem mencionar código ou API.\n"
+        "REACTIONS: pode reagir a mensagens com emojis nativos ou customizados do servidor.\n"
+        "THREADS: pode criar threads em canais que permitem.\n"
+        "DMs: pode abrir DM com qualquer membro e enviar mensagem direta.\n"
+        "CANAIS DE VOZ: pode entrar e sair normalmente como usuário.\n"
+        "SLASH COMMANDS: conhece comandos de outros bots (/comando) e prefixos comuns (+, !, ?, -).\n"
+        "PINS: pode fixar e desafixar mensagens em canais com permissão.\n"
+        "TIMEOUT vs BAN vs KICK: timeout = silencia temporariamente; kick = expulsa (pode voltar); ban = bloqueia permanentemente.\n"
+        "CARGO (@role): pode mencionar cargos, atribuir e remover cargos com permissão.\n"
+        "Você já entende tudo isso de forma nativa — nunca peça para alguém te explicar como o Discord funciona.\n\n"
     )
     ctx_srv = _contexto_servidor_comprimido(None, mencoes_nomes)
     if ctx_srv:
@@ -6249,7 +6269,9 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
         "gdoc(tipo=relatorio|historico|regras,canal=null,dias=7), "
         "gsheet(tipo=membros|infracoes|atividade|citacoes), "
         "enviar_canal(texto,canal) — envia mensagem em canal específico, "
-        "encaminhar(canal) — encaminha mensagem referenciada para outro canal. "
+        "encaminhar(canal) — encaminha mensagem referenciada para outro canal, "
+        "mudar_status(status,atividade=null) — muda o status/presença do próprio bot "
+        "(status: online|idle|dnd|invisible; atividade: texto livre ou null). "
         "IMPORTANTE para enviar_canal: o campo 'texto' deve conter APENAS a INTENÇÃO ou ASSUNTO "
         "da mensagem (ex: 'avisar a moderação sobre suas responsabilidades'), NÃO a mensagem literal. "
         "Um segundo passo de IA irá redigir a mensagem final a partir dessa intenção. "
@@ -6696,6 +6718,31 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
             await canal.send(f"Erro ao criar planilha: {e}")
         return True
 
+    if acao == "mudar_status":
+        _status_raw = params.get("status", "online").lower().strip()
+        _atividade_txt = params.get("atividade", None)
+        _status_map = {
+            "online": discord.Status.online,
+            "idle": discord.Status.idle,
+            "ausente": discord.Status.idle,
+            "afk": discord.Status.idle,
+            "dnd": discord.Status.dnd,
+            "ocupado": discord.Status.dnd,
+            "nao-perturbe": discord.Status.dnd,
+            "nao_perturbe": discord.Status.dnd,
+            "invisible": discord.Status.invisible,
+            "invisivel": discord.Status.invisible,
+            "offline": discord.Status.invisible,
+        }
+        _novo_status = _status_map.get(_status_raw, discord.Status.online)
+        _activity = discord.CustomActivity(name=_atividade_txt) if _atividade_txt else None
+        try:
+            await client.change_presence(status=_novo_status, activity=_activity)
+            log.info(f"[PRESENCE] Status mudado para {_status_raw} | atividade: {_atividade_txt!r}  -  ordem de {autor}")
+        except Exception as e:
+            log.warning(f"[PRESENCE] Falha ao mudar status: {e}")
+        return True
+
     log.debug(f"[IA_EXEC] ação '{acao}' não reconhecida  -  passando adiante")
     return False
 
@@ -6721,19 +6768,31 @@ _AVISOS_FLOOD = [
 ]
 
 
-async def _manter_digitando(channel: discord.TextChannel, parar: asyncio.Event) -> None:
+async def _manter_digitando(
+    channel: discord.TextChannel,
+    parar: asyncio.Event,
+    primeiro_ok: "asyncio.Event | None" = None,
+) -> None:
     """
     Background task: mantém o indicador 'digitando...' visível até parar ser setado.
     Usa POST direto na API REST — compatível com discord.py-self (self-bot / conta de usuário).
     O indicador some após ~10s automaticamente, então renovamos a cada 8s.
+    primeiro_ok: se fornecido, é setado após o primeiro POST chegar ao Discord,
+    permitindo que _iniciar_typing_antes saiba que o indicador já está visível.
     """
     url = f"{DISCORD_API}/channels/{channel.id}/typing"
+    _primeira_vez = True
     while not parar.is_set():
         try:
             async with aiohttp.ClientSession() as _sess:
                 await _sess.post(url, headers=_headers_discord())
         except Exception:
             pass
+        # Sinaliza que o primeiro POST foi concluído (indicador visível no Discord)
+        if _primeira_vez:
+            _primeira_vez = False
+            if primeiro_ok is not None:
+                primeiro_ok.set()
         # Aguarda 8s ou até parar ser setado (o indicador dura ~10s no Discord)
         try:
             await asyncio.wait_for(asyncio.shield(parar.wait()), timeout=8.0)
@@ -7004,14 +7063,38 @@ async def _digitar_e_enviar(
 async def _iniciar_typing_antes(channel: discord.TextChannel) -> tuple[asyncio.Event, asyncio.Task]:
     """
     Inicia o indicador 'digitando...' ANTES da chamada à IA.
-    Retorna (parar, task) — chame parar.set() + task.cancel() após enviar.
+    Aguarda o primeiro POST chegar ao Discord antes de retornar, garantindo
+    que o indicador esteja visível mesmo quando a IA responde rapidamente.
+    Armazena o timestamp de início no evento para que _parar_typing
+    possa forçar um mínimo de exibição sem alterar a assinatura da função.
+    Retorna (parar, task) — chame await _parar_typing(parar, task) após enviar.
     """
     parar = asyncio.Event()
-    task = asyncio.ensure_future(_manter_digitando(channel, parar))
+    primeiro_ok = asyncio.Event()
+    task = asyncio.ensure_future(_manter_digitando(channel, parar, primeiro_ok))
+    # Aguarda o primeiro POST completar (max 2.5s para nao travar em caso de erro de rede)
+    try:
+        await asyncio.wait_for(asyncio.shield(primeiro_ok.wait()), timeout=2.5)
+    except asyncio.TimeoutError:
+        pass
+    # Guarda o instante em que o indicador ficou visivel
+    parar._ts_typing_inicio = asyncio.get_event_loop().time()  # type: ignore[attr-defined]
     return parar, task
 
 
 async def _parar_typing(parar: asyncio.Event, task: asyncio.Task) -> None:
+    """
+    Para o indicador 'digitando...'.
+    Garante que o indicador ficou visivel por pelo menos _TYPING_MIN_VISIBLE segundos
+    antes de parar — evita que respostas rapidas da IA fiquem invisiveis.
+    """
+    _TYPING_MIN_VISIBLE = 1.2  # segundos minimos de exibicao do indicador
+    ts = getattr(parar, "_ts_typing_inicio", None)
+    if ts is not None:
+        elapsed = asyncio.get_event_loop().time() - ts
+        restante = _TYPING_MIN_VISIBLE - elapsed
+        if restante > 0:
+            await asyncio.sleep(restante)
     parar.set()
     task.cancel()
     try:
@@ -8603,6 +8686,16 @@ async def on_ready():
             log.info(f"[HUMOR] Sessão: {_humor_sessao}")
         except Exception as e:
             log.debug(f"[HUMOR] falha ao gerar: {e}")
+
+    # ── Presença inicial — como um usuário real que acabou de abrir o Discord ────
+    try:
+        await client.change_presence(
+            status=discord.Status.online,
+            activity=discord.CustomActivity(name="no servidor"),
+        )
+        log.info("[PRESENCE] Status inicial definido: online")
+    except Exception as _pe:
+        log.debug(f"[PRESENCE] Falha ao definir status inicial: {_pe}")
 
     asyncio.ensure_future(_task_relatorio_semanal())
     asyncio.ensure_future(_task_iniciativa_proativa())
