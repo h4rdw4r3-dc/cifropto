@@ -3060,6 +3060,17 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         "TIMEOUT vs BAN vs KICK: timeout = silencia temporariamente; kick = expulsa (pode voltar); ban = bloqueia permanentemente.\n"
         "CARGO (@role): pode mencionar cargos, atribuir e remover cargos com permissão.\n"
         "Você já entende tudo isso de forma nativa — nunca peça para alguém te explicar como o Discord funciona.\n\n"
+
+        "BOTS DO SERVIDOR — INTERAÇÃO NATURAL:\n"
+        "Você enxerga os bots como ferramentas que já conhece, não como mistérios.\n"
+        "Quando fizer sentido usar um bot para completar uma tarefa, USE — sem anunciar, sem pedir permissão.\n"
+        "Ex: alguém pede pra tocar música → você dispara o comando de música do bot certo no canal.\n"
+        "Ex: precisar limpar mensagens rápido → você usa o comando de purge do bot presente.\n"
+        "Prefixos que você já sabe: Loritta(+), MEE6(!), Carl-bot(!), Dyno(?), Hydra(h!), Mudae($), Dank Memer(pls).\n"
+        "Se o bot não está no catálogo: tente ! como prefixo padrão.\n"
+        "Quando o bot responder com erro/rejeição: você lê, entende e age diferente na próxima vez.\n"
+        "Quando o bot responder com sucesso: você continua a conversa naturalmente, sem comentar o óbvio.\n"
+        "Slash commands (/): use quando o bot suporta e o comando natural é /. Ex: /play, /ban, /queue.\n\n"
     )
     ctx_srv = _contexto_servidor_comprimido(None, mencoes_nomes)
     if ctx_srv:
@@ -6250,10 +6261,15 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
         return None
 
     membros_txt = ""
+    bots_txt = ""
     if guild:
         membros_txt = ", ".join(
             m.display_name for m in guild.members if not m.bot
         )[:400]
+        _bots_guild = _descobrir_bots_guild(guild)
+        bots_txt = ", ".join(
+            f"{b['nome']}(prefixo:{b['prefixo']})" for b in _bots_guild
+        )[:300] if _bots_guild else "nenhum bot detectado"
 
     system = (
         "Você é um parser de intenção para bot Discord. "
@@ -6275,9 +6291,12 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
         "IMPORTANTE para enviar_canal: o campo 'texto' deve conter APENAS a INTENÇÃO ou ASSUNTO "
         "da mensagem (ex: 'avisar a moderação sobre suas responsabilidades'), NÃO a mensagem literal. "
         "Um segundo passo de IA irá redigir a mensagem final a partir dessa intenção. "
+        "usar_bot(bot,comando,args=null) — aciona um bot do servidor enviando o comando como mensagem isolada. "
+        "Use quando fizer sentido acionar outro bot naturalmente (limpar canal, música, etc.). "
         "NUNCA retorne acao banir, silenciar ou qualquer punição — punições requerem comando explícito. "
         "Se for pergunta, conversa, menção a raid/invasão/punição, retorne {\"acao\":\"conversa\"}. "
-        f"Membros do servidor: {membros_txt}."
+        f"Membros do servidor: {membros_txt}. "
+        f"Bots presentes: {bots_txt}."
     )
     try:
         resp = await _groq_create(
@@ -6743,6 +6762,27 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
             log.warning(f"[PRESENCE] Falha ao mudar status: {e}")
         return True
 
+    if acao == "usar_bot":
+        _bot_nome = params.get("bot", "").strip()
+        _bot_cmd  = params.get("comando", "").strip()
+        _bot_args = params.get("args", "").strip() if params.get("args") else ""
+        if not _bot_cmd:
+            await canal.send("Qual comando exato devo usar?")
+            return True
+        # Resolve prefixo: catálogo → guild → padrão "!"
+        _prefixo = _resolver_prefixo_bot(_bot_nome, guild)
+        # Se já veio com prefixo no campo comando, usa como está
+        if re.match(r'[+!?.$/-]', _bot_cmd) or re.match(r'[a-z]{1,2}!', _bot_cmd):
+            _cmd_final = f"{_bot_cmd} {_bot_args}".strip()
+        else:
+            _cmd_final = f"{_prefixo}{_bot_cmd} {_bot_args}".strip()
+        try:
+            await canal.send(_cmd_final)
+            log.info(f"[BOT_CMD] Enviado '{_cmd_final}' (bot={_bot_nome!r})  -  ordem de {autor}")
+        except Exception as e:
+            log.warning(f"[BOT_CMD] Falha ao enviar comando: {e}")
+        return True
+
     log.debug(f"[IA_EXEC] ação '{acao}' não reconhecida  -  passando adiante")
     return False
 
@@ -7162,42 +7202,110 @@ async def _enviar_em_sequencia(
             await asyncio.sleep(random.uniform(2.0, 4.5))
 
 
+# ── Catálogo de bots conhecidos: nome → prefixo, slash e comandos comuns ─────
+# Usado para: resolver prefixo automaticamente, injetar contexto na IA,
+# e sugerir comandos sem que o usuário precise especificar.
+_CATALOGO_BOTS: dict[str, dict] = {
+    # Bots de moderação/utilidade
+    "loritta":    {"prefixo": "+",  "slash": True,  "comandos": ["ban", "kick", "mute", "clear", "warn", "avatar", "userinfo", "serverinfo", "play", "skip", "stop"]},
+    "carl-bot":   {"prefixo": "!",  "slash": True,  "comandos": ["ban", "kick", "mute", "purge", "warn", "role", "tag", "embed", "reaction", "automod"]},
+    "mee6":       {"prefixo": "!",  "slash": True,  "comandos": ["ban", "kick", "mute", "clear", "warn", "rank", "leaderboard", "play", "skip", "stop", "queue"]},
+    "dyno":       {"prefixo": "?",  "slash": False, "comandos": ["ban", "kick", "mute", "clean", "warn", "note", "announce", "role"]},
+    "wick":       {"prefixo": "w!",  "slash": True,  "comandos": ["ban", "kick", "mute", "warn", "lockdown", "nuke"]},
+    "hydra":      {"prefixo": "h!",  "slash": True,  "comandos": ["play", "skip", "stop", "queue", "volume", "pause", "resume", "loop", "shuffle", "nowplaying"]},
+    "groovy":     {"prefixo": "-",  "slash": False, "comandos": ["play", "skip", "stop", "queue", "volume", "pause", "resume"]},
+    "rythm":      {"prefixo": "!",  "slash": False, "comandos": ["play", "skip", "stop", "queue", "pause", "resume", "loop"]},
+    "jockiemusic":{"prefixo": "j!",  "slash": True, "comandos": ["play", "skip", "stop", "queue", "volume", "loop", "pause", "resume", "shuffle"]},
+    "vexera":     {"prefixo": ".",  "slash": False, "comandos": ["ban", "kick", "mute", "clean", "warn", "rank"]},
+    "mudae":      {"prefixo": "$",  "slash": False, "comandos": ["w", "wa", "wg", "mm", "dk", "daily", "rolls", "rolls2", "rt"]},
+    "dank memer": {"prefixo": "pls", "slash": True, "comandos": ["beg", "fish", "hunt", "dig", "search", "crime", "rob", "bet", "gamble", "work", "balance", "inventory"]},
+    "nadeko":     {"prefixo": ".",  "slash": False, "comandos": ["ban", "kick", "mute", "clear", "warn", "play", "queue"]},
+    "pokecord":   {"prefixo": "p!", "slash": False, "comandos": ["catch", "pokemon", "trade", "duel", "release", "select", "hint"]},
+    "poketwo":    {"prefixo": "p!", "slash": False, "comandos": ["catch", "pokemon", "trade", "duel", "release", "select", "hint"]},
+    "tatsu":      {"prefixo": "t!",  "slash": True, "comandos": ["rank", "profile", "daily", "gift", "top"]},
+    "unbelievaboat": {"prefixo": "!", "slash": True, "comandos": ["balance", "daily", "work", "crime", "rob", "leaderboard", "pay"]},
+    "ticket tool":{"prefixo": "!",  "slash": True, "comandos": ["new", "close", "add", "remove", "transcript"]},
+    "serverstats":{"prefixo": "!",  "slash": True, "comandos": ["stats", "graph", "info"]},
+    "statbot":    {"prefixo": "!",  "slash": True, "comandos": ["stats", "graph", "info", "top"]},
+    "streamcord": {"prefixo": "!",  "slash": True, "comandos": ["notify", "edit", "remove", "list"]},
+    "burra":      {"prefixo": "+",  "slash": False, "comandos": ["ban", "kick", "mute", "clear", "warn", "userinfo"]},
+}
+
+def _resolver_prefixo_bot(nome_bot: str, guild: "discord.Guild | None" = None) -> str:
+    """
+    Resolve o prefixo de um bot pelo nome.
+    Prioridade: catálogo estático → padrão "!".
+    """
+    nome_l = nome_bot.lower().strip()
+    # Busca direta no catálogo
+    for chave, dados in _CATALOGO_BOTS.items():
+        if chave in nome_l or nome_l in chave:
+            return dados["prefixo"]
+    return "!"
+
+def _descobrir_bots_guild(guild: "discord.Guild | None") -> list[dict]:
+    """
+    Descobre bots presentes no servidor e cruza com o catálogo.
+    Retorna lista de {nome, prefixo, slash, comandos, member_id}.
+    """
+    if not guild:
+        return []
+    resultado = []
+    for membro in guild.members:
+        if not membro.bot or membro == client.user:
+            continue
+        nome = membro.display_name.lower()
+        dados_catalogo = None
+        for chave, dados in _CATALOGO_BOTS.items():
+            if chave in nome or nome.startswith(chave[:4]):
+                dados_catalogo = dados
+                break
+        resultado.append({
+            "nome": membro.display_name,
+            "id": membro.id,
+            "prefixo": dados_catalogo["prefixo"] if dados_catalogo else "!",
+            "slash": dados_catalogo.get("slash", False) if dados_catalogo else False,
+            "comandos": dados_catalogo.get("comandos", []) if dados_catalogo else [],
+        })
+    return resultado
+
+
 # ── Regex para detectar comandos de outros bots embutidos na resposta da IA ──
-# PROBLEMA QUE RESOLVE:
-#   A IA gera texto como "Vou tentar novamente. +clear 300."
-#   O Discord precisa receber "+clear 300" como mensagem ISOLADA para acionar
-#   outros bots (ex: Burra). Dentro de uma frase, o comando simplesmente não funciona.
-#
-# COMO FUNCIONA:
-#   Detecta padrões do tipo "+palavra" ou "+palavra número" que não fazem parte
-#   de URLs ou texto normal, extrai esses comandos e os envia separadamente.
+# Detecta todos os prefixos comuns: +cmd, !cmd, /cmd, ?cmd, .cmd, -cmd, $cmd, p!cmd
+# Não confunde com URLs (http://) nem markdown (*negrito*, _itálico_).
 _CMD_EXTERNO_RE = re.compile(
-    r'(?<![/\w])(\+[a-z][a-z0-9_-]*(?:\s+\d+)?)(?![/\w])',
+    r'(?<![\w/])([+!?.$-][a-z][a-z0-9_-]*(?:\s+[\w@#<>.,!?-]{0,40})?)(?=[\s\n,.]|$)',
+    re.IGNORECASE
+)
+# Padrões com prefixo de duas letras: p!, w!, h!, j!, t!
+_CMD_EXTERNO_RE2 = re.compile(
+    r'(?<![\w/])([a-z]{1,2}![a-z][a-z0-9_-]*(?:\s+[\w@#<>.,!?-]{0,40})?)(?=[\s\n,.]|$)',
     re.IGNORECASE
 )
 
 def _separar_comandos_externos(texto: str) -> tuple[str, list[str]]:
     """
-    Separa comandos de bots externos (padrão +cmd N) do texto conversacional.
+    Separa comandos de bots externos do texto conversacional.
+    Detecta todos os prefixos comuns: +, !, ?, ., $, -, /  e prefixos duplos (p!, w!, h!).
 
     Exemplo de entrada : "Vou tentar novamente. +clear 300."
     Exemplo de saída   : ("Vou tentar novamente.", ["+clear 300"])
 
-    Por que isso é necessário:
-      Quando a IA inclui "+clear 300" dentro de uma frase, o Discord envia
-      tudo como uma única mensagem. O bot externo (ex: Burra) só reage ao
-      comando se ele estiver sozinho na mensagem — sem texto antes ou depois.
-      Essa função separa os dois para que o bot possa enviar cada um no
-      momento certo.
+    Comandos de bots externos precisam ser enviados como mensagem ISOLADA —
+    dentro de uma frase o Discord não os reconhece como comando.
     """
     comandos: list[str] = []
+    _vistos: set[str] = set()
 
     def _capturar(m: re.Match) -> str:
         cmd = m.group(1).strip().rstrip('.,;')
-        comandos.append(cmd)
+        if cmd and cmd not in _vistos:
+            _vistos.add(cmd)
+            comandos.append(cmd)
         return ''
 
     texto_limpo = _CMD_EXTERNO_RE.sub(_capturar, texto)
+    texto_limpo = _CMD_EXTERNO_RE2.sub(_capturar, texto_limpo)
     # Remove espaços duplos e pontuação solta apenas se algum comando foi extraído
     texto_limpo = re.sub(r'\s{2,}', ' ', texto_limpo).strip()
     if comandos:
@@ -9288,13 +9396,22 @@ async def _on_message_impl(message: discord.Message):
                 r'|❌|⛔|🚫|não autorizado|permissão necessária|permission)',
                 _txt_bot, re.IGNORECASE
             ))
-            # Só armazena erros ou respostas curtas relevantes (evita flood de bot)
+            # Armazena erros E respostas curtas relevantes (confirmações, resultados)
+            _e_curta_relevante = len(_txt_bot) < 200 and not re.search(
+                r'(https?://|\*\*|embed|\u200b)', _txt_bot
+            )
             if _e_erro_bot:
                 canal_memoria[message.channel.id].append({
                     "autor": f"[BOT:{message.author.display_name}]",
                     "conteudo": f"ERRO/REJEIÇÃO: {_txt_bot[:200]}",
                 })
-                log.debug(f"[BOT] erro de {message.author.display_name} capturado: {_txt_bot[:60]}")
+                log.debug(f"[BOT] erro de {message.author.display_name}: {_txt_bot[:60]}")
+            elif _e_curta_relevante:
+                canal_memoria[message.channel.id].append({
+                    "autor": f"[BOT:{message.author.display_name}]",
+                    "conteudo": f"RESPOSTA: {_txt_bot[:200]}",
+                })
+                log.debug(f"[BOT] resposta de {message.author.display_name}: {_txt_bot[:60]}")
         return  # bots não passam pelo fluxo principal
 
     # Ignorar mensagens de outros bots com prefixo (ex: 7!afk, !cmd, /cmd)
