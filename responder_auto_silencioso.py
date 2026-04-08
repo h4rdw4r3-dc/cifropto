@@ -3421,9 +3421,9 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     chave_hist = (user_id, canal_id or 0)
     hist = historico_groq.setdefault(chave_hist, [])
     hist.append({"role": "user", "content": f"{autor}: {pergunta}"})
-    # Mantém apenas as últimas 6 trocas (3 pares)  -  reduz tokens sem perder contexto relevante
-    if len(hist) > 6:
-        hist[:] = hist[-6:]
+    # Mantém apenas as últimas 4 trocas (2 pares)  -  reduz tokens para evitar erro 413
+    if len(hist) > 4:
+        hist[:] = hist[-4:]
 
     # Nível hierárquico
     if user_id in DONOS_IDS:
@@ -3448,11 +3448,11 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     else:
         autorizacao_extra = ""
 
-    # Contexto do canal — últimas 15 mensagens com outros participantes para dar contexto real
+    # Contexto do canal — últimas 8 mensagens com outros participantes para dar contexto real
     mem = list(canal_memoria.get(canal_id or 0, []))
     ctx_canal = ""
     if mem:
-        linhas_ctx = [f"{m['autor']}: {m['conteudo'][:120]}" for m in mem[-15:]]
+        linhas_ctx = [f"{m['autor']}: {m['conteudo'][:100]}" for m in mem[-8:]]
         ctx_canal = "\n=== CONVERSA RECENTE DO CANAL ===\n" + "\n".join(linhas_ctx) + "\n"
         # Detecta se há múltiplas pessoas falando (conversa em grupo)
         autores_recentes = {m["autor"] for m in mem[-8:]}
@@ -3945,6 +3945,10 @@ INTENCOES = {
     "dessilenciar": [
         "dessilencia", "desmuta", "unmute", "desmutar", "libera a voz",
         "deixa falar", "pode falar", "dessilenciar",
+        "remove o castigo", "remova o castigo", "tira o castigo", "tirar o castigo",
+        "retira o castigo", "retirar o castigo", "libera o castigo", "acabar com o castigo",
+        "acaba com o castigo", "terminar o castigo", "termina o castigo",
+        "remove castigo", "tira castigo", "retira castigo",
     ],
     "banir": [
         "bane", "banir", "ban", "expulsa permanente", "bota pra fora de vez",
