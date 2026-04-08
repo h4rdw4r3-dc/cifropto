@@ -673,14 +673,7 @@ def carregar_dados():
         canais_monitorados.update(int(c) for c in dados.get("canais_monitorados", []))
         for k, v in dados.get("perfis_usuarios", {}).items():
             perfis_usuarios[int(k)] = v
-        # Relações entre membros
-        for k_str, v in dados.get("relacoes_membros", {}).items():
-            try:
-                partes = k_str.split(",")
-                chave = (int(partes[0]), int(partes[1]))
-                relacoes_membros[chave] = v
-            except Exception:
-                pass
+        # Relações entre membros (formato de chave: "uid1_uid2")
         for k, v in dados.get("relacoes_membros", {}).items():
             try:
                 u1, u2 = k.split("_")
@@ -8361,12 +8354,7 @@ async def _task_engajamento_membros():
                 if not membro:
                     del _novos_membros_pendentes[uid]
                     continue
-                # Verifica se o membro já falou em algum canal
-                _falou = any(
-                    uid in [m.id for m in canal_memoria.get(c.id, [])]
-                    for c in guild.text_channels
-                )
-                # Verificação simplificada — checa se tem mensagens no histórico de memória
+                # Verifica se o membro já falou em algum canal (checa histórico de memória)
                 _msgs_membro = []
                 for _cid, _deq in canal_memoria.items():
                     for _entry in _deq:
