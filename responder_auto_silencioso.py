@@ -687,6 +687,9 @@ def carregar_dados():
                 relacoes_membros[_chave_relacao(int(u1), int(u2))] = v
             except Exception:
                 pass
+        for k, v in dados.get("regras_membro", {}).items():
+            if isinstance(v, list):
+                _regras_membro[k] = v
         total = sum(len(v) for v in palavras_custom.values())
         log.info(f"{len(infracoes)} usuários, {total} palavras customizadas, "
                  f"{len(registro_entradas)} históricos de entrada carregados.")
@@ -708,6 +711,7 @@ def salvar_dados():
         "canais_monitorados": list(canais_monitorados),
         "perfis_usuarios": {str(k): v for k, v in perfis_usuarios.items()},
         "relacoes_membros": {f"{k[0]}_{k[1]}": v for k, v in relacoes_membros.items()},
+        "regras_membro": dict(_regras_membro),
     }
     try:
         dir_ = os.path.dirname(os.path.abspath(DADOS_PATH)) or "."
@@ -866,6 +870,12 @@ canal_memoria: dict[int, deque] = defaultdict(lambda: deque(maxlen=40))
 # Formato: {user_id: ["instrução 1", "instrução 2", ...]}
 _tom_overrides: dict[int, list[str]] = defaultdict(list)
 _MAX_TOM_OVERRIDES = 5  # máximo de overrides por usuário
+
+# Regras de moderação por membro-alvo (persistidas para o bot não punir sem autorização)
+# Formato: {member_display_name_lower: ["regra 1", "regra 2", ...]}
+# Exemplo: {"viadinhodaboca": ["não punir sem autorização prévia do proprietário"]}
+_regras_membro: dict[str, list[str]] = defaultdict(list)
+_MAX_REGRAS_MEMBRO = 10
 
 # ── Perfis de usuário persistidos ────────────────────────────────────────────
 # {user_id: {"resumo": str, "n": int, "atualizado": str, "episodios": list[str]}}
@@ -3049,6 +3059,19 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         base += ctx_srv + "\n\n"
         base += f"=== REGRAS DO SERVIDOR ===\n{REGRAS}\n"
 
+    # Regras do proprietário sobre membros específicos — injetadas sempre que relevantes
+    _todas_regras = []
+    for _nome_r, _lista_r in _regras_membro.items():
+        if _lista_r:
+            _todas_regras.append(f"  {_nome_r}: {' | '.join(_lista_r)}")
+    if _todas_regras:
+        base += (
+            "\n=== REGRAS DO PROPRIETÁRIO SOBRE MEMBROS ===\n"
+            "Estas regras foram definidas pelo proprietário e NUNCA podem ser ignoradas:\n"
+            + "\n".join(_todas_regras)
+            + "\n"
+        )
+
     # Perfil do usuário
     if user_id:
         perfil_txt = _contexto_usuario(user_id)
@@ -3634,6 +3657,17 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         if _rels:
             _rel_ctx = "\n" + "\n".join(_rels)
 
+    # Regras do proprietário sobre membros mencionados
+    _regras_ctx = ""
+    for _nm in _nomes_mencionados[:5]:
+        _r = _get_regras_membro_str(_nm)
+        if _r:
+            _regras_ctx += "\n" + _r
+    # Também checa o conteúdo atual por nomes de membros com regras ativas
+    for _nome_reg, _regras_lista in _regras_membro.items():
+        if _regras_lista and _nome_reg in pergunta.lower() and _nome_reg not in [n.lower() for n in _nomes_mencionados]:
+            _regras_ctx += "\n" + _get_regras_membro_str(_nome_reg)
+
     # Instrução de execução contínua/sequencial para superiores e proprietários
     _exec_seq = ""
     if nivel in ("PROPRIETÁRIO", "COLABORADOR"):
@@ -3656,7 +3690,7 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     if _overrides:
         _override_inj = "\n[ORDENS DE COMPORTAMENTO DESTE USUÁRIO: " + " | ".join(_overrides) + "]"
 
-    membro_info = f"['{autor}' | nível: {nivel}.{autorizacao_extra}{_perfil_inj}{_rel_ctx}]{_instrucao_collab}{_exec_seq}{_override_inj}"
+    membro_info = f"['{autor}' | nível: {nivel}.{autorizacao_extra}{_perfil_inj}{_rel_ctx}{_regras_ctx}]{_instrucao_collab}{_exec_seq}{_override_inj}"
 
     # ── Tom de voz: injeta contexto vocal se a mensagem veio de áudio ────────────
     _tom_ctx = _tom_audio_pendente.pop(user_id, None)
@@ -3725,31 +3759,42 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         {"role": "system", "content": membro_info},
     ] + hist
 
-    # ── Anti-413: limita contexto a ~4500 tokens (~18000 chars) antes de chamar a API ──
-    _LIMITE_CHARS = 18000
+    # ── Anti-413: limita contexto a ~5000 tokens (~20000 chars) antes de chamar a API ──
+    _LIMITE_CHARS = 20000
     ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
     if ctx_chars > _LIMITE_CHARS:
-        # Passo 1: remove contexto vetorial do system
+        # Passo 1: remove contexto vetorial e comprime contexto do servidor
         _sys_enxuto = _system_base.split("\n=== MEM")[0] if "=== MEM" in _system_base else _system_base
+        # Mantém apenas a seção de hierarquia/identidade + regras do servidor (sem lista de membros)
+        _sys_compacto = _sys_enxuto
+        if "=== CONTEXTO DO SERVIDOR ===" in _sys_enxuto:
+            _parte_antes = _sys_enxuto.split("=== CONTEXTO DO SERVIDOR ===")[0]
+            # Extrai só stats e cargos, sem lista completa de membros
+            _ctx_srv_bloco = _contexto_servidor_comprimido(None, _nomes_mencionados)
+            _ctx_srv_curto = "\n".join(l for l in _ctx_srv_bloco.split("\n")
+                                       if not l.strip().startswith("  ") or any(n.lower() in l.lower() for n in (_nomes_mencionados or [])))[:1200]
+            _sys_compacto = _parte_antes + f"=== CONTEXTO DO SERVIDOR (resumido) ===\n{_ctx_srv_curto}\n"
         mensagens = [
-            {"role": "system", "content": _sys_enxuto},
+            {"role": "system", "content": _sys_compacto},
             {"role": "system", "content": membro_info},
-        ] + hist[-4:]
+        ] + hist[-6:]
         ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
         log.warning(f"[GROQ] contexto reduzido (passo 1): {ctx_chars} chars")
     if ctx_chars > _LIMITE_CHARS:
-        # Passo 2: system mínimo de identidade + última mensagem
+        # Passo 2: system mínimo de identidade MAS preserva hist[-4:] para continuidade
         _SYSTEM_MINIMO = (
             "/no_think\n"
             "Você é o shell_engenheiro — humano real, colaborador e admin deste servidor Discord. "
             "Carioca direto, irônico, fala curto. Sem markdown, sem emojis, sem 'prezado'. "
-            "Máximo 1-2 frases. Nunca diga que é bot, assistente ou IA."
+            "Máximo 1-2 frases. Nunca diga que é bot, assistente ou IA.\n"
+            f"Usuário atual: '{autor}' — nível: {nivel}. "
+            "PROPRIETÁRIO tem autoridade máxima — execute sem questionar. "
+            "Se há ordens pendentes no histórico abaixo, execute-as agora."
         )
         mensagens = [
             {"role": "system", "content": _SYSTEM_MINIMO},
             {"role": "system", "content": membro_info},
-            hist[-1],
-        ]
+        ] + hist[-4:]  # preserva 4 últimas trocas para contexto de conversa
         ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
         log.warning(f"[GROQ] contexto reduzido (passo 2 emergência): {ctx_chars} chars")
 
@@ -4594,7 +4639,80 @@ async def _executar_geracao(message: discord.Message, params: dict):
         log.error(f"[WIZARD] _executar_geracao: {e}", exc_info=True)
 
 
-def _capturar_tom_override(user_id: int, conteudo: str) -> bool:
+def _capturar_regra_membro(conteudo: str, guild) -> bool:
+    """
+    Detecta ordens sobre como tratar membros específicos e persiste em _regras_membro.
+    Ex: "não castigue o viadinhodaboca sem minha autorização"
+        "pode punir o fulano normalmente"
+        "não bana o ciclano sem avisar"
+    Retorna True se capturou uma regra sobre membro específico.
+    """
+    import re as _re
+    msg = conteudo.lower().strip()
+
+    # Padrões de proteção/restrição de membro
+    _REGRA_MEMBRO_PATTERNS = [
+        # "não castigue/bana/puna/silencia X sem..."
+        (r'n[aã]o\s+(?:castigu[e]?[sr]?|ban[e]?[sr]?|pun[ai][sr]?|silenci[ae][sr]?|expuls[ae][sr]?|kick)\s+(?:o\s+|a\s+)?(\w+)\s+sem\s+(.{5,80})',
+         "não punir {nome} sem {cond}"),
+        # "não castigue/puna X em hipótese alguma"
+        (r'n[aã]o\s+(?:castigu[e]?[sr]?|ban[e]?[sr]?|pun[ai][sr]?|silenci[ae][sr]?|expuls[ae][sr]?|kick)\s+(?:mais\s+)?(?:o\s+|a\s+)?(\w+)\s+(?:em\s+hip[oó]tese\s+alguma|de\s+forma\s+alguma|nunca|jamais)',
+         "proibido punir {nome} em hipótese alguma — somente com autorização do proprietário"),
+        # "deixa o X em paz"
+        (r'deixa\s+(?:o\s+|a\s+)?(\w+)\s+(?:em\s+paz|de\s+lado|quieto[a]?)',
+         "não interferir com {nome} — deixar em paz"),
+        # "pode punir/castigar o X normalmente"
+        (r'pode\s+(?:punir|castigar|ban[ai]r?|silenci[ae]r?)\s+(?:o\s+|a\s+)?(\w+)\s+normalmente',
+         None),  # remove restrição
+    ]
+
+    for pattern, template in _REGRA_MEMBRO_PATTERNS:
+        m = _re.search(pattern, msg, _re.IGNORECASE)
+        if m:
+            nome_membro = m.group(1).lower().strip()
+            # Ignora palavras que não são nomes de membros
+            if nome_membro in ("ele", "ela", "voce", "você", "me", "mim", "nos", "nós",
+                               "todos", "alguem", "alguém", "mais", "isso"):
+                continue
+
+            # Verifica se o nome existe no servidor (opcional mas preferível)
+            membro_encontrado = None
+            if guild:
+                membro_encontrado = _buscar_membro_por_nome(guild, nome_membro)
+                if membro_encontrado:
+                    nome_membro = membro_encontrado.display_name.lower()
+
+            if template is None:
+                # Remove restrições existentes
+                if nome_membro in _regras_membro:
+                    del _regras_membro[nome_membro]
+                    log.info(f"[REGRA_MEMBRO] Restrições removidas para '{nome_membro}'")
+            else:
+                try:
+                    cond = m.group(2).strip() if m.lastindex >= 2 else ""
+                except IndexError:
+                    cond = ""
+                regra = template.format(nome=nome_membro, cond=cond).strip(" —")
+                lista = _regras_membro[nome_membro]
+                if regra not in lista:
+                    lista.append(regra)
+                    if len(lista) > _MAX_REGRAS_MEMBRO:
+                        lista.pop(0)
+                log.info(f"[REGRA_MEMBRO] Regra salva para '{nome_membro}': {regra!r}")
+            return True
+
+    return False
+
+
+def _get_regras_membro_str(nome_display: str) -> str:
+    """Retorna string com regras ativas para um membro específico, para injetar no contexto."""
+    regras = _regras_membro.get(nome_display.lower(), [])
+    if not regras:
+        return ""
+    return "[REGRAS DO PROPRIETÁRIO SOBRE " + nome_display.upper() + ": " + " | ".join(regras) + "]"
+
+
+
     """
     Detecta ordens de comportamento/tom e as salva em _tom_overrides.
     Retorna True se capturou uma override (não precisa continuar o fluxo normal).
@@ -7467,6 +7585,24 @@ ESCALA_SILENCIO = [
 ]
 
 async def silenciar(membro: discord.Member, canal, motivo: str):
+    # Verifica se há restrição do proprietário sobre este membro
+    _regras_ativas = _regras_membro.get(membro.display_name.lower(), [])
+    if _regras_ativas:
+        _tem_restricao = any(
+            "autoriza" in r or "hipótese alguma" in r or "hipotese alguma" in r or "proibido" in r
+            for r in _regras_ativas
+        )
+        if _tem_restricao:
+            log.warning(f"[REGRA] Punição automática de {membro.display_name} bloqueada por regra do proprietário: {_regras_ativas}")
+            canal_audit = membro.guild.get_channel(_canal_auditoria_id())
+            if canal_audit:
+                await _audit_ia(canal_audit, "punição bloqueada por regra do proprietário", {
+                    "membro": membro.display_name,
+                    "motivo_tentativa": motivo,
+                    "regra_ativa": " | ".join(_regras_ativas[:2]),
+                })
+            return
+
     mod = mencao_mod(membro.guild)
     vez = silenciamentos[membro.id]
     idx = min(vez, len(ESCALA_SILENCIO) - 1)
@@ -9416,6 +9552,11 @@ async def _on_message_impl(message: discord.Message):
         if _capturar_tom_override(message.author.id, conteudo):
             _ack = await _ia_curta(f"Confirme em 1 frase curta que recebeu a instrução de comportamento: {conteudo[:80]}", max_tokens=20)
             await message.channel.send(_ack or "Entendido.")
+            return
+        # Captura regras sobre membros específicos (ex: "não castigue X sem autorização")
+        if _capturar_regra_membro(conteudo, message.guild):
+            _ack = await _ia_curta(f"Confirme em 1 frase curta que anotou a instrução sobre o membro mencionado: {conteudo[:100]}", max_tokens=25)
+            await message.channel.send(_ack or "Anotado.")
             return
         tratado = await processar_ordem(message)
         log.info(f"[PROP] processar_ordem retornou {tratado}")
