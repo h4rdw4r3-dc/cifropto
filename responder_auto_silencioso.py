@@ -1460,7 +1460,8 @@ CONTEUDO_SEXUAL = [
     "shereka", "xereca", "xerereca", "xoroca", "chereca",
     "pica", "picao", "piroca", "piroco", "piru",
     "penis", "vagina", "clitoris", "glande",
-    "boquete", "chupada", "felacao", "siririca",
+    "siririca",
+    # "boquete", "felacao", "chupada" — termos descritivos; só punem com reforço explícito (nude/pack/pedido)
     "transar", "foder", "meter",
     "porno", "pornografia", "putaria", "safadeza",
     "nude", "nudes", "pack", "xvideos", "pornhub",
@@ -9679,10 +9680,10 @@ async def _on_message_impl(message: discord.Message):
                 corpo = f"por se referir de {' e '.join(itens)}, conforme os termos em {CANAL_REGRAS()}"
 
             _aviso_1 = await _ia_curta(
-                f"Avisar que mensagem foi removida por infração. Motivo: {corpo}. "
-                "Primeira vez — tom direto mas não agressivo, sem template burocrático.",
-                contexto=f"membro: {message.author.display_name}",
-                max_tokens=60,
+                f"Avisar que a mensagem foi removida. Motivo: {corpo}. "
+                "Tom direto, sem template burocrático, sem repetir o nome do membro (a menção já foi enviada separada), "
+                "máximo 1 frase curta no estilo Shell carioca.",
+                max_tokens=50,
             )
             await message.channel.send(
                 f"{message.author.mention} {_aviso_1 or f'mensagem removida — {corpo}.'}"
@@ -9690,9 +9691,9 @@ async def _on_message_impl(message: discord.Message):
         else:
             _motivo_ctx = "mesmo motivo" if mesmo_motivo else f"motivo diferente: {categoria_atual}"
             _aviso_2 = await _ia_curta(
-                f"Avisar que é a {count}ª infração, por {_motivo_ctx}. Próxima: silenciamento. Tom firme, sem clichê.",
-                contexto=f"membro: {message.author.display_name}",
-                max_tokens=60,
+                f"Avisar que é a {count}ª infração, motivo: {_motivo_ctx}. Próxima leva silenciamento. "
+                "Tom firme, sem clichê, sem repetir o nome do membro (menção já foi enviada separada), 1 frase.",
+                max_tokens=50,
             )
             await message.channel.send(
                 f"{message.author.mention} {_aviso_2 or f'{count}ª infração — próxima resulta em silenciamento.'}"
