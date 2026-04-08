@@ -2997,6 +2997,10 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         "2. Dados do servidor: o contexto abaixo tem TUDO que existe. Use-o.\n"
         "   Se não estiver no contexto: responda em UMA frase que não tem esse detalhe específico.\n"
         "3. Nomes de membros são PESSOAS. 'Hardware' é um usuário, não hardware de computador.\n"
+        "4. MENÇÕES REAIS: para mencionar alguém use <@ID> com o ID do contexto.\n"
+        "   Exemplo: Hardware (ID 1234) → escreva <@1234> para mencioná-lo.\n"
+        "   NUNCA escreva só @Hardware — o Discord não resolve @nome como menção real.\n"
+        "   Cargos: <@&ID_DO_CARGO>, canais: <#ID_DO_CANAL>.\n"
         "4. Quando não souber algo geral: UMA frase curta. Sem explicar por que, sem parágrafos.\n"
         "5. Tópicos sensíveis: decline em UMA frase seca. Sem explicação longa, sem listar alternativas.\n\n"
 
@@ -6840,6 +6844,44 @@ async def _manter_digitando(
             pass
 
 
+def _resolver_mencoes(texto: str, guild: "discord.Guild | None") -> str:
+    """
+    Converte @Nome → <@ID> no texto gerado pela IA.
+    A IA conhece os IDs no contexto, mas frequentemente escreve @nome
+    como texto plano. O Discord só processa menções reais no formato <@ID>.
+    Preserva menções já formatadas (<@ID>), @everyone e @here.
+    """
+    if not guild or '@' not in texto:
+        return texto
+
+    def _substituir(match: re.Match) -> str:
+        nome = match.group(1).strip()
+        nome_l = nome.lower()
+        # Busca exata primeiro, depois parcial
+        membro = next(
+            (m for m in guild.members
+             if m.display_name.lower() == nome_l or m.name.lower() == nome_l),
+            None,
+        )
+        if membro is None:
+            # Busca parcial: nome contido no display_name (ex: @Hard → Hardware)
+            membro = next(
+                (m for m in guild.members
+                 if nome_l in m.display_name.lower() and len(nome_l) >= 3),
+                None,
+            )
+        return f'<@{membro.id}>' if membro else match.group(0)
+
+    # Só substitui @ soltos (não precedidos por < que já é <@ID>)
+    # Ignora @everyone e @here
+    texto = re.sub(
+        r'(?<!<)@(?!everyone\b)(?!here\b)([A-Za-zÀ-ɏ][A-Za-zÀ-ɏ0-9_.\- ]{1,30})',
+        _substituir,
+        texto,
+    )
+    return texto
+
+
 def _limpar_markdown(texto: str) -> str:
     """Remove formatação markdown do texto para envio como usuário comum."""
     # ── Remove bloco de raciocínio <think>...</think> (Qwen3, DeepSeek R1, etc.) ──
@@ -7094,6 +7136,9 @@ async def _digitar_e_enviar(
     Humaniza o texto (abreviações, typos, divisão em partes) e envia
     cada parte com delay individual — como um humano digitando.
     """
+    # Resolve @Nome → <@ID> se possível (reply_msg carrega o guild)
+    if reply_msg and getattr(reply_msg, "guild", None):
+        texto = _resolver_mencoes(texto, reply_msg.guild)
     partes = _humanizar_texto(texto)
 
     for i, parte in enumerate(partes):
@@ -7330,6 +7375,11 @@ async def _reagir_ou_responder(
     texto = _limpar_markdown(texto)
     if not texto:
         return
+
+    # Resolve @Nome → <@ID> para que as menções sejam reais no Discord
+    _guild_msg = getattr(message, "guild", None)
+    if _guild_msg:
+        texto = _resolver_mencoes(texto, _guild_msg)
 
     # ── EXTRAI COMANDOS DE BOTS EXTERNOS EMBUTIDOS NA RESPOSTA ───────────────
     # Ex: "Vou tentar novamente. +clear 300." →
