@@ -11,7 +11,7 @@ Dependências:
 
 Variáveis de ambiente necessárias (lidas pelo bot):
     GITHUB_WEBHOOK_SECRET  — segredo configurado no GitHub repo > Settings > Webhooks
-    WEBHOOK_PORT           — porta HTTP onde escutar (padrão: 8080)
+    PORT                   — porta HTTP onde escutar (padrão: 8080)
 
 No GitHub, configure o Payload URL como:
     https://<seu-domínio-railway>.up.railway.app/github
@@ -299,7 +299,9 @@ class WebhookServer:
     async def _resumir_push(self, commits: list[dict]) -> str:
         """Gera um resumo em linguagem natural das mudanças do push."""
         msgs = [c.get("message", "").split("\n")[0] for c in commits]
-        texto_commits = "\n".join(f"- {m}" for m in msgs if m)
+        # Limita o texto total enviado para evitar erro 413
+        texto_commits = "\n".join(f"- {m}" for m in msgs if m)[:2000]
+        
         if not texto_commits:
             return ""
         try:
@@ -318,7 +320,8 @@ class WebhookServer:
                 ],
             )
             return resp.choices[0].message.content.strip()
-        except Exception:
+        except Exception as e:
+            log.warning(f"[WEBHOOK] Erro ao resumir com IA: {e}")
             return ""
 
     def _formatar_pr(self, payload: dict, repo_nome: str) -> str:
@@ -374,7 +377,7 @@ class WebhookServer:
 
         linhas = [
             f"🐛 **Issue #{numero}** {acao_str} — **{repo_nome}**",
-            f"**{titulo}**  por `{autor}`",
+            f"**{titulo}** por `{autor}`",
         ]
         if labels:
             linhas.append(f"🏷️ {labels}")
