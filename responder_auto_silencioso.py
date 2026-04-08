@@ -41,6 +41,25 @@ except ImportError:
     GOOGLE_DISPONIVEL = False
     log.warning("google-api-python-client não instalado  -  Google Docs/Sheets indisponível.")
 
+try:
+    from memoria_vetorial import MemoriaVetorial
+    MEMORIA_DISPONIVEL = True
+except ImportError:
+    MEMORIA_DISPONIVEL = False
+    log.warning("[CEREBRO] memoria_vetorial.py não encontrado  -  memória vetorial desativada.")
+
+try:
+    from github_webhook import WebhookServer
+    WEBHOOK_DISPONIVEL = True
+except ImportError:
+    WEBHOOK_DISPONIVEL = False
+    log.warning("[WEBHOOK] github_webhook.py não encontrado  -  webhook do GitHub desativado.")
+
+# ── Instâncias globais dos módulos opcionais ──────────────────────────────────
+_mem: "MemoriaVetorial | None" = None
+MEMORIA_OK: bool = False
+_webhook_server = None
+
 def agora_utc():
     return datetime.now(timezone.utc)
 
@@ -3537,8 +3556,24 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         if _ch:
             _canal_nome_ctx = _ch.name
 
+    # ── Contexto vetorial: busca memória de longo prazo relevante ────────────
+    _ctx_vetorial = ""
+    if MEMORIA_OK and pergunta:
+        try:
+            _ctx_vetorial = await _mem.buscar_contexto(pergunta)
+        except Exception as _e_mem:
+            log.debug(f"[CEREBRO] falha ao buscar contexto vetorial: {_e_mem}")
+
+    _system_base = system_com_contexto(
+        user_id=user_id,
+        mencoes_nomes=_nomes_mencionados,
+        canal_nome=_canal_nome_ctx,
+    )
+    if _ctx_vetorial:
+        _system_base += f"\n{_ctx_vetorial}\n"
+
     mensagens = [
-        {"role": "system", "content": system_com_contexto(user_id=user_id, mencoes_nomes=_nomes_mencionados, canal_nome=_canal_nome_ctx) + ctx_canal},
+        {"role": "system", "content": _system_base + ctx_canal},
         {"role": "system", "content": membro_info},
     ] + hist
 
@@ -7958,9 +7993,21 @@ async def _conectar_voz(canal: discord.VoiceChannel) -> tuple:
         return None, f"Erro ao conectar: {e}"
 
 
+async def _task_sumarizacao_diaria():
+    """Sumariza e limpa a memória vetorial uma vez por dia."""
+    while True:
+        await asyncio.sleep(86400)  # 24h
+        if MEMORIA_OK and GROQ_API_KEY:
+            try:
+                n = await _mem.sumarizar_e_limpar(GROQ_API_KEY)
+                log.info(f"[CEREBRO] Sumarização diária: {n} resumos gerados.")
+            except Exception as e:
+                log.warning(f"[CEREBRO] Falha na sumarização diária: {e}")
+
+
 @client.event
 async def on_ready():
-    global _humor_sessao
+    global _humor_sessao, _mem, MEMORIA_OK, _webhook_server
     carregar_config()
     carregar_dados()
     print(f"Conectado como {client.user}")
@@ -8000,6 +8047,49 @@ async def on_ready():
     asyncio.ensure_future(_task_iniciativa_proativa())
     asyncio.ensure_future(_task_accountability_equipe())
     asyncio.ensure_future(_task_engajamento_membros())
+
+    # ── Memória vetorial (PostgreSQL + pgvector) ──────────────────────────────
+    if MEMORIA_DISPONIVEL:
+        db_url = os.environ.get("DATABASE_URL", "")
+        if db_url:
+            try:
+                _mem = MemoriaVetorial(
+                    db_url=db_url,
+                    openai_key=os.environ.get("OPENAI_API_KEY", ""),
+                )
+                await _mem.inicializar()
+                MEMORIA_OK = True
+                log.info("[CEREBRO] Memória vetorial inicializada com sucesso.")
+            except Exception as e:
+                log.warning(f"[CEREBRO] Falha ao inicializar memória vetorial: {e}")
+        else:
+            log.warning("[CEREBRO] DATABASE_URL não definida  -  memória vetorial desativada.")
+
+    # ── Servidor de webhook do GitHub ─────────────────────────────────────────
+    if WEBHOOK_DISPONIVEL:
+        webhook_secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
+        webhook_port = int(os.environ.get("WEBHOOK_PORT", "8080"))
+        canal_audit = client.get_guild(SERVIDOR_ID)
+        canal_audit_ch = canal_audit.get_channel(CANAL_AUDITORIA_ID) if canal_audit else None
+        if webhook_secret:
+            try:
+                _webhook_server = WebhookServer(
+                    secret=webhook_secret,
+                    port=webhook_port,
+                    groq_key=GROQ_API_KEY,
+                    canal_discord=canal_audit_ch,
+                    mem=_mem if MEMORIA_OK else None,
+                )
+                asyncio.ensure_future(_webhook_server.iniciar())
+                log.info(f"[WEBHOOK] Servidor GitHub iniciado na porta {webhook_port}.")
+            except Exception as e:
+                log.warning(f"[WEBHOOK] Falha ao iniciar servidor de webhook: {e}")
+        else:
+            log.warning("[WEBHOOK] GITHUB_WEBHOOK_SECRET não definida  -  webhook desativado.")
+
+    # Task de sumarização diária da memória
+    if MEMORIA_OK:
+        asyncio.ensure_future(_task_sumarizacao_diaria())
 
 
 @client.event
@@ -8710,6 +8800,17 @@ async def _on_message_impl(message: discord.Message):
             "autor": message.author.display_name,
             "conteudo": _conteudo_mem,
         })
+
+        # ── Ingestão na memória vetorial (persistência de longo prazo) ────────
+        if MEMORIA_OK and message.guild and len(_conteudo_mem.strip()) >= 20:
+            asyncio.ensure_future(_mem.ingerir_mensagem(
+                canal_id=message.channel.id,
+                canal_nome=message.channel.name,
+                autor_id=message.author.id,
+                autor_nome=message.author.display_name,
+                conteudo=_conteudo_mem,
+                ts=message.created_at,
+            ))
 
     # ── Mapeamento de relações: detecta interações entre membros ─────────────
     # Quando um membro menciona outro ou responde a outro, registra a relação
