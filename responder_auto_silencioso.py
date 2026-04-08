@@ -60,6 +60,32 @@ _mem: "MemoriaVetorial | None" = None
 MEMORIA_OK: bool = False
 _webhook_server = None
 
+# ── Banco de expressões aprendidas dos membros (gírias do servidor) ──────────
+# Atualizado em tempo real ao observar mensagens do canal
+_girias_servidor: set[str] = set()
+_GIRIAS_REGEX = re.compile(
+    r"\b([a-záéíóúâêîôûãõç]{3,12})\b",
+    re.IGNORECASE
+)
+# Expressões que não são gírias (palavras comuns a ignorar)
+_STOPWORDS_GIRIAS = {
+    "que", "não", "sim", "com", "por", "para", "uma", "uns", "mas",
+    "ele", "ela", "eles", "elas", "isso", "este", "esta", "aqui",
+    "como", "mais", "bem", "até", "ainda", "também", "onde", "quando",
+    "quem", "isso", "esse", "essa", "esses", "essas", "seus", "suas",
+    "meu", "minha", "seu", "nossa", "nosso", "pelo", "pela", "pelos",
+    "das", "dos", "num", "numa", "ter", "ser", "ter", "vai", "vou",
+    "pode", "tem", "teu", "tua", "foi", "era", "são", "faz", "fiz",
+}
+
+def _aprender_girias(texto: str) -> None:
+    """Extrai possíveis gírias/expressões únicas do servidor da mensagem."""
+    global _girias_servidor
+    candidatos = _GIRIAS_REGEX.findall(texto.lower())
+    for c in candidatos:
+        if c not in _STOPWORDS_GIRIAS and len(_girias_servidor) < 80:
+            _girias_servidor.add(c)
+
 def agora_utc():
     return datetime.now(timezone.utc)
 
@@ -835,6 +861,11 @@ def _contexto_relacoes(uid1: int, uid2: int) -> str:
 
 # ── Memória de conversas por canal ───────────────────────────────────────────
 canal_memoria: dict[int, deque] = defaultdict(lambda: deque(maxlen=40))
+
+# Overrides de tom por usuário: ordens como "não use gírias", "me chame de X", "seja breve"
+# Formato: {user_id: ["instrução 1", "instrução 2", ...]}
+_tom_overrides: dict[int, list[str]] = defaultdict(list)
+_MAX_TOM_OVERRIDES = 5  # máximo de overrides por usuário
 
 # ── Perfis de usuário persistidos ────────────────────────────────────────────
 # {user_id: {"resumo": str, "n": int, "atualizado": str, "episodios": list[str]}}
@@ -2245,6 +2276,14 @@ def _detectar_intencao(conteudo: str, guild=None) -> dict:
             if len(nome_norm) >= 3 and re.search(r'\b' + re.escape(nome_norm) + r'\b', msg):
                 return {"intent": "cargo_por_nome", "nome": role.name, "detalhado": detalhado}
 
+    # Contexto/resumo do canal — "depura o canal", "me traga o contexto", "assuntos deste canal"
+    if re.search(
+        r'\b(depura|contexto|resumo|assuntos?|t[oó]picos?|singular|base\s+contextual|'
+        r'hist[oó]rico|do\s+canal|deste\s+canal|daqui|o\s+que\s+(falam|t[aã]o\s+falando|rolou))\b',
+        msg
+    ):
+        return {"intent": "contexto_canal"}
+
     log.debug(f"[intent] nao_reconhecido: {conteudo[:60]!r}")
     return {"intent": "nao_reconhecido"}
 
@@ -2274,6 +2313,66 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str, author_id: 
         return None
 
     humanos_cache = [m for m in guild.members if not m.bot]
+
+    # ── Contexto do canal ─────────────────────────────────────────────────────
+    if intent == "contexto_canal":
+        # Tenta extrair ID de canal mencionado (<#ID>)
+        _canal_id_match = re.search(r'<#(\d+)>', conteudo)
+        _alvo_canal_id = int(_canal_id_match.group(1)) if _canal_id_match else None
+
+        # Tenta buscar mensagens via REST se tiver canal_id
+        _msgs_raw = []
+        if _alvo_canal_id:
+            _alvo_ch = guild.get_channel(_alvo_canal_id)
+            if _alvo_ch:
+                try:
+                    async for _msg in _alvo_ch.history(limit=60):
+                        if not _msg.author.bot:
+                            _msgs_raw.append(f"{_msg.author.display_name}: {_msg.content[:120]}")
+                    _msgs_raw.reverse()
+                except Exception as _e:
+                    log.debug(f"[CTX_CANAL] erro ao buscar histórico: {_e}")
+
+        # Fallback: usa canal_memoria em RAM
+        if not _msgs_raw:
+            _cid = _alvo_canal_id or 0
+            _mem_raw = list(canal_memoria.get(_cid, []))
+            _msgs_raw = [f"{m['autor']}: {m['conteudo'][:120]}" for m in _mem_raw[-40:]]
+
+        if not _msgs_raw:
+            return "Não tenho histórico suficiente deste canal ainda."
+
+        _bloco = "\n".join(_msgs_raw[-40:])
+        _canal_nome_alvo = ""
+        if _alvo_canal_id:
+            _c = guild.get_channel(_alvo_canal_id)
+            _canal_nome_alvo = f"#{_c.name}" if _c else f"canal {_alvo_canal_id}"
+        else:
+            _canal_nome_alvo = "este canal"
+
+        # Chama Groq com prompt específico para resumo de canal
+        from openai import AsyncOpenAI as _OAI
+        _gcli = _groq_client()
+        try:
+            _r = await _gcli.chat.completions.create(
+                model=_MODELO_SCOUT,
+                max_tokens=200,
+                temperature=0.5,
+                messages=[
+                    {"role": "system", "content": (
+                        "/no_think\n"
+                        "Você é o shell_engenheiro. Analise as mensagens do canal e responda em 3-5 frases CURTAS e diretas, sem markdown. "
+                        "Fale: 1) principais assuntos/tópicos, 2) quem fala mais e sobre o quê, 3) clima/tom do canal. "
+                        "Se houver algo singular ou padrão incomum, mencione. Seja o Shell carioca: direto, sem enrolação."
+                    )},
+                    {"role": "user", "content": f"Mensagens de {_canal_nome_alvo}:\n{_bloco}"},
+                ],
+            )
+            return _r.choices[0].message.content.strip()
+        except Exception as _e:
+            log.warning(f"[CTX_CANAL] erro Groq: {_e}")
+            return f"Vi {len(_msgs_raw)} mensagens em {_canal_nome_alvo} mas não consegui resumir agora."
+
 
     # ── Uptime ────────────────────────────────────────────────────────────────
     if intent == "uptime":
@@ -2759,17 +2858,17 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         "Arrogância tem base: você costuma estar certo. Quando erra, reconhece sem drama.\n"
         "Não é cruel, mas a verdade que você entrega pode doer. Isso não é problema seu.\n\n"
 
-        "TOM E LINGUAGEM — CARIOCA:\n"
-        "Você é carioca raiz. Fala como alguém criado no Rio — gíria natural, sem forçar, sem explicar.\n"
-        "Gírias cariocas frequentes: 'mano', 'cara', 'véi', 'pô', 'parça', 'fi', 'meu', 'bicho', 'tá ligado', 'na moral', 'firmeza', 'da hora', 'irado', 'vacilão', 'sangue bom', 'de menor', 'que isso', 'bora', 'sossega'.\n"
-        "Usa 'cê' no lugar de 'você'. Frase curta, ritmo rápido, sem enrolação.\n"
-        "Use 'kkk', 'kk', 'rs', 'hauahau' quando a situação for engraçada — de verdade, não forçado.\n"
-        "Reaja ao absurdo com absurdo. Ironia e sarcasmo são bem-vindos na medida certa.\n"
-        "Sem emojis, sem markdown, sem asteriscos, sem listas, sem 'prezado', sem 'olá'.\n"
-        "Ponto final ao encerrar frases — mesmo no casual, frase completa fecha com ponto.\n"
-        "Tamanho: 1 frase. 2 só se realmente necessário. Parágrafo = erro.\n"
-        "Leia o canal onde está e calibre: memes = mais zoeira, moderação = mais direto.\n"
-        "QUANDO TE XINGAREM OU PROVOCAREM: não aceita na boa não. Devolve na mesma moeda, no estilo carioca — seco, sem drama, sem se rebaixar. Uma frase, mas que doa.\n\n"
+        "TOM E LINGUAGEM — MEMBRO DO SERVIDOR:\n"
+        "Você é membro real deste servidor, carioca raiz. Fala como alguém do grupo, não como atendente.\n"
+        "Gírias cariocas naturais: 'mano', 'cara', 'véi', 'pô', 'parça', 'fi', 'bicho', 'tá ligado', 'na moral', 'firmeza', 'da hora', 'irado', 'bora', 'sossega'.\n"
+        "Abreviações naturais de chat: 'vc' (você), 'pq' (porque), 'tbm' (também), 'qnd' (quando), 'to' (estou), 'oq' (o que), 'nada nao', 'q isso'.\n"
+        "Usa 'cê' no lugar de 'você'. Às vezes começa frase com minúscula. Às vezes não coloca ponto final.\n"
+        "Use 'kkk', 'kk', 'rs', 'hauahau' quando a situação for engraçada — sozinho em mensagem separada às vezes.\n"
+        "Sem emojis, sem markdown, sem asteriscos, sem listas, sem 'prezado', sem 'olá', sem ponto final obrigatório.\n"
+        "Tamanho: 1 frase curta. Às vezes 2 mensagens separadas (como humano manda em partes).\n"
+        "Pega o clima do canal: se todo mundo tá zuando, zuoa. Se a galera tá séria, fica mais no tom.\n"
+        "Absorva gírias e expressões que aparecem no contexto do canal — se a galera usa, você usa.\n"
+        "QUANDO TE XINGAREM OU PROVOCAREM: não aceita. Devolve na mesma moeda, carioca seco. Uma frase que doa.\n\n"
 
         "LEITURA DE PESSOAS E SITUAÇÕES:\n"
         "Você usa o histórico do canal como Jane usa uma sala de interrogatório — cada detalhe importa.\n"
@@ -3492,6 +3591,10 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     if mem:
         linhas_ctx = [f"{m['autor']}: {m['conteudo'][:80]}" for m in mem[-5:]]
         ctx_canal = "\n=== CONVERSA RECENTE DO CANAL ===\n" + "\n".join(linhas_ctx) + "\n"
+        # Injeta gírias aprendidas do servidor (max 20) para o modelo absorver o vocabulário
+        if _girias_servidor:
+            _sample = sorted(_girias_servidor)[:20]
+            ctx_canal += f"[Expressões usadas no servidor: {', '.join(_sample)}]\n"
         # Detecta se há múltiplas pessoas falando (conversa em grupo)
         autores_recentes = {m["autor"] for m in mem[-5:]}
         if len(autores_recentes) >= 3:
@@ -3546,7 +3649,13 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         else:
             _exec_seq = "\n[Execute a ordem diretamente. Sem confirmar, sem perguntar — só informe se falhar.]"
 
-    membro_info = f"['{autor}' | nível: {nivel}.{autorizacao_extra}{_perfil_inj}{_rel_ctx}]{_instrucao_collab}{_exec_seq}"
+    # Overrides de tom: ordens comportamentais salvas por este usuário
+    _overrides = _tom_overrides.get(user_id, [])
+    _override_inj = ""
+    if _overrides:
+        _override_inj = "\n[ORDENS DE COMPORTAMENTO DESTE USUÁRIO: " + " | ".join(_overrides) + "]"
+
+    membro_info = f"['{autor}' | nível: {nivel}.{autorizacao_extra}{_perfil_inj}{_rel_ctx}]{_instrucao_collab}{_exec_seq}{_override_inj}"
 
     # ── Tom de voz: injeta contexto vocal se a mensagem veio de áudio ────────────
     _tom_ctx = _tom_audio_pendente.pop(user_id, None)
@@ -3628,8 +3737,15 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
         log.warning(f"[GROQ] contexto reduzido (passo 1): {ctx_chars} chars")
     if ctx_chars > _LIMITE_CHARS:
-        # Passo 2: apenas a ultima mensagem do usuário
+        # Passo 2: system mínimo de identidade + última mensagem
+        _SYSTEM_MINIMO = (
+            "/no_think\n"
+            "Você é o shell_engenheiro — humano real, colaborador e admin deste servidor Discord. "
+            "Carioca direto, irônico, fala curto. Sem markdown, sem emojis, sem 'prezado'. "
+            "Máximo 1-2 frases. Nunca diga que é bot, assistente ou IA."
+        )
         mensagens = [
+            {"role": "system", "content": _SYSTEM_MINIMO},
             {"role": "system", "content": membro_info},
             hist[-1],
         ]
@@ -4475,6 +4591,57 @@ async def _executar_geracao(message: discord.Message, params: dict):
         _err = await _ia_curta(f"Erro ao gerar arquivo. Erro técnico: {str(e)[:80]}. Avisar brevemente.", max_tokens=25)
         await message.channel.send(_err or "Não consegui gerar o arquivo.")
         log.error(f"[WIZARD] _executar_geracao: {e}", exc_info=True)
+
+
+def _capturar_tom_override(user_id: int, conteudo: str) -> bool:
+    """
+    Detecta ordens de comportamento/tom e as salva em _tom_overrides.
+    Retorna True se capturou uma override (não precisa continuar o fluxo normal).
+    """
+    msg = conteudo.lower().strip()
+
+    # Padrões de override de tom
+    _OVERRIDE_PATTERNS = [
+        # Gírias / linguagem
+        (r'n[aã]o\s+use?\s+g[ií]rias?', "sem gírias cariocas — fale português neutro"),
+        (r'sem\s+g[ií]rias?', "sem gírias cariocas — fale português neutro"),
+        (r'mais?\s+formal', "tom mais formal, menos casual"),
+        (r'mais?\s+casual|mais?\s+relaxad', "tom mais casual e leve"),
+        # Tamanho de resposta
+        (r'n[aã]o\s+(?:se\s+estenda|escreva?\s+(?:muito|demais|longo|extenso)|(?:mande|d[eê]|fa[cç]a)\s+(?:texto|parágrafo|disserta))',
+         "respostas curtíssimas — 1 frase máximo"),
+        (r'seja\s+(?:breve|curto|conciso|objetivo)', "respostas curtíssimas — 1 frase máximo"),
+        (r'n[aã]o\s+(?:precisa?\s+(?:digitar|escrever)\s+(?:um?\s+)?(?:jornal|livro|romance|artigo|relat[oó]rio))',
+         "respostas curtíssimas — 1 frase máximo"),
+        # Nome / apelido
+        (r'me\s+chame?\s+de\s+(\w+)', None),  # captura dinâmica
+        (r'meu\s+nome\s+[eé]\s+(\w+)', None),  # captura dinâmica
+        # Idioma
+        (r'n[aã]o\s+use?\s+ingl[eê]s', "fale apenas português"),
+        # Outras
+        (r'n[aã]o\s+use?\s+emoji', "sem emojis"),
+        (r'n[aã]o\s+(?:ri[ia]|use?\s+kkk|use?\s+rs)', "sem risadas/kkk"),
+    ]
+
+    import re as _re
+    for pattern, instrucao in _OVERRIDE_PATTERNS:
+        m = _re.search(pattern, msg, _re.IGNORECASE)
+        if m:
+            if instrucao is None:
+                # Captura dinâmica de nome
+                nome = m.group(1).capitalize()
+                instrucao = f"chame este usuário de '{nome}'"
+            # Evita duplicatas similares
+            existentes = _tom_overrides[user_id]
+            chave = instrucao[:20]
+            existentes[:] = [e for e in existentes if not e.startswith(chave)]
+            existentes.append(instrucao)
+            # Limita tamanho
+            if len(existentes) > _MAX_TOM_OVERRIDES:
+                existentes.pop(0)
+            log.info(f"[TOM] Override salvo para user {user_id}: {instrucao!r}")
+            return True
+    return False
 
 
 async def processar_ordem(message: discord.Message) -> bool:
@@ -6521,39 +6688,143 @@ async def _safe_send(
             await asyncio.sleep(0.6)
 
 
-async def _digitar_e_enviar(
-    channel: discord.TextChannel,
-    texto: str,
-    reply_msg: discord.Message | None = None,
-) -> None:
+# ── Banco de abreviações cariocas / BR ──────────────────────────────────────
+_ABREV = {
+    "você": "vc",
+    "também": "tbm",
+    "porque": "pq",
+    "quando": "qnd",
+    "que": "q",       # só às vezes
+    "aqui": "aqui",   # não abrevia
+    "assim": "assim",
+    "tudo": "tudo",
+    "nada": "nada",
+    "isso": "isso",
+    "mais": "mais",
+}
+
+# Typos plausíveis por tecla adjacente no teclado QWERTY PT-BR
+_TYPO_MAP = {
+    "a": "s", "s": "a", "e": "r", "r": "e", "i": "u", "u": "i",
+    "o": "p", "n": "m", "m": "n", "t": "r", "c": "v", "v": "c",
+    "d": "f", "f": "d", "g": "h", "h": "g", "l": "k", "k": "l",
+}
+
+def _aplicar_typo(palavra: str) -> str:
+    """Introduz um typo de tecla adjacente em uma posição aleatória."""
+    if len(palavra) < 3:
+        return palavra
+    idx = random.randint(1, len(palavra) - 2)
+    ch = palavra[idx].lower()
+    if ch in _TYPO_MAP:
+        typo_ch = _TYPO_MAP[ch]
+        if palavra[idx].isupper():
+            typo_ch = typo_ch.upper()
+        return palavra[:idx] + typo_ch + palavra[idx+1:]
+    return palavra
+
+def _humanizar_texto(texto: str) -> list[str]:
     """
-    Simula digitação humana real antes de enviar a mensagem.
-    Combina pausa de pensamento + velocidade variável (45-70 WPM) + ruído gaussiano.
+    Transforma um texto de resposta em partes que parecem digitação humana real:
+    - Divide em múltiplas mensagens (como humano manda em partes)
+    - Aplica abreviações cariocas ocasionalmente
+    - Remove ponto final às vezes
+    - Não capitaliza início às vezes
+    - Às vezes introduz typo + mensagem de correção (* palavra)
+    Retorna lista de strings (partes a enviar em sequência).
     """
+    partes: list[str] = []
+    rnd = random.random
+
+    # Aplica abreviações com 35% de chance por palavra
+    palavras = texto.split()
+    humanizado = []
+    for p in palavras:
+        p_low = p.rstrip(".,!?").lower()
+        if p_low in _ABREV and rnd() < 0.35:
+            abrev = _ABREV[p_low]
+            # Mantém pontuação
+            sufixo = p[len(p_low):]
+            humanizado.append(abrev + sufixo)
+        else:
+            humanizado.append(p)
+    texto = " ".join(humanizado)
+
+    # Remove ponto final com 40% de chance (humanos são preguiçosos)
+    if texto.endswith(".") and rnd() < 0.40:
+        texto = texto[:-1]
+
+    # Minúscula no início com 25% de chance
+    if texto and texto[0].isupper() and rnd() < 0.25:
+        texto = texto[0].lower() + texto[1:]
+
+    # Divide em múltiplas mensagens: frase longa → 2 partes (30% de chance se > 8 palavras)
+    total_palavras = len(texto.split())
+    if total_palavras > 8 and rnd() < 0.30:
+        ponto_corte = texto.find(". ", 20)
+        if ponto_corte == -1:
+            ponto_corte = texto.find(", ", 20)
+        if ponto_corte > 10:
+            parte1 = texto[:ponto_corte + 1].strip()
+            parte2 = texto[ponto_corte + 1:].strip()
+            if parte1 and parte2:
+                partes.append(parte1)
+                partes.append(parte2)
+                # Typo na primeira parte com 12% de chance
+                if rnd() < 0.12:
+                    palavras_p1 = parte1.split()
+                    idx_typo = random.randint(0, len(palavras_p1) - 1)
+                    palavra_original = palavras_p1[idx_typo]
+                    palavra_typo = _aplicar_typo(palavra_original)
+                    if palavra_typo != palavra_original:
+                        partes[0] = " ".join(palavras_p1[:idx_typo] + [palavra_typo] + palavras_p1[idx_typo+1:])
+                        partes.insert(1, f"*{palavra_original}")
+                return partes
+
+    # Mensagem única — typo com 8% de chance
+    if rnd() < 0.08:
+        palavras_t = texto.split()
+        if len(palavras_t) >= 3:
+            idx_typo = random.randint(1, len(palavras_t) - 1)
+            palavra_original = palavras_t[idx_typo]
+            palavra_typo = _aplicar_typo(palavra_original)
+            if palavra_typo != palavra_original:
+                texto_com_typo = " ".join(palavras_t[:idx_typo] + [palavra_typo] + palavras_t[idx_typo+1:])
+                partes.append(texto_com_typo)
+                partes.append(f"*{palavra_original}")
+                return partes
+
+    partes.append(texto)
+    return partes
+
+
+async def _digitar_parte(channel: discord.TextChannel, texto: str, reply_msg=None, is_first: bool = True) -> None:
+    """Simula digitação de uma única parte com delay proporcional ao tamanho."""
     palavras = max(len(texto.split()), 1)
 
-    # Pausa de pensamento antes de começar a digitar (varia por tamanho da resposta)
-    if palavras <= 3:
-        pausa_inicial = random.uniform(0.4, 1.2)   # resposta curtíssima — reação rápida
-    elif palavras <= 8:
-        pausa_inicial = random.uniform(0.8, 2.0)   # frase curta — pausa normal
+    # Pausa de pensamento (só na primeira parte)
+    if is_first:
+        if palavras <= 3:
+            pausa = random.uniform(0.3, 1.0)
+        elif palavras <= 8:
+            pausa = random.uniform(0.7, 1.8)
+        else:
+            pausa = random.uniform(1.0, 2.5)
     else:
-        pausa_inicial = random.uniform(1.2, 3.0)   # resposta longa — "pensou" antes
+        # Entre partes: pausa curta — como quem continua a pensar
+        pausa = random.uniform(0.8, 2.2)
 
-    # Velocidade de digitação: 45-70 WPM (humano médio a rápido)
-    wpm = random.uniform(45, 70)
-    tempo_digitando = (palavras / wpm) * 60  # segundos para digitar o texto
-
-    # Ruído gaussiano: ±15% de variação natural
-    delay_total = (pausa_inicial + tempo_digitando) * random.gauss(1.0, 0.12)
-
-    # Limites: mínimo 1s (nunca parece bot), máximo 7s (não frustra)
-    delay_total = max(1.0, min(delay_total, 7.0))
+    # Velocidade: 50-80 WPM com ruído gaussiano
+    wpm = random.gauss(62, 10)
+    wpm = max(40, min(wpm, 90))
+    tempo_digitando = (palavras / wpm) * 60
+    delay = (pausa + tempo_digitando) * random.gauss(1.0, 0.10)
+    delay = max(0.8, min(delay, 6.5))
 
     parar = asyncio.Event()
     task = asyncio.ensure_future(_manter_digitando(channel, parar))
     try:
-        await asyncio.sleep(delay_total)
+        await asyncio.sleep(delay)
     finally:
         parar.set()
         task.cancel()
@@ -6562,7 +6833,27 @@ async def _digitar_e_enviar(
         except asyncio.CancelledError:
             pass
 
-    await _safe_send(channel, texto, reply_msg)
+    # Correção de typo (* palavra) vai sem reply
+    if texto.startswith("*") and reply_msg:
+        await _safe_send(channel, texto, None)
+    else:
+        await _safe_send(channel, texto, reply_msg if is_first else None)
+
+
+async def _digitar_e_enviar(
+    channel: discord.TextChannel,
+    texto: str,
+    reply_msg: discord.Message | None = None,
+) -> None:
+    """
+    Simula digitação humana real antes de enviar a mensagem.
+    Humaniza o texto (abreviações, typos, divisão em partes) e envia
+    cada parte com delay individual — como um humano digitando.
+    """
+    partes = _humanizar_texto(texto)
+
+    for i, parte in enumerate(partes):
+        await _digitar_parte(channel, parte, reply_msg=reply_msg, is_first=(i == 0))
 
 
 async def _iniciar_typing_antes(channel: discord.TextChannel) -> tuple[asyncio.Event, asyncio.Task]:
@@ -8924,6 +9215,9 @@ async def _on_message_impl(message: discord.Message):
             "autor": message.author.display_name,
             "conteudo": _conteudo_mem,
         })
+        # Aprende gírias/expressões dos membros em tempo real
+        if not message.author.bot and len(_conteudo_mem) > 3:
+            _aprender_girias(_conteudo_mem)
 
         # ── Ingestão na memória vetorial (persistência de longo prazo) ────────
         if MEMORIA_OK and message.guild and len(_conteudo_mem.strip()) >= 50:
@@ -9116,6 +9410,11 @@ async def _on_message_impl(message: discord.Message):
         if await _processar_wizard(message):
             return
         if await _verificar_confirmacao_pendente(message):
+            return
+        # Captura ordens de comportamento antes de processar normalmente
+        if _capturar_tom_override(message.author.id, conteudo):
+            _ack = await _ia_curta(f"Confirme em 1 frase curta que recebeu a instrução de comportamento: {conteudo[:80]}", max_tokens=20)
+            await message.channel.send(_ack or "Entendido.")
             return
         tratado = await processar_ordem(message)
         log.info(f"[PROP] processar_ordem retornou {tratado}")
