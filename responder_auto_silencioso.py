@@ -3560,7 +3560,7 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     _ctx_vetorial = ""
     if MEMORIA_OK and pergunta:
         try:
-            _ctx_vetorial = await _mem.buscar_contexto(pergunta)
+            _ctx_vetorial = await _mem.buscar_contexto(pergunta, top_k=2)
         except Exception as _e_mem:
             log.debug(f"[CEREBRO] falha ao buscar contexto vetorial: {_e_mem}")
 
@@ -8072,7 +8072,7 @@ async def on_ready():
     # ── Servidor de webhook do GitHub ─────────────────────────────────────────
     if WEBHOOK_DISPONIVEL:
         webhook_secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
-        webhook_port = int(os.environ.get("WEBHOOK_PORT", "8080"))
+        webhook_port = int(os.environ.get("PORT", "8080"))
         canal_audit = client.get_guild(SERVIDOR_ID)
         canal_audit_ch = canal_audit.get_channel(CANAL_AUDITORIA_ID) if canal_audit else None
         if webhook_secret:
@@ -8806,7 +8806,7 @@ async def _on_message_impl(message: discord.Message):
         })
 
         # ── Ingestão na memória vetorial (persistência de longo prazo) ────────
-        if MEMORIA_OK and message.guild and len(_conteudo_mem.strip()) >= 20:
+        if MEMORIA_OK and message.guild and len(_conteudo_mem.strip()) >= 50:
             asyncio.ensure_future(_mem.ingerir_mensagem(
                 canal_id=message.channel.id,
                 canal_nome=message.channel.name,

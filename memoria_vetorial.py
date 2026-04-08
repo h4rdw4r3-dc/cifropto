@@ -266,14 +266,14 @@ class MemoriaVetorial:
             if r["sim"] >= limiar:
                 data = r["ts"].strftime("%d/%m/%Y") if r["ts"] else "?"
                 resultados.append(
-                    f"[Resumo do canal #{r['canal_nome']} em {data}]\n{r['conteudo']}"
+                    f"[Resumo do canal #{r['canal_nome']} em {data}]\n{r['conteudo'][:400]}"
                 )
 
         for r in rows_msg:
             if r["sim"] >= limiar:
                 data = r["ts"].strftime("%d/%m %H:%M") if r["ts"] else "?"
                 resultados.append(
-                    f"[{r['autor_nome']} em {data}] {r['conteudo']}"
+                    f"[{r['autor_nome']} em {data}] {r['conteudo'][:400]}"
                 )
 
         if not resultados:
