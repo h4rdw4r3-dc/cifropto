@@ -3759,8 +3759,10 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         {"role": "system", "content": membro_info},
     ] + hist
 
-    # ── Anti-413: limita contexto a ~5000 tokens (~20000 chars) antes de chamar a API ──
-    _LIMITE_CHARS = 20000
+    # ── Anti-413: limita contexto antes de chamar a API ──────────────────────────
+    # llama-3.1-8b-instant: TPM = 6000 tokens ≈ 22000 chars (margem de segurança)
+    # Os outros modelos têm limites maiores, mas usamos o mesmo threshold conservador
+    _LIMITE_CHARS = 18000  # ~4500 tokens — margem segura abaixo do TPM de 6000 do 8b
     ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
     if ctx_chars > _LIMITE_CHARS:
         # Passo 1: remove contexto vetorial e comprime contexto do servidor
@@ -3797,6 +3799,19 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         ] + hist[-4:]  # preserva 4 últimas trocas para contexto de conversa
         ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
         log.warning(f"[GROQ] contexto reduzido (passo 2 emergência): {ctx_chars} chars")
+    if ctx_chars > _LIMITE_CHARS:
+        # Passo 3: emergência absoluta — system mínimo + apenas última mensagem do usuário
+        # Garante que nunca ultrapassa o TPM de 6000 tokens do modelo 8b
+        _SYSTEM_ULTRA = (
+            "/no_think\nVocê é shell_engenheiro — humano real, admin Discord. "
+            "Carioca direto, 1-2 frases, sem markdown, sem emojis.\n"
+            f"Usuário: '{autor}'."
+        )
+        mensagens = [
+            {"role": "system", "content": _SYSTEM_ULTRA},
+        ] + hist[-2:]  # apenas a última troca
+        ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
+        log.warning(f"[GROQ] contexto reduzido (passo 3 ultra-emergência): {ctx_chars} chars")
 
     # Escolha do modelo: 8b-instant por padrão (500k TPD), 70b só quando budget disponível
     modelo = _escolher_modelo()
@@ -3863,7 +3878,12 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
             try:
                 log.info(f"[GROQ] fallback para {_fb_modelo}")
                 # No fallback, usa contexto mínimo para evitar 413 no modelo alternativo
+                # Garante que o contexto do fallback também respeita o limite de chars
                 _msgs_fb = mensagens[-3:] if len(mensagens) > 3 else mensagens
+                _fb_chars = sum(len(m.get("content", "")) for m in _msgs_fb)
+                if _fb_chars > _LIMITE_CHARS:
+                    _msgs_fb = mensagens[-1:]  # última mensagem apenas
+                    log.warning(f"[GROQ] fallback contexto ultra-reduzido: {sum(len(m.get('content','')) for m in _msgs_fb)} chars")
                 resp2 = await _groq_create(
                     model=_fb_modelo,
                     max_tokens=160,
