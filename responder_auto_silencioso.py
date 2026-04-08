@@ -3091,10 +3091,22 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
 
 _groq: AsyncOpenAI | None = None
 
+# Semáforo: no máximo 2 requisições simultâneas ao Groq.
+# Sem isso, mensagens chegando em paralelo disparam múltiplas chamadas ao
+# mesmo modelo, esgotando o TPM em segundos e causando cascata de 429.
+_groq_sem = asyncio.Semaphore(2)
+
 def _groq_client() -> AsyncOpenAI:
     global _groq
     if _groq is None:
-        _groq = AsyncOpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+        # max_retries=0: desativa retries automáticos do SDK OpenAI.
+        # O bot já tem sua própria lógica de bloqueio/fallback por modelo.
+        # Retries do SDK amplificam 429 ao invés de resolvê-los.
+        _groq = AsyncOpenAI(
+            api_key=GROQ_API_KEY,
+            base_url="https://api.groq.com/openai/v1",
+            max_retries=0,
+        )
     return _groq
 
 
@@ -3113,19 +3125,20 @@ async def _groq_create(**kwargs) -> object:
         espera = int((bloqueado_ate - agora_utc()).total_seconds()) if bloqueado_ate else 60
         raise Exception(f"[BUDGET] {modelo} bloqueado localmente por mais {espera}s — sem chamada à API")
 
-    try:
-        resp = await _groq_client().chat.completions.create(**kwargs)
-        # Registro automático de tokens
-        if resp.usage:
-            _registrar_tokens(modelo, resp.usage.total_tokens)
-        return resp
-    except Exception as e:
-        err_str = str(e)
-        # 429 = rate limit por minuto | 413 = payload/tokens acima do limite TPM
-        # Ambos exigem bloqueio temporario do modelo para evitar loop de erros
-        if "429" in err_str or "413" in err_str:
-            _bloquear_modelo(modelo, _extrair_retry_after(err_str))
-        raise
+    async with _groq_sem:
+        try:
+            resp = await _groq_client().chat.completions.create(**kwargs)
+            # Registro automático de tokens
+            if resp.usage:
+                _registrar_tokens(modelo, resp.usage.total_tokens)
+            return resp
+        except Exception as e:
+            err_str = str(e)
+            # 429 = rate limit por minuto | 413 = payload/tokens acima do limite TPM
+            # Ambos exigem bloqueio temporario do modelo para evitar loop de erros
+            if "429" in err_str or "413" in err_str:
+                _bloquear_modelo(modelo, _extrair_retry_after(err_str))
+            raise
 
 
 async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80) -> str:
@@ -3818,8 +3831,9 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
     log.info(f"[GROQ] {modelo} | user={autor} | chars={ctx_chars} | {_budget_status()}")
 
-    # Parâmetros extras para Qwen3: desativa bloco <think> nativamente na API
-    _extra = {"extra_body": {"thinking": {"type": "disabled"}}} if modelo == _MODELO_QWEN else {}
+    # NOTA: extra_body thinking foi removido — a Groq não suporta esse campo
+    # para nenhum modelo (incluindo qwen3-32b). O /no_think no system prompt
+    # já é suficiente para suprimir blocos <think> no output.
 
     try:
         resp = await _groq_create(
@@ -3828,7 +3842,6 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
             temperature=0.78,
             top_p=0.92,
             messages=mensagens,
-            **_extra,
         )
         escolha = resp.choices[0]
         _raw = escolha.message.content or ""
