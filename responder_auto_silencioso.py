@@ -60,10 +60,8 @@ _mem: "MemoriaVetorial | None" = None
 MEMORIA_OK: bool = False
 _webhook_server = None
 
-# ── Rotinas de saudacao agendadas ──────────────────────────────────────────
-# Formato: {canal_id: {"manha": str, "tarde": str, "noite": str}}
+# Rotinas de saudacao agendadas {canal_id: {manha, tarde, noite}}
 _rotinas_saudacao: dict[int, dict[str, str]] = {}
-# Controle de envio: {canal_id: {(data_str, periodo): True}}
 _saudacoes_enviadas: dict[int, dict[tuple, bool]] = {}
 
 # ── Banco de expressões aprendidas dos membros (gírias do servidor) ──────────
@@ -339,18 +337,16 @@ async def api_guild_info(guild_id: int) -> dict | None:
 
 async def api_alterar_bio(nova_bio: str) -> bool:
     """
-    Altera a bio/about me da conta via client.user.edit(bio=...) do discord.py-self.
-    Este método usa os headers internos corretos da biblioteca, evitando os erros
-    401/403 que ocorrem ao tentar PATCH /users/@me ou /users/@me/profile manualmente
-    (o Discord exige headers de cliente específicos que variam por build).
-    Limite: 190 chars.
+    Altera a bio via client.user.edit(bio=...) do discord.py-self.
+    REST manual falha com 401/403 porque o Discord exige headers de sessão
+    internos que só a biblioteca conhece após o handshake do WebSocket.
     """
     try:
         await client.user.edit(bio=nova_bio[:190])
-        log.info(f"[BIO] Bio atualizada via discord.py-self: {nova_bio[:50]!r}")
+        log.info(f"[BIO] Bio atualizada: {nova_bio[:50]!r}")
         return True
     except Exception as e:
-        log.error(f"[BIO] Falha ao atualizar bio: {e}", exc_info=True)
+        log.error(f"[BIO] Falha: {e}", exc_info=True)
         return False
 
 
@@ -6658,7 +6654,6 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
                 if not m_ref.bot and m_ref != client.user:
                     mencao_str += f"{m_ref.mention} "
 
-        # Envia o texto literal recebido do parser (sem reescrita por IA)
         conteudo_final = (mencao_str.strip() + " " + texto_env).strip() if mencao_str else texto_env
 
         try:
@@ -7001,9 +6996,15 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
             "offline": discord.Status.invisible,
         }
         _novo_status = _status_map.get(_status_raw, discord.Status.online)
+        # CustomActivity: name="Custom Status" é obrigatório para conta de usuário;
+        # o texto visível fica em state.
         _activity = discord.CustomActivity(name="Custom Status", state=_atividade_txt) if _atividade_txt else None
         try:
+            # change_presence envia o gateway opcode 3 (atualiza activity e status da sessão)
             await client.change_presence(status=_novo_status, activity=_activity)
+            # edit_settings persiste o status na conta — sem isso a bolinha de cor
+            # não muda para outros membros (discord.py-self faz PATCH /users/@me/settings)
+            await client.edit_settings(status=_novo_status)
             log.info(f"[PRESENCE] Status mudado para {_status_raw} | atividade: {_atividade_txt!r}  -  ordem de {autor}")
         except Exception as e:
             log.error(f"[PRESENCE] Falha ao mudar status: {e}", exc_info=True)
@@ -7018,30 +7019,24 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
 
     if acao == "agendar_saudacao":
         _canal_s_nome = params.get("canal", "").strip().lstrip("#")
-        _txt_manha  = params.get("manha",  "Bom dia a todos! ☀️").strip()
-        _txt_tarde  = params.get("tarde",  "Boa tarde a todos! 🌤️").strip()
-        _txt_noite  = params.get("noite",  "Boa noite a todos! 🌙").strip()
+        _txt_manha = params.get("manha", "Bom dia a todos! ☀️").strip()
+        _txt_tarde = params.get("tarde", "Boa tarde a todos! 🌤️").strip()
+        _txt_noite = params.get("noite", "Boa noite a todos! 🌙").strip()
         _canal_s = None
         if _canal_s_nome and guild:
-            import re as _re2
-            _m_id_s = _re2.search(r"<#(\d+)>", _canal_s_nome)
+            _m_id_s = re.search(r"<#(\d+)>", _canal_s_nome)
             if _m_id_s:
                 _canal_s = guild.get_channel(int(_m_id_s.group(1)))
             else:
                 _canal_s = discord.utils.get(guild.text_channels, name=_canal_s_nome)
         if _canal_s is None:
             _canal_s = message.channel
-        _rotinas_saudacao[_canal_s.id] = {
-            "manha": _txt_manha,
-            "tarde": _txt_tarde,
-            "noite": _txt_noite,
-        }
+        _rotinas_saudacao[_canal_s.id] = {"manha": _txt_manha, "tarde": _txt_tarde, "noite": _txt_noite}
         _saudacoes_enviadas.pop(_canal_s.id, None)
         _conf_s = await _ia_curta(
-            f"Confirmar em 1 frase que vou dar bom dia, boa tarde e boa noite todo dia em #{_canal_s.name}. Sem detalhes técnicos.",
-            max_tokens=25,
-        )
-        await canal.send(_conf_s or f"Certo! Vou dar bom dia, boa tarde e boa noite todo dia em {_canal_s.mention}.")
+            f"Confirmar em 1 frase que vou dar bom dia, boa tarde e boa noite todo dia em #{_canal_s.name}.",
+            max_tokens=25)
+        await canal.send(_conf_s or f"Certo! Darei bom dia, boa tarde e boa noite todo dia em {_canal_s.mention}.")
         log.info(f"[SAUDACAO] Rotina agendada em #{_canal_s.name} por {autor}")
         return True
 
@@ -9199,12 +9194,6 @@ async def _task_sumarizacao_diaria():
 
 
 async def _task_rotina_saudacao():
-    """
-    Background task: envia saudacoes diarias automaticas nos canais agendados.
-    Verifica a cada 60 segundos e envia a saudacao correta para o periodo atual (BRT),
-    garantindo que cada saudacao seja enviada no maximo uma vez por periodo por dia.
-    Periodos BRT: manha 06h-11h59 | tarde 12h-17h59 | noite 18h-23h59
-    """
     await client.wait_until_ready()
     while not client.is_closed():
         await asyncio.sleep(60)
@@ -9215,35 +9204,28 @@ async def _task_rotina_saudacao():
             _agora_brt = datetime.now(_brt)
             _hora = _agora_brt.hour
             _data_str = _agora_brt.strftime("%Y-%m-%d")
-            if 6 <= _hora < 12:
-                _periodo = "manha"
-            elif 12 <= _hora < 18:
-                _periodo = "tarde"
-            elif 18 <= _hora <= 23:
-                _periodo = "noite"
-            else:
-                continue  # madrugada
+            if 6 <= _hora < 12:   _periodo = "manha"
+            elif 12 <= _hora < 18: _periodo = "tarde"
+            elif 18 <= _hora <= 23: _periodo = "noite"
+            else: continue
             for canal_id, textos in list(_rotinas_saudacao.items()):
                 _chave = (_data_str, _periodo)
                 _enviados = _saudacoes_enviadas.setdefault(canal_id, {})
-                if _enviados.get(_chave):
-                    continue
-                texto_saudacao = textos.get(_periodo, "")
-                if not texto_saudacao:
-                    continue
+                if _enviados.get(_chave): continue
+                texto_s = textos.get(_periodo, "")
+                if not texto_s: continue
                 canal_dest = client.get_channel(canal_id)
-                if canal_dest is None:
-                    continue
+                if not canal_dest: continue
                 try:
-                    await canal_dest.send(texto_saudacao)
+                    await canal_dest.send(texto_s)
                     _enviados[_chave] = True
-                    log.info(f"[SAUDACAO] {_periodo} enviado em #{canal_dest.name}")
+                    log.info(f"[SAUDACAO] {_periodo} em #{canal_dest.name}")
                     for k in [k for k in list(_enviados) if k[0] != _data_str]:
                         del _enviados[k]
                 except Exception as e:
-                    log.warning(f"[SAUDACAO] Falha ao enviar em canal {canal_id}: {e}")
+                    log.warning(f"[SAUDACAO] erro canal {canal_id}: {e}")
         except Exception as e:
-            log.warning(f"[SAUDACAO] Erro na task: {e}")
+            log.warning(f"[SAUDACAO] task erro: {e}")
 
 @client.event
 async def on_ready():
@@ -9289,6 +9271,7 @@ async def on_ready():
             status=discord.Status.online,
             activity=discord.CustomActivity(name="Custom Status", state="no servidor"),
         )
+        await client.edit_settings(status=discord.Status.online)
         log.info("[PRESENCE] Status inicial definido: online")
     except Exception as _pe:
         log.debug(f"[PRESENCE] Falha ao definir status inicial: {_pe}")
