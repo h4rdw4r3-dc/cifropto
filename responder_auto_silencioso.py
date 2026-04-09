@@ -60,6 +60,12 @@ _mem: "MemoriaVetorial | None" = None
 MEMORIA_OK: bool = False
 _webhook_server = None
 
+# ── Rotinas de saudacao agendadas ──────────────────────────────────────────
+# Formato: {canal_id: {"manha": str, "tarde": str, "noite": str}}
+_rotinas_saudacao: dict[int, dict[str, str]] = {}
+# Controle de envio: {canal_id: {(data_str, periodo): True}}
+_saudacoes_enviadas: dict[int, dict[tuple, bool]] = {}
+
 # ── Banco de expressões aprendidas dos membros (gírias do servidor) ──────────
 # Atualizado em tempo real ao observar mensagens do canal
 _girias_servidor: set[str] = set()
@@ -331,56 +337,20 @@ async def api_guild_info(guild_id: int) -> dict | None:
     return await api_get(f"/guilds/{guild_id}?with_counts=true")
 
 
-def _headers_discord_profile() -> dict:
-    """
-    Headers necessários para endpoints de perfil de usuário (PATCH /users/@me/profile).
-    O Discord exige x-super-properties para aceitar requisições nesse endpoint,
-    caso contrário retorna 403 mesmo com token válido.
-    """
-    import base64
-    _super_props = base64.b64encode(json.dumps({
-        "os": "Windows",
-        "browser": "Discord Client",
-        "release_channel": "stable",
-        "client_version": "1.0.9162",
-        "os_version": "10.0.19045",
-        "os_arch": "x64",
-        "system_locale": "pt-BR",
-        "browser_user_agent": "",
-        "browser_version": "",
-        "client_build_number": 335001,
-        "native_build_number": None,
-        "client_event_source": None,
-    }, separators=(",", ":")).encode()).decode()
-    return {
-        "Authorization": TOKEN,
-        "Content-Type": "application/json",
-        "x-super-properties": _super_props,
-        "x-discord-locale": "pt-BR",
-    }
-
-
 async def api_alterar_bio(nova_bio: str) -> bool:
     """
-    Altera a bio/about me da conta própria via PATCH /users/@me/profile.
-    Requer discord.py-self (self-bot). Limite: 190 chars.
-    IMPORTANTE: o campo 'bio' NÃO existe em PATCH /users/@me — fica em /profile.
-    O endpoint /profile exige o header x-super-properties; sem ele retorna 403.
-    Retorna True em sucesso, False em falha.
+    Altera a bio/about me da conta via client.user.edit(bio=...) do discord.py-self.
+    Este método usa os headers internos corretos da biblioteca, evitando os erros
+    401/403 que ocorrem ao tentar PATCH /users/@me ou /users/@me/profile manualmente
+    (o Discord exige headers de cliente específicos que variam por build).
+    Limite: 190 chars.
     """
-    url = f"{DISCORD_API}/users/@me/profile"
-    payload = {"bio": nova_bio[:190]}
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.patch(url, headers=_headers_discord_profile(), json=payload) as r:
-                if r.status == 200:
-                    log.info(f"[BIO] Bio atualizada: {nova_bio[:50]!r}")
-                    return True
-                body = await r.text()
-                log.warning(f"[BIO] Falha ao atualizar bio: HTTP {r.status} | {body[:120]}")
-                return False
+        await client.user.edit(bio=nova_bio[:190])
+        log.info(f"[BIO] Bio atualizada via discord.py-self: {nova_bio[:50]!r}")
+        return True
     except Exception as e:
-        log.error(f"[BIO] erro: {e}")
+        log.error(f"[BIO] Falha ao atualizar bio: {e}", exc_info=True)
         return False
 
 
@@ -6561,7 +6531,12 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
         "monitorar(canal=null), parar_monitorar(canal=null), "
         "gdoc(tipo=relatorio|historico|regras,canal=null,dias=7), "
         "gsheet(tipo=membros|infracoes|atividade|citacoes), "
-        "enviar_canal(texto,canal) — envia mensagem em canal específico, "
+        "enviar_canal(texto,canal) — envia TEXTO LITERAL no canal. "
+        "O campo texto deve ser a mensagem EXATA a enviar (ex: Bom dia a todos!), nunca uma instrução ou intenção. "
+        "agendar_saudacao(canal,manha,tarde,noite) — agenda saudações diárias automáticas no canal: "
+        "manha às 06h-11h59 BRT, tarde às 12h-17h59 BRT, noite às 18h-23h59 BRT. "
+        "Use quando pedirem para dar bom dia/boa tarde/boa noite todo dia no canal. "
+        "Ex: 'dê bom dia, boa tarde e boa noite todo dia no #chat' → agendar_saudacao(canal=chat, manha='Bom dia a todos!', tarde='Boa tarde!', noite='Boa noite!'). "
         "encaminhar(canal) — encaminha mensagem referenciada para outro canal, "
         "mudar_status(status,atividade=null) — muda o status/presença do próprio bot "
         "(status: online|idle|dnd|invisible; atividade: texto livre ou null). "
@@ -6576,9 +6551,6 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
         "'tira a atividade' → mudar_status(online, atividade=null), "
         "'coloca na sua bio que você é o engenheiro' → alterar_bio('Engenheiro do servidor'), "
         "'muda seu apelido para Shell_v2' → alterar_apelido('Shell_v2'). "
-        "IMPORTANTE para enviar_canal: o campo 'texto' deve conter APENAS a INTENÇÃO ou ASSUNTO "
-        "da mensagem (ex: 'avisar a moderação sobre suas responsabilidades'), NÃO a mensagem literal. "
-        "Um segundo passo de IA irá redigir a mensagem final a partir dessa intenção. "
         "usar_bot(bot,comando,args=null) — aciona um bot do servidor enviando o comando como mensagem isolada. "
         "Use quando fizer sentido acionar outro bot naturalmente (limpar canal, música, etc.). "
         "NUNCA retorne acao banir, silenciar ou qualquer punição — punições requerem comando explícito. "
@@ -6686,22 +6658,8 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
                 if not m_ref.bot and m_ref != client.user:
                     mencao_str += f"{m_ref.mention} "
 
-        # Redige a mensagem real usando IA — evita enviar a instrução literal
-        _sit = (
-            f"Redija uma mensagem clara e direta para ser enviada no canal #{canal_nome_env} de um servidor Discord brasileiro. "
-            f"Instrução recebida: '{texto_env}'. "
-            f"A mensagem deve ser natural, sem markdown excessivo, sem emojis desnecessários, "
-            f"e deve soar como um aviso ou comunicado real do servidor. "
-            f"Retorne APENAS o texto da mensagem, sem aspas, sem prefixo, sem explicação."
-        )
-        # Mostra typing no canal de destino enquanto redige
-        async with dest_env.typing():
-            mensagem_redigida = await _ia_curta(_sit, max_tokens=120)
-        if not mensagem_redigida:
-            mensagem_redigida = texto_env
-
-        # Monta o envio final: menções (se houver) + mensagem redigida
-        conteudo_final = (mencao_str.strip() + " " + mensagem_redigida).strip() if mencao_str else mensagem_redigida
+        # Envia o texto literal recebido do parser (sem reescrita por IA)
+        conteudo_final = (mencao_str.strip() + " " + texto_env).strip() if mencao_str else texto_env
 
         try:
             await dest_env.send(conteudo_final)
@@ -7056,6 +7014,35 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
         if _nova_bio:
             ok = await api_alterar_bio(_nova_bio)
             log.info(f"[BIO] {'Atualizada' if ok else 'Falha'} por ordem de {autor}")
+        return True
+
+    if acao == "agendar_saudacao":
+        _canal_s_nome = params.get("canal", "").strip().lstrip("#")
+        _txt_manha  = params.get("manha",  "Bom dia a todos! ☀️").strip()
+        _txt_tarde  = params.get("tarde",  "Boa tarde a todos! 🌤️").strip()
+        _txt_noite  = params.get("noite",  "Boa noite a todos! 🌙").strip()
+        _canal_s = None
+        if _canal_s_nome and guild:
+            import re as _re2
+            _m_id_s = _re2.search(r"<#(\d+)>", _canal_s_nome)
+            if _m_id_s:
+                _canal_s = guild.get_channel(int(_m_id_s.group(1)))
+            else:
+                _canal_s = discord.utils.get(guild.text_channels, name=_canal_s_nome)
+        if _canal_s is None:
+            _canal_s = message.channel
+        _rotinas_saudacao[_canal_s.id] = {
+            "manha": _txt_manha,
+            "tarde": _txt_tarde,
+            "noite": _txt_noite,
+        }
+        _saudacoes_enviadas.pop(_canal_s.id, None)
+        _conf_s = await _ia_curta(
+            f"Confirmar em 1 frase que vou dar bom dia, boa tarde e boa noite todo dia em #{_canal_s.name}. Sem detalhes técnicos.",
+            max_tokens=25,
+        )
+        await canal.send(_conf_s or f"Certo! Vou dar bom dia, boa tarde e boa noite todo dia em {_canal_s.mention}.")
+        log.info(f"[SAUDACAO] Rotina agendada em #{_canal_s.name} por {autor}")
         return True
 
     if acao == "alterar_apelido":
@@ -9211,6 +9198,53 @@ async def _task_sumarizacao_diaria():
         await asyncio.sleep(86400)  # 24 h ate proxima rodada
 
 
+async def _task_rotina_saudacao():
+    """
+    Background task: envia saudacoes diarias automaticas nos canais agendados.
+    Verifica a cada 60 segundos e envia a saudacao correta para o periodo atual (BRT),
+    garantindo que cada saudacao seja enviada no maximo uma vez por periodo por dia.
+    Periodos BRT: manha 06h-11h59 | tarde 12h-17h59 | noite 18h-23h59
+    """
+    await client.wait_until_ready()
+    while not client.is_closed():
+        await asyncio.sleep(60)
+        if not _rotinas_saudacao:
+            continue
+        try:
+            _brt = timezone(timedelta(hours=-3))
+            _agora_brt = datetime.now(_brt)
+            _hora = _agora_brt.hour
+            _data_str = _agora_brt.strftime("%Y-%m-%d")
+            if 6 <= _hora < 12:
+                _periodo = "manha"
+            elif 12 <= _hora < 18:
+                _periodo = "tarde"
+            elif 18 <= _hora <= 23:
+                _periodo = "noite"
+            else:
+                continue  # madrugada
+            for canal_id, textos in list(_rotinas_saudacao.items()):
+                _chave = (_data_str, _periodo)
+                _enviados = _saudacoes_enviadas.setdefault(canal_id, {})
+                if _enviados.get(_chave):
+                    continue
+                texto_saudacao = textos.get(_periodo, "")
+                if not texto_saudacao:
+                    continue
+                canal_dest = client.get_channel(canal_id)
+                if canal_dest is None:
+                    continue
+                try:
+                    await canal_dest.send(texto_saudacao)
+                    _enviados[_chave] = True
+                    log.info(f"[SAUDACAO] {_periodo} enviado em #{canal_dest.name}")
+                    for k in [k for k in list(_enviados) if k[0] != _data_str]:
+                        del _enviados[k]
+                except Exception as e:
+                    log.warning(f"[SAUDACAO] Falha ao enviar em canal {canal_id}: {e}")
+        except Exception as e:
+            log.warning(f"[SAUDACAO] Erro na task: {e}")
+
 @client.event
 async def on_ready():
     global _humor_sessao, _mem, MEMORIA_OK, _webhook_server
@@ -9263,6 +9297,7 @@ async def on_ready():
     asyncio.ensure_future(_task_iniciativa_proativa())
     asyncio.ensure_future(_task_accountability_equipe())
     asyncio.ensure_future(_task_engajamento_membros())
+    asyncio.ensure_future(_task_rotina_saudacao())
 
     # ── Memória vetorial (PostgreSQL + pgvector) ──────────────────────────────
     if MEMORIA_DISPONIVEL:
