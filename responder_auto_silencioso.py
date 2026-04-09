@@ -6650,9 +6650,10 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
             f"e deve soar como um aviso ou comunicado real do servidor. "
             f"Retorne APENAS o texto da mensagem, sem aspas, sem prefixo, sem explicação."
         )
-        mensagem_redigida = await _ia_curta(_sit, max_tokens=120)
+        # Mostra typing no canal de destino enquanto redige
+        async with dest_env.typing():
+            mensagem_redigida = await _ia_curta(_sit, max_tokens=120)
         if not mensagem_redigida:
-            # Fallback: usa o texto extraído pelo parser diretamente
             mensagem_redigida = texto_env
 
         # Monta o envio final: menções (se houver) + mensagem redigida
