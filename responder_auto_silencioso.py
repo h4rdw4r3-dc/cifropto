@@ -331,17 +331,48 @@ async def api_guild_info(guild_id: int) -> dict | None:
     return await api_get(f"/guilds/{guild_id}?with_counts=true")
 
 
+def _headers_discord_profile() -> dict:
+    """
+    Headers necessários para endpoints de perfil de usuário (PATCH /users/@me/profile).
+    O Discord exige x-super-properties para aceitar requisições nesse endpoint,
+    caso contrário retorna 403 mesmo com token válido.
+    """
+    import base64
+    _super_props = base64.b64encode(json.dumps({
+        "os": "Windows",
+        "browser": "Discord Client",
+        "release_channel": "stable",
+        "client_version": "1.0.9162",
+        "os_version": "10.0.19045",
+        "os_arch": "x64",
+        "system_locale": "pt-BR",
+        "browser_user_agent": "",
+        "browser_version": "",
+        "client_build_number": 335001,
+        "native_build_number": None,
+        "client_event_source": None,
+    }, separators=(",", ":")).encode()).decode()
+    return {
+        "Authorization": TOKEN,
+        "Content-Type": "application/json",
+        "x-super-properties": _super_props,
+        "x-discord-locale": "pt-BR",
+    }
+
+
 async def api_alterar_bio(nova_bio: str) -> bool:
     """
-    Altera a bio/about me da conta propria via PATCH /users/@me.
+    Altera a bio/about me da conta própria via PATCH /users/@me/profile.
     Requer discord.py-self (self-bot). Limite: 190 chars.
+    IMPORTANTE: o campo 'bio' NÃO existe em PATCH /users/@me — fica em /profile.
+    O endpoint /profile exige o header x-super-properties; sem ele retorna 403.
     Retorna True em sucesso, False em falha.
     """
-    url = f"{DISCORD_API}/users/@me"
+    url = f"{DISCORD_API}/users/@me/profile"
     payload = {"bio": nova_bio[:190]}
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.patch(url, headers=_headers_discord(), json=payload) as r:
+            async with session.patch(url, headers=_headers_discord_profile(), json=payload) as r:
                 if r.status == 200:
                     log.info(f"[BIO] Bio atualizada: {nova_bio[:50]!r}")
                     return True
@@ -7012,12 +7043,12 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
             "offline": discord.Status.invisible,
         }
         _novo_status = _status_map.get(_status_raw, discord.Status.online)
-        _activity = discord.CustomActivity(name=_atividade_txt) if _atividade_txt else None
+        _activity = discord.CustomActivity(name="Custom Status", state=_atividade_txt) if _atividade_txt else None
         try:
             await client.change_presence(status=_novo_status, activity=_activity)
             log.info(f"[PRESENCE] Status mudado para {_status_raw} | atividade: {_atividade_txt!r}  -  ordem de {autor}")
         except Exception as e:
-            log.warning(f"[PRESENCE] Falha ao mudar status: {e}")
+            log.error(f"[PRESENCE] Falha ao mudar status: {e}", exc_info=True)
         return True
 
     if acao == "alterar_bio":
@@ -9222,7 +9253,7 @@ async def on_ready():
     try:
         await client.change_presence(
             status=discord.Status.online,
-            activity=discord.CustomActivity(name="no servidor"),
+            activity=discord.CustomActivity(name="Custom Status", state="no servidor"),
         )
         log.info("[PRESENCE] Status inicial definido: online")
     except Exception as _pe:
