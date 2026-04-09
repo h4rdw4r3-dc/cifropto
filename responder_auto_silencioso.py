@@ -60,6 +60,74 @@ _mem: "MemoriaVetorial | None" = None
 MEMORIA_OK: bool = False
 _webhook_server = None
 
+# ── Modo silêncio global ──────────────────────────────────────────────────────
+# Quando ativo, bloqueia todas as saídas autônomas do bot (interjections,
+# boas-vindas orgânicas, canal quieto, convites).  Respostas a ordens diretas
+# de Proprietários/Colaboradores ainda funcionam normalmente.
+_modo_silencio: dict = {
+    "ativo": False,
+    "quem_id": None,       # user_id de quem ordenou
+    "quem_nome": "",       # display_name para o log
+    "canal_id": None,      # canal específico (None = global)
+    "desde": None,         # datetime UTC
+}
+
+# Detecta ordem de silêncio (qualquer variação natural)
+_RE_SILENCIO = re.compile(
+    r"(fique\s+quieto|fica\s+quieto|para\s+de\s+falar|pare\s+de\s+falar"
+    r"|cala\s+(a\s+)?boca|cale\s+(a\s+)?boca|n[ãa]o\s+mande?\s+(nada|mensagem)"
+    r"|proibido\s+de\s+interagir|modo\s+sil[eê]ncio|entra\s+em\s+sil[eê]ncio"
+    r"|sil[eê]ncio\s+agora|fica\s+em\s+sil[eê]ncio|fique\s+em\s+sil[eê]ncio"
+    r"|desativa\s+(as?\s+)?sa[ií]das\s+aut[oô]nomas|para\s+de\s+mandar\s+coisa"
+    r"|n[ãa]o\s+fala?\s+nada|n[ãa]o\s+interaja|n[ãa]o\s+mande?\s+nada)",
+    re.IGNORECASE,
+)
+
+# Detecta liberação do silêncio
+_RE_LIBERACAO = re.compile(
+    r"(pode\s+falar|volta\s+ao\s+normal|liberado|libera|desbloqueado"
+    r"|segunda\s+ordem|retoma\s+normal|volta\s+a\s+interagir"
+    r"|desativa\s+(o\s+)?modo\s+sil[eê]ncio|sai\s+do\s+sil[eê]ncio"
+    r"|encerra\s+(o\s+)?sil[eê]ncio|fim\s+do\s+sil[eê]ncio)",
+    re.IGNORECASE,
+)
+
+
+def _bot_silenciado(canal_id: int | None = None) -> bool:
+    """
+    Retorna True se o bot está em modo silêncio para o canal informado.
+    Silêncio global (canal_id=None no estado) bloqueia todos os canais.
+    Silêncio específico só bloqueia aquele canal.
+    """
+    if not _modo_silencio["ativo"]:
+        return False
+    sc = _modo_silencio["canal_id"]
+    if sc is None:
+        return True          # global — bloqueia tudo
+    return canal_id == sc    # específico — só aquele canal
+
+
+def _ativar_silencio(user_id: int, nome: str, canal_id: int | None = None) -> None:
+    """Ativa o modo silêncio, registrando quem ordenou e em qual escopo."""
+    _modo_silencio["ativo"] = True
+    _modo_silencio["quem_id"] = user_id
+    _modo_silencio["quem_nome"] = nome
+    _modo_silencio["canal_id"] = canal_id
+    _modo_silencio["desde"] = datetime.now(timezone.utc)
+    escopo = f"canal {canal_id}" if canal_id else "global"
+    log.info(f"[SILENCIO] Modo silêncio ATIVADO por {nome} ({user_id}) — escopo: {escopo}")
+
+
+def _desativar_silencio(user_id: int, nome: str) -> None:
+    """Desativa o modo silêncio."""
+    _modo_silencio["ativo"] = False
+    _modo_silencio["quem_id"] = None
+    _modo_silencio["quem_nome"] = ""
+    _modo_silencio["canal_id"] = None
+    _modo_silencio["desde"] = None
+    log.info(f"[SILENCIO] Modo silêncio DESATIVADO por {nome} ({user_id})")
+
+
 # Rotinas de saudacao agendadas {canal_id: {manha, tarde, noite}}
 _rotinas_saudacao: dict[int, dict[str, str]] = {}
 _saudacoes_enviadas: dict[int, dict[tuple, bool]] = {}
@@ -523,7 +591,7 @@ def tem_permissao_moderacao(guild: discord.Guild) -> bool:
 
 
 def eh_autorizado(member: discord.Member) -> bool:
-    """Retorna True se o membro é dono, superior ou pertence à equipe de moderação."""
+    """Retorna True se o membro é proprietário, colaborador ou pertence à equipe de moderação."""
     if member.id in DONOS_IDS or member.id in _contas_teste_ids():
         return True
     if member.id in _usuarios_superiores_ids():
@@ -534,7 +602,7 @@ def eh_autorizado(member: discord.Member) -> bool:
 
 
 def eh_superior(member: discord.Member) -> bool:
-    """Retorna True se o membro é dono ou tem cargo superior (pode dar ordens gerais ao bot)."""
+    """Retorna True se o membro é proprietário ou tem cargo de colaborador (pode dar ordens gerais ao bot)."""
     if member.id in DONOS_IDS or member.id in _usuarios_superiores_ids():
         return True
     _sup = _cargos_superiores_ids()
@@ -542,7 +610,7 @@ def eh_superior(member: discord.Member) -> bool:
 
 
 def eh_mod_exclusivo(member: discord.Member) -> bool:
-    """Retorna True se membro tem cargo de moderação (mas não é superior nem dono)."""
+    """Retorna True se membro tem cargo de moderação (mas não é colaborador nem proprietário)."""
     if member.id in DONOS_IDS or member.id in _usuarios_superiores_ids():
         return False
     _sup = _cargos_superiores_ids()
@@ -622,7 +690,7 @@ def _usuarios_superiores_ids() -> set:
 def _contas_teste_ids() -> set:
     return set(cfg("contas_teste_ids") or [])
 
-# Palavras customizadas adicionadas pelos donos em tempo real
+# Palavras customizadas adicionadas pelos Proprietários em tempo real
 palavras_custom: dict[str, list[str]] = {
     "vulgares": [], "sexual": [], "discriminacao": [], "compostos": []
 }
@@ -2172,8 +2240,8 @@ def _detectar_intencao(conteudo: str, guild=None) -> dict:
     if re.search(r'\b(quando\s+(foi\s+)?(criado|fundado)|data\s+de\s+cria[cç][aã]o)', msg):
         return {"intent": "data_criacao"}
 
-    # Dono
-    if re.search(r'\b(quem\s+(fundou|criou|[eé]\s+o\s+dono)|dono\s+do\s+servidor)', msg):
+    # Proprietário
+    if re.search(r'\b(quem\s+(fundou|criou|[eé]\s+o\s+(dono|proprietário))|dono\s+do\s+servidor|proprietário\s+do\s+servidor)', msg):
         return {"intent": "dono_servidor"}
 
     # Bots
@@ -2470,10 +2538,10 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str, author_id: 
         partes = [f"[{cat}] {', '.join(nomes)}" for cat, nomes in cats.items()]
         return "Canais: " + " | ".join(partes) + "."
 
-    # ── Dono ─────────────────────────────────────────────────────────────────
+    # ── Proprietário ─────────────────────────────────────────────────────────
     if intent == "dono_servidor":
         _d = guild.owner.display_name if guild.owner else None
-        return await _ia_curta(f"Dono do servidor: {_d}. Diga isso naturalmente.", max_tokens=20) if _d else "Não encontrei o dono."
+        return await _ia_curta(f"Proprietário do servidor: {_d}. Diga isso naturalmente.", max_tokens=20) if _d else "Não encontrei o proprietário."
 
     # ── Data/tempo da CONTA do usuário ───────────────────────────────────────
     # Retorna dados REAIS: data de criação + idade da conta do Discord do autor.
@@ -2660,7 +2728,7 @@ def build_server_context(guild: discord.Guild) -> str:
     linhas.append(f"Criado em: {criado_em} (Brasília)")
     if guild.description:
         linhas.append(f"Descrição: {guild.description}")
-    linhas.append(f"Dono: {guild.owner.display_name} ({guild.owner.id})" if guild.owner else "Dono: desconhecido")
+    linhas.append(f"Proprietário: {guild.owner.display_name} ({guild.owner.id})" if guild.owner else "Proprietário: desconhecido")
     linhas.append(f"Boost: nível {guild.premium_tier}, {guild.premium_subscription_count} boosts")
 
     bots_count = sum(1 for m in guild.members if m.bot)
@@ -2908,7 +2976,7 @@ def _precisa_raciocinar(pergunta: str, nivel: str) -> bool:
     - Ordens múltiplas / planejamento
     - Análise pedida explicitamente
     - Mensagens longas (>15 palavras) — mais contexto = mais chance de ambiguidade
-    - Superiores e proprietários com mensagens complexas
+    - Colaboradores e proprietários com mensagens complexas
     """
     if len(pergunta.split()) > 15:
         return True
@@ -3059,7 +3127,7 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         "É melhor não agir do que agir com interpretação errada.\n\n"
 
         "QUESTIONAMENTO TÉCNICO — INSTRUÇÃO AMBÍGUA:\n"
-        "Quando uma ordem de superior ou dono for imprecisa ou incompleta para execução segura:\n"
+        "Quando uma ordem de colaborador ou proprietário for imprecisa ou incompleta para execução segura:\n"
         "Faça UMA pergunta técnica e objetiva para esclarecer antes de executar.\n"
         "Nunca execute 'no chute'. Nunca peça desculpas por perguntar — é profissionalismo.\n"
         "Exemplos: 'Qual canal de destino?', 'Por quanto tempo?', 'Quem especificamente?'\n"
@@ -3902,7 +3970,7 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         if _regras_lista and _nome_reg in pergunta.lower() and _nome_reg not in [n.lower() for n in _nomes_mencionados]:
             _regras_ctx += "\n" + _get_regras_membro_str(_nome_reg)
 
-    # Instrução de execução contínua/sequencial para superiores e proprietários
+    # Instrução de execução contínua/sequencial para colaboradores e proprietários
     _exec_seq = ""
     if nivel in ("PROPRIETÁRIO", "COLABORADOR"):
         # Detecta se a mensagem tem múltiplas ordens (vírgula, ponto e vírgula, "e também", "depois")
@@ -5124,7 +5192,7 @@ def _capturar_tom_override(user_id: int, conteudo: str) -> bool:
 
 
 async def processar_ordem(message: discord.Message) -> bool:
-    """Processa comandos dos donos. Retorna True se algum comando foi executado."""
+    """Processa comandos dos Proprietários e Colaboradores. Retorna True se algum comando foi executado."""
     conteudo = message.content.strip()
     guild = message.guild
     mod = mencao_mod(guild)
@@ -5479,7 +5547,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         _conf = await _ia_curta(f"Confirmar que mensagem foi enviada em {canal_destino.name}. Breve.", max_tokens=15)
         await message.channel.send(_conf or f"Enviado em {canal_destino.mention}.")
 
-    # ── comandos exclusivos de donos absolutos ─────────────────────────────────
+    # ── comandos exclusivos de Proprietários ─────────────────────────────────
     elif message.author.id in DONOS_ABSOLUTOS_IDS and any(
         p in conteudo.lower() for p in ["apaga canal", "deleta canal", "remove canal",
                                          "apaga cargo", "deleta cargo", "remove cargo"]
@@ -5598,7 +5666,7 @@ async def processar_ordem(message: discord.Message) -> bool:
         resultado = await api_resumo_servidor(guild)
         await message.channel.send(resultado)
 
-    # ── alterar bio / mudar bio  -  edita a bio da conta (apenas superiores) ──────
+    # ── alterar bio / mudar bio  -  edita a bio da conta (Colaboradores e Proprietários) ──────
     elif re.match(r'^(?:alterar|mudar|atualizar)\s+bio\b', conteudo.lower()):
         if not eh_superior(message.author):
             await message.channel.send("Sem permissao para isso.")
@@ -6030,10 +6098,10 @@ async def processar_ordem(message: discord.Message) -> bool:
         return True
 
     # ── configuração dinâmica ─────────────────────────────────────────────────
-    # Somente donos absolutos podem alterar configurações
+    # Somente Proprietários podem alterar configurações
     elif _addr and re.search(r'\b(config(?:ura(?:r|cao|ção)?)?|defin[ei][r]?|set[a]?)\b', conteudo.lower()):
         if message.author.id not in DONOS_ABSOLUTOS_IDS:
-            await message.channel.send(await _ia_curta("Avisar que apenas donos absolutos podem alterar configurações. Direto.", max_tokens=15))
+            await message.channel.send(await _ia_curta("Avisar que apenas Proprietários podem alterar configurações. Direto.", max_tokens=15))
             return True
 
         _cfg_msg = conteudo.lower()
@@ -6047,8 +6115,8 @@ async def processar_ordem(message: discord.Message) -> bool:
                 "canal_bem_vindo_id":      "Canal de boas-vindas",
                 "canal_logs_id":           "Canal de logs",
                 "cargo_mod_id":            "Cargo de moderação",
-                "cargos_superiores_ids":   "Cargos superiores",
-                "usuarios_superiores_ids": "Usuarios superiores",
+                "cargos_superiores_ids":   "Cargos de colaboradores",
+                "usuarios_superiores_ids": "Usuários colaboradores",
                 "contas_teste_ids":        "Contas de teste",
             }
             for chave, nome in _nomes.items():
@@ -6089,7 +6157,7 @@ async def processar_ordem(message: discord.Message) -> bool:
                 return True
 
         # ── definir cargo ─────────────────────────────────────────────────────
-        _m_cargo_tipo = re.search(r'\bcargo\s+(de\s+)?(mod(?:eração?|eracao?)?|superior)', _cfg_msg)
+        _m_cargo_tipo = re.search(r'\bcargo\s+(de\s+)?(mod(?:eração?|eracao?)?|superior|colaborador)', _cfg_msg)
         if _m_cargo_tipo and message.role_mentions:
             _tipo_cargo = _m_cargo_tipo.group(2).lower()
             _cargo_novo = message.role_mentions[0]
@@ -6098,35 +6166,35 @@ async def processar_ordem(message: discord.Message) -> bool:
                 salvar_config()
                 _c = await _ia_curta(f"Confirmar cargo de moderação definido como {_cargo_novo.name}. Breve.", max_tokens=20)
                 await message.channel.send(_c or f"Cargo de moderação: {_cargo_novo.mention}.")
-            elif "superior" in _tipo_cargo:
+            elif "superior" in _tipo_cargo or "colaborador" in _tipo_cargo:
                 _lista = _cfg.get("cargos_superiores_ids", list(CARGOS_SUPERIORES_IDS))
                 if _cargo_novo.id not in _lista:
                     _lista.append(_cargo_novo.id)
                     _cfg["cargos_superiores_ids"] = _lista
                     salvar_config()
-                    _c = await _ia_curta(f"Confirmar que cargo {_cargo_novo.name} foi adicionado como superior. Breve.", max_tokens=20)
-                    await message.channel.send(_c or f"Cargo {_cargo_novo.mention} adicionado aos superiores.")
+                    _c = await _ia_curta(f"Confirmar que cargo {_cargo_novo.name} foi adicionado como colaborador. Breve.", max_tokens=20)
+                    await message.channel.send(_c or f"Cargo {_cargo_novo.mention} adicionado aos colaboradores.")
                 else:
-                    await message.channel.send(await _ia_curta(f"Cargo {_cargo_novo.name} já está na lista de superiores. Breve.", max_tokens=15))
+                    await message.channel.send(await _ia_curta(f"Cargo {_cargo_novo.name} já está na lista de colaboradores. Breve.", max_tokens=15))
             return True
 
-        # ── remover cargo superior ────────────────────────────────────────────
-        if re.search(r'\b(remov[ae][r]?|tira[r]?)\b.*\bcargo\s+superior\b', _cfg_msg) and message.role_mentions:
+        # ── remover cargo colaborador ────────────────────────────────────────────
+        if re.search(r'\b(remov[ae][r]?|tira[r]?)\b.*\bcargo\s+(superior|colaborador)\b', _cfg_msg) and message.role_mentions:
             _cargo_rm = message.role_mentions[0]
             _lista = _cfg.get("cargos_superiores_ids", list(CARGOS_SUPERIORES_IDS))
             if _cargo_rm.id in _lista:
                 _lista.remove(_cargo_rm.id)
                 _cfg["cargos_superiores_ids"] = _lista
                 salvar_config()
-                _c = await _ia_curta(f"Confirmar que cargo {_cargo_rm.name} foi removido dos superiores. Breve.", max_tokens=15)
+                _c = await _ia_curta(f"Confirmar que cargo {_cargo_rm.name} foi removido dos colaboradores. Breve.", max_tokens=15)
                 await message.channel.send(_c or f"Cargo {_cargo_rm.mention} removido.")
             else:
-                await message.channel.send(await _ia_curta(f"Cargo {_cargo_rm.name} não estava na lista de superiores. Breve.", max_tokens=15))
+                await message.channel.send(await _ia_curta(f"Cargo {_cargo_rm.name} não estava na lista de colaboradores. Breve.", max_tokens=15))
             return True
 
-        # ── adicionar/remover usuário superior ────────────────────────────────
-        _add_sup = re.search(r'\b(add|adicion[ae][r]?)\b.*\busuario\s+superior\b', _cfg_msg)
-        _rm_sup = re.search(r'\b(remov[ae][r]?|tira[r]?)\b.*\busuario\s+superior\b', _cfg_msg)
+        # ── adicionar/remover usuário colaborador ────────────────────────────────
+        _add_sup = re.search(r'\b(add|adicion[ae][r]?)\b.*\busuario\s+(superior|colaborador)\b', _cfg_msg)
+        _rm_sup = re.search(r'\b(remov[ae][r]?|tira[r]?)\b.*\busuario\s+(superior|colaborador)\b', _cfg_msg)
         if (_add_sup or _rm_sup) and message.mentions:
             _user_cfg = [m for m in message.mentions if m != client.user][0] if message.mentions else None
             if _user_cfg:
@@ -6136,16 +6204,16 @@ async def processar_ordem(message: discord.Message) -> bool:
                         _lista_u.append(_user_cfg.id)
                         _cfg["usuarios_superiores_ids"] = _lista_u
                         salvar_config()
-                        _c = await _ia_curta(f"{_user_cfg.display_name} adicionado como usuário superior. Confirmar brevemente.", max_tokens=15)
-                        await message.channel.send(_c or f"{_user_cfg.mention} agora é superior.")
+                        _c = await _ia_curta(f"{_user_cfg.display_name} adicionado como colaborador. Confirmar brevemente.", max_tokens=15)
+                        await message.channel.send(_c or f"{_user_cfg.mention} agora é colaborador.")
                     else:
-                        await message.channel.send(await _ia_curta(f"{_user_cfg.display_name} já é superior. Breve.", max_tokens=15))
+                        await message.channel.send(await _ia_curta(f"{_user_cfg.display_name} já é colaborador. Breve.", max_tokens=15))
                 else:
                     if _user_cfg.id in _lista_u:
                         _lista_u.remove(_user_cfg.id)
                         _cfg["usuarios_superiores_ids"] = _lista_u
                         salvar_config()
-                        _c = await _ia_curta(f"{_user_cfg.display_name} removido dos superiores. Confirmar brevemente.", max_tokens=15)
+                        _c = await _ia_curta(f"{_user_cfg.display_name} removido dos colaboradores. Confirmar brevemente.", max_tokens=15)
                         await message.channel.send(_c or f"{_user_cfg.mention} removido.")
                     else:
                         await message.channel.send(await _ia_curta(f"{_user_cfg.display_name} não estava na lista. Breve.", max_tokens=15))
@@ -6183,9 +6251,9 @@ async def processar_ordem(message: discord.Message) -> bool:
             "- `Shell configura canal de auditoria #canal`\n"
             "- `Shell configura canal de regras #canal`\n"
             "- `Shell configura cargo de mod @cargo`\n"
-            "- `Shell configura cargo superior @cargo`\n"
-            "- `Shell remove cargo superior @cargo`\n"
-            "- `Shell adiciona usuario superior @user`\n"
+            "- `Shell configura cargo colaborador @cargo`\n"
+            "- `Shell remove cargo colaborador @cargo`\n"
+            "- `Shell adiciona usuario colaborador @user`\n"
             "- `Shell mostra config`"
         )
         return True
@@ -6359,7 +6427,7 @@ async def processar_ordem_mod(message: discord.Message) -> bool:
     """
     Processa apenas comandos de moderação para o cargo de mod (1487859369008697556).
     Comandos disponíveis: silenciar, dessilenciar, banir, desbanir, expulsar, avisar, regras, listar.
-    Não executa ordens gerais (boas-vindas, histórias, etc.)  -  isso é privilégio dos superiores.
+    Não executa ordens gerais (boas-vindas, histórias, etc.)  -  isso é privilégio dos colaboradores.
     """
     conteudo = message.content.strip()
     cmd, resto = extrair_comando(conteudo)
@@ -6388,7 +6456,7 @@ async def processar_ordem_mod(message: discord.Message) -> bool:
 
 async def resposta_inicial_superior(conteudo: str, autor: str, user_id: int, guild=None, membro=None, canal_id: int = None, message: discord.Message = None) -> str:
     """
-    Versão estendida de resposta_inicial para superiores.
+    Versão estendida de resposta_inicial para colaboradores e proprietários.
     Aceita ordens diretas. Quando a ordem envolve enviar em canal específico,
     envia diretamente lá e retorna string vazia para o caller não reenviar.
     """
@@ -6423,7 +6491,7 @@ async def resposta_inicial_superior(conteudo: str, autor: str, user_id: int, gui
         if not texto_bv:
             texto_bv = f"Bem-vindos. Regras em {CANAL_REGRAS()}."
 
-        # Se o superior especificou um canal diferente do atual, envia lá
+        # Se o colaborador/proprietário especificou um canal diferente do atual, envia lá
         if canal_alvo and message and canal_alvo.id != message.channel.id:
             await canal_alvo.send(texto_bv)
             _conf = await _ia_curta("Confirmar que boas-vindas foram enviadas em outro canal.", contexto=canal_alvo.mention, max_tokens=40)
@@ -6669,7 +6737,7 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
     autor = message.author.display_name
 
     # Ações destrutivas/irreversíveis exigem @menção explícita — não apenas gatilho de nome.
-    # Exceção: donos e superiores têm privilégio de dispensar @menção.
+    # Exceção: proprietários e colaboradores têm privilégio de dispensar @menção.
     _autor_privilegiado = (
         message.author.id in DONOS_IDS or eh_superior(message.author)
     )
@@ -8117,6 +8185,8 @@ async def _interjetar_conversa(message: discord.Message):
       DISCORDA — discorda de algo dito
       PASS     — não tem nada genuíno a dizer
     """
+    if _bot_silenciado(message.channel.id):
+        return
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return
 
@@ -8210,6 +8280,8 @@ async def _responder_convite(message: discord.Message):
     Responde a mensagens que convidam o bot a interagir (ex: 'Fala ai seus tagarela').
     Pula triagem — vai direto para resposta casual sem julgamento de 'substância'.
     """
+    if _bot_silenciado(message.channel.id):
+        return
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return
 
@@ -8913,6 +8985,8 @@ async def _task_accountability_equipe():
                 canal_q = guild.get_channel(cid)
                 if not isinstance(canal_q, discord.TextChannel):
                     continue
+                if _bot_silenciado(cid):
+                    continue
                 ultimo_post = _ultima_iniciativa.get(cid)
                 if ultimo_post and (agora - ultimo_post) < timedelta(hours=2):
                     continue
@@ -9567,7 +9641,7 @@ async def on_member_join(member: discord.Member):
             pass
 
         # Comentário orgânico espontâneo após boas-vindas (simula membro notando a entrada)
-        if GROQ_API_KEY and not conta_nova and random.random() < 0.35:
+        if GROQ_API_KEY and not conta_nova and random.random() < 0.35 and not _bot_silenciado(canal_geral.id):
             try:
                 contexto_entrada = (
                     f"reentrada número {vezes}" if vezes > 1
@@ -10324,8 +10398,8 @@ async def _on_message_impl(message: discord.Message):
     conteudo = _conteudo_base
 
     _eh_dono = message.author.id in DONOS_IDS
-    _eh_superior_ = eh_superior(message.author)   # donos + cargos superiores
-    _eh_mod_ = eh_mod_exclusivo(message.author)    # só moderação (não superiores)
+    _eh_superior_ = eh_superior(message.author)   # proprietários + colaboradores
+    _eh_mod_ = eh_mod_exclusivo(message.author)    # só moderação (não colaboradores)
     eh_teste = message.author.id in _contas_teste_ids()
 
     # ── Filtro de mensagens triviais ──────────────────────────────────────────
@@ -10415,7 +10489,7 @@ async def _on_message_impl(message: discord.Message):
             return
         # continua para verificação de violações abaixo
 
-    # ── Donos: isentos de punição, comandos + ordens gerais sempre ativos ────────
+    # ── Proprietários: isentos de punição, comandos + ordens gerais sempre ativos ────────
     if _eh_dono:
         log.info(f"[PROP] {autor} | mencionado={mencionado} | conteudo={conteudo[:80]!r}")
         if message.author.id in ausencia:
@@ -10424,6 +10498,27 @@ async def _on_message_impl(message: discord.Message):
         if await _processar_wizard(message):
             return
         if await _verificar_confirmacao_pendente(message):
+            return
+        # Captura ordens de comportamento antes de processar normalmente
+        # ── Detecção de modo silêncio / liberação ────────────────────────────
+        if _RE_LIBERACAO.search(conteudo) and _modo_silencio["ativo"]:
+            _desativar_silencio(message.author.id, autor)
+            _ack_lib = await _ia_curta(
+                "Confirme em 1 frase natural e breve que voltou ao normal e pode interagir de novo. "
+                "Estilo Shell carioca, sem clichê.",
+                max_tokens=25,
+            )
+            await message.channel.send(_ack_lib or "Voltei.")
+            return
+        if _RE_SILENCIO.search(conteudo):
+            _canal_silencio = message.channel.id if "aqui" in conteudo.lower() or "nesse canal" in conteudo.lower() else None
+            _ativar_silencio(message.author.id, autor, _canal_silencio)
+            _ack_sil = await _ia_curta(
+                "Confirme em 1 frase curta e natural que entendeu a ordem e vai ficar quieto. "
+                "Estilo Shell carioca, direto, sem template.",
+                max_tokens=20,
+            )
+            await message.channel.send(_ack_sil or "Entendido.")
             return
         # Captura ordens de comportamento antes de processar normalmente
         if _capturar_tom_override(message.author.id, conteudo):
@@ -10481,7 +10576,7 @@ async def _on_message_impl(message: discord.Message):
                 log.warning(f"[PROP] resposta vazia  -  enviando fallback")
                 await _digitar_e_enviar(message.channel, "Entendido.", message)
         elif not tratado and not _e_trivial:
-            # Donos interagem sem precisar mencionar o bot:
+            # Proprietários interagem sem precisar mencionar o bot:
             # 1. Queries factuais → dados reais
             # 2. Conversa ativa (conversas ou conversas_groq) → continua
             # 3. Qualquer mensagem não-trivial → resposta proativa
@@ -10513,7 +10608,7 @@ async def _on_message_impl(message: discord.Message):
                             await _reagir_ou_responder(message, resp_fu)
                             asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resp_fu, message.channel.id))
                         return
-                # Sem conversa ativa: responde proativamente a qualquer mensagem de dono
+                # Sem conversa ativa: responde proativamente a qualquer mensagem de proprietário
                 resposta_p = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
             finally:
                 await _parar_typing(_tp, _tt)
@@ -10524,7 +10619,7 @@ async def _on_message_impl(message: discord.Message):
                 await _digitar_e_enviar(message.channel, resposta_p, message)
         return
 
-    # ── Superiores: isentos de punição, comandos + ordens gerais (sem precisar mencionar) ──
+    # ── Colaboradores: isentos de punição, comandos + ordens gerais (sem precisar mencionar) ──
     if _eh_superior_:
         if message.author.id in ausencia:
             del ausencia[message.author.id]
@@ -10532,6 +10627,26 @@ async def _on_message_impl(message: discord.Message):
         if await _processar_wizard(message):
             return
         if await _verificar_confirmacao_pendente(message):
+            return
+        # ── Detecção de modo silêncio / liberação ────────────────────────────
+        if _RE_LIBERACAO.search(conteudo) and _modo_silencio["ativo"]:
+            _desativar_silencio(message.author.id, autor)
+            _ack_lib = await _ia_curta(
+                "Confirme em 1 frase natural e breve que voltou ao normal e pode interagir de novo. "
+                "Estilo Shell carioca, sem clichê.",
+                max_tokens=25,
+            )
+            await message.channel.send(_ack_lib or "Voltei.")
+            return
+        if _RE_SILENCIO.search(conteudo):
+            _canal_silencio = message.channel.id if "aqui" in conteudo.lower() or "nesse canal" in conteudo.lower() else None
+            _ativar_silencio(message.author.id, autor, _canal_silencio)
+            _ack_sil = await _ia_curta(
+                "Confirme em 1 frase curta e natural que entendeu a ordem e vai ficar quieto. "
+                "Estilo Shell carioca, direto, sem template.",
+                max_tokens=20,
+            )
+            await message.channel.send(_ack_sil or "Entendido.")
             return
         tratado = await processar_ordem(message)
         if not tratado and mencionado and not _e_trivial:
@@ -10571,7 +10686,7 @@ async def _on_message_impl(message: discord.Message):
             elif resposta:
                 await _digitar_e_enviar(message.channel, resposta, message)
         elif not tratado and not _e_trivial:
-            # Superiores interagem sem precisar mencionar o bot
+            # Colaboradores interagem sem precisar mencionar o bot
             _tp, _tt = await _iniciar_typing_antes(message.channel)
             try:
                 if message.guild:
@@ -10612,7 +10727,7 @@ async def _on_message_impl(message: discord.Message):
             await processar_links(message)
         return
 
-    # ── Equipe de mod: isenta de punições, comandos de moderação (sem precisar mencionar) ──
+    # ── Moderadores: isentos de punições, comandos de moderação (sem precisar mencionar) ──
     if _eh_mod_:
         tratado = await processar_ordem_mod(message)
         if not tratado and mencionado and not _e_trivial:
