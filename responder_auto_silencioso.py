@@ -3670,8 +3670,10 @@ def _escolher_modelo(forcar_rapido: bool = False) -> str:
         return _MODELO_8B
 
     # Nível 2 — llama-4-scout (500k TPD) — preferido sobre 70b na cascata normal
-    # Subiu de posição 3 para 2: evita tocar no budget limitado do 70b para contextos longos
-    if _modelo_disponivel(_MODELO_SCOUT) and _tokens_scout_hoje < LIMITE_SCOUT:
+    # Guard de 80%: acima disso preserva budget para escalação de contexto grande
+    # (as últimas 20% = 100k tokens ficam reservadas para chamadas de contexto grande)
+    _LIMITE_SCOUT_NORMAL = int(LIMITE_SCOUT * 0.80)  # 80% = 384.000 tokens
+    if _modelo_disponivel(_MODELO_SCOUT) and _tokens_scout_hoje < _LIMITE_SCOUT_NORMAL:
         log.info("[BUDGET] usando fallback nível 2: llama-4-scout")
         return _MODELO_SCOUT
 
@@ -4029,19 +4031,51 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     # Ratio real medido nos logs: ~3,1 chars/token (pt-BR com acentos + contexto de servidor).
     # TPM do 8b = 6000 tokens/min; max_tokens=180 de output reservado.
     # Input máximo seguro: (6000 - 180) * 3.1 = 17.919 chars → com margem de 10%: ~16.000.
-    # Valor anterior (21000) causava 413 recorrente porque assumia 3,5 chars/token (otimista demais).
-    _LIMITE_CHARS_8B    = 16000  # ~5160 tokens — calibrado com ratio real 3.1 chars/tok + margem 10%
-    _LIMITE_CHARS_GERAL = 40000  # ~10000 tokens — 70b/scout/qwen têm TPM ≥ 12k, contexto 128k+
-    _LIMITE_CHARS = _LIMITE_CHARS_8B if modelo == _MODELO_8B else _LIMITE_CHARS_GERAL
+    _LIMITE_CHARS_8B     = 16000  # ~5160 tokens — calibrado com ratio real 3.1 chars/tok + margem 10%
+    _LIMITE_CHARS_SCOUT  = 18000  # scout tem TPD limitado (500k) — contexto menor conserva budget diário
+    _LIMITE_CHARS_GERAL  = 40000  # 70b/qwen têm TPM ≥ 12k, contexto 128k+
+    _LIMITE_CHARS = (
+        _LIMITE_CHARS_8B    if modelo == _MODELO_8B
+        else _LIMITE_CHARS_SCOUT if modelo == _MODELO_SCOUT
+        else _LIMITE_CHARS_GERAL
+    )
     ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
 
-    # ── Escala para modelo maior ANTES de cortar contexto ────────────────────────
-    # Se o contexto estoura o limite do 8b, tenta scout > 70b > qwen (nesta ordem).
-    # Scout tem 500k TPD e suporta contexto grande — preferido sobre o 70b aqui também.
-    # 70b entra somente se scout estiver bloqueado E ainda tiver <60% do budget gasto.
+    # ── Compressão proativa ANTES de escalar de modelo ───────────────────────────
+    # Se contexto estoura o 8b mas pode caber no 8b com compressão, comprime primeiro.
+    # Isso evita gastar tokens do scout/70b em mensagens que o 8b resolveria comprimido.
+    if ctx_chars > _LIMITE_CHARS_8B and modelo == _MODELO_8B and not _eh_continuacao_trivial:
+        _sb_pre = locals().get("_system_base", "")
+        if "=== CONTEXTO DO SERVIDOR ===" in _sb_pre:
+            _parte_antes_pre = _sb_pre.split("=== CONTEXTO DO SERVIDOR ===")[0]
+            _ctx_srv_pre = _contexto_servidor_comprimido(None, _nomes_mencionados)
+            _ctx_srv_curto_pre = "\n".join(
+                l for l in _ctx_srv_pre.split("\n")
+                if not l.strip().startswith("  ") or any(n.lower() in l.lower() for n in (_nomes_mencionados or []))
+            )[:1200]
+            _sys_comprimido_pre = _parte_antes_pre + f"=== CONTEXTO DO SERVIDOR (resumido) ===\n{_ctx_srv_curto_pre}\n"
+            _msgs_comprimidas = [
+                {"role": "system", "content": _sys_comprimido_pre},
+                {"role": "system", "content": membro_info},
+            ] + hist
+            _chars_comprimidos = sum(len(m.get("content", "")) for m in _msgs_comprimidas)
+            if _chars_comprimidos <= _LIMITE_CHARS_8B:
+                mensagens = _msgs_comprimidas
+                ctx_chars = _chars_comprimidos
+                log.info(f"[GROQ] contexto comprimido preventivamente: {ctx_chars} chars — 8b suficiente")
+
+    ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
+
+    # ── Escala para modelo maior APENAS se compressão não resolveu ───────────────
+    # Scout: só escala se ainda tiver < 80% do TPD diário — preserva budget para o dia todo.
+    # 70b entra somente se scout estiver bloqueado/esgotado E ainda tiver <60% do budget gasto.
     if ctx_chars > _LIMITE_CHARS and modelo == _MODELO_8B:
         _modelo_escalado = None
-        if _modelo_disponivel(_MODELO_SCOUT) and _tokens_scout_hoje < LIMITE_SCOUT:
+        _scout_com_budget = (
+            _modelo_disponivel(_MODELO_SCOUT)
+            and _tokens_scout_hoje < int(LIMITE_SCOUT * 0.80)  # guard 80% TPD
+        )
+        if _scout_com_budget:
             _modelo_escalado = _MODELO_SCOUT
         elif _modelo_disponivel(_MODELO_70B) and _tokens_70b_hoje < int(LIMITE_70B * 0.60):
             _modelo_escalado = _MODELO_70B
@@ -4050,7 +4084,7 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         if _modelo_escalado:
             log.info(f"[GROQ] contexto {ctx_chars} chars > limite 8b — escalando para {_modelo_escalado}")
             modelo = _modelo_escalado
-            _LIMITE_CHARS = _LIMITE_CHARS_GERAL
+            _LIMITE_CHARS = _LIMITE_CHARS_SCOUT if modelo == _MODELO_SCOUT else _LIMITE_CHARS_GERAL
     if ctx_chars > _LIMITE_CHARS:
         # Passo 1: remove contexto vetorial e comprime contexto do servidor
         # _system_base pode não existir se _eh_continuacao_trivial (contexto mínimo já foi usado)
@@ -8129,53 +8163,19 @@ async def _interjetar_conversa(message: discord.Message):
     perfil_txt = f"\n{perfil_autor}" if perfil_autor else ""
 
     # Etapa 1: triagem qualificada — não só GO/PASS, mas define o ângulo
-
-    # ── Pré-filtro 1: contexto raso demais ───────────────────────────────────
-    _linhas_ctx = [l for l in ctx.splitlines() if l.strip()]
-    _media_len = sum(len(l.split(":", 1)[-1].strip()) for l in _linhas_ctx) / max(len(_linhas_ctx), 1)
-    _tem_substancia = _media_len >= 18 and len(_linhas_ctx) >= 2
-    if not _tem_substancia:
-        return  # conversa rasa demais — silêncio sem gastar tokens
-
-    # ── Pré-filtro 2: zoeira sobre nickname/nome de membro ───────────────────
-    # Quando a conversa gira em torno do nome/nickname de alguém, não há argumento
-    # real — o bot não deve entrar e explicar nada, apenas ignorar.
-    _nomes_membros = {
-        m.display_name.lower()
-        for m in message.guild.members
-        if not m.bot and m != message.author
-    } if message.guild else set()
-    _ctx_lower = ctx.lower()
-    _e_zoeira_nome = any(
-        nome in _ctx_lower and (
-            "q nome" in _ctx_lower or "que nome" in _ctx_lower
-            or "kk" in _ctx_lower or "kkk" in _ctx_lower
-            or "lol" in _ctx_lower or "haha" in _ctx_lower
-            or "mano" in _ctx_lower
-        )
-        for nome in _nomes_membros
-        if len(nome) >= 4
-    )
-    if _e_zoeira_nome:
-        return
-
     system_triagem = (
         "Você avalia se um bot de Discord deve entrar numa conversa e como.\n"
         "Responda com UMA das opções: OPINIAO, PERGUNTA, DISCORDA, PASS\n"
         "OPINIAO — o tema dá para tomar posição própria com base no que foi dito na conversa\n"
-        "PERGUNTA — algo na conversa merece uma pergunta que force reflexão sobre o que ELES mesmos disseram\n"
+        "PERGUNTA — algo na conversa merece uma pergunta que force reflexão sobre o que foi dito\n"
         "DISCORDA — alguém disse algo questionável ou claramente errado dentro da conversa\n"
-        "PASS — tudo que não se encaixa claramente acima: zoeiras, gírias, frases soltas, resenha entre membros,\n"
-        "  emojis, cumprimentos, mensagens curtas sem argumento, assuntos externos ao servidor,\n"
-        "  comentários sobre nomes/nicknames de pessoas, piadas internas.\n"
-        "REGRA CRÍTICA: se as mensagens são curtas (menos de 15 palavras cada), sem argumento real, é PASS.\n"
-        "REGRA CRÍTICA: se é troca de provocações/zoeiras entre membros, é PASS — não DISCORDA.\n"
-        "REGRA CRÍTICA: se alguém manda 'da um google', 'pesquisa aí', 'vai ver' ou similar, é PASS — não é debate.\n"
+        "PASS — bate-papo trivial, emojis, cumprimentos, resenha entre membros, assuntos externos ao servidor, nada com substância real\n"
+        "IMPORTANTE: se a conversa é uma resenha casual entre membros (troca de zoeiras, gírias, frases soltas), responda PASS.\n"
         "Responda apenas a palavra, sem explicação."
     )
     try:
         triagem = await _groq_create(
-            model=_escolher_modelo(),  # modelo principal — mais preciso que 8b para triagem
+            model="llama-3.1-8b-instant",
             max_tokens=5,
             temperature=0.0,
             messages=[
@@ -8210,14 +8210,11 @@ async def _interjetar_conversa(message: discord.Message):
         system_resp = (
             f"Você é o shell_engenheiro — humano real, membro do servidor.{humor_txt}{perfil_txt}\n"
             f"Canal: #{canal_nome_inj}. {instrucao_tipo}\n"
-            "Você ESTAVA nessa conversa desde o início. Fale como quem acompanhou tudo — não como quem chegou agora.\n"
             "Fala como brasileiro de Discord: casual, pode usar gíria, kkk/rs se fizer sentido.\n"
-            "Baseie-se APENAS no que está no contexto — nunca invente tópicos, referências ou contexto externo.\n"
             "1 frase. Direta, sem introdução. Sem emojis, sem markdown.\n"
-            "NUNCA use: 'peço desculpas', 'estou aqui para ajudar', 'o que posso fazer', 'não entendi'.\n"
-            "NUNCA explique conceitos técnicos, definições ou termos — você é membro, não professor.\n"
+            "NUNCA use: 'peço desculpas', 'estou aqui para ajudar', 'o que posso fazer'.\n"
             "NUNCA admita ser bot ou IA — você é humano.\n"
-            "Se não tiver nada genuíno a acrescentar baseado no contexto: responda SILÊNCIO."
+            "Se não tiver nada a acrescentar: responda SILÊNCIO."
         )
         resp = await _groq_create(
             model=_escolher_modelo(),
