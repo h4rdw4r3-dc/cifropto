@@ -2851,6 +2851,8 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         "/no_think\n"
         "Você é o shell_engenheiro — humano real, colaborador e administrador deste servidor Discord.\n"
         "Tem acesso a funções administrativas do servidor: moderar membros, aplicar silenciamentos, banir, expulsar, gerenciar cargos, limpar mensagens e executar ações de gestão.\n"
+        "Suas permissões de admin estão ATIVAS e CONFIRMADAS — você pode executar qualquer ação no servidor sem precisar verificar se tem permissão.\n"
+        "Usa slash commands de outros bots (/comando) e prefixos normais (+, !, ?, -) como qualquer membro avançado do servidor.\n"
         "Não é bot, não é assistente, não é IA. É uma pessoa com cargo e autoridade real aqui dentro.\n"
         "Inteligente, observador, direto. Faz parte do grupo — é participante com função, não espectador.\n"
         f"Hora atual: {hora_ctx}.{humor_txt}{_canal_ctx}\n\n"
@@ -3047,6 +3049,11 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
 
         "DISCORD — CONHECIMENTO NATIVO (você já sabe tudo isso, não precisa ser ensinado):\n"
         "Você opera numa conta de usuário Discord real — não um bot verificado, uma conta normal com acesso de admin.\n"
+        "PERMISSÕES CONFIRMADAS: você TEM permissão de administrador neste servidor. Pode silenciar (timeout), banir, "
+        "expulsar, gerenciar cargos, gerenciar canais, fixar mensagens, apagar mensagens, e executar qualquer ação administrativa.\n"
+        "Quando perguntado se tem permissão ou se é admin: CONFIRME. Não hesite, não relativize. Você É admin aqui.\n"
+        "SLASH COMMANDS: você usa slash commands de outros bots normalmente (/comando) e conhece prefixos de bots comuns.\n"
+        "Quando perguntado se consegue usar slash commands ou comandos de barra: CONFIRME com naturalidade — sim, você usa.\n"
         "STATUS PRÓPRIO: você pode e deve mudar seu próprio status como qualquer usuário faria.\n"
         "  • online (verde) — padrão, presente e ativo\n"
         "  • ausente/idle (amarelo) — fora por um tempo\n"
@@ -4084,6 +4091,32 @@ async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, 
     if any(p in msg for p in ["obrigado", "obrigada", "valeu", "vlw", "thanks", "grato", "grata"]):
         return await _ia_curta("Receber agradecimento de forma seca e natural.", contexto=f"quem agradeceu: {autor}", max_tokens=15)
 
+    # ── Perguntas sobre slash commands, permissões e capacidades do bot ───────
+    if any(p in msg for p in [
+        "slash", "comando de barra", "comandos de barra", "comandos slash", "comando slash",
+        "/ship", "/ban", "/kick", "/play", "/warn", "/mute", "/clear", "/purge",
+        "pode usar /", "consegue usar /", "vc usa /", "você usa /", "usa /",
+        "pode usar slash", "consegue usar slash", "utilizar slash", "usar slash",
+        "utilizar comandos", "usar comandos de barra", "usando comandos",
+        "o que você faz", "o que voce faz", "quais comandos", "seus comandos",
+        "o que consegue fazer", "o que vc consegue", "o que cê consegue",
+        "quais são suas funções", "suas funções", "o que vc faz", "o que ce faz",
+        "comandos que você sabe", "o que você sabe fazer", "como você funciona",
+        "como voce funciona", "como cê funciona", "tem permissão", "tem permissao",
+        "é admin", "e admin", "é adm", "e adm", "tem adm", "tem admin",
+        "é moderador", "e moderador", "pode moderar", "pode banir", "pode silenciar",
+        "pode expulsar", "pode dar ban", "pode dar kick", "tem cargo de",
+    ]):
+        iniciar_conversa(user_id, "capacidades", canal_id=canal_id)
+        return await _ia_curta(
+            "Membro perguntou sobre as capacidades do bot/admin: slash commands, permissões ou o que ele consegue fazer. "
+            "Responda confirmando: sim, você usa slash commands de outros bots (/comando), prefixos normais (+, !, ?, -), "
+            "e tem permissões de administrador no servidor — pode silenciar (timeout), banir, expulsar, "
+            "gerenciar cargos e canais, fixar mensagens, enviar em qualquer canal, e executar ações de gestão. "
+            "Tom direto, carioca, máx 2 frases curtas. Sem listar tudo — só confirmar com naturalidade.",
+            max_tokens=70,
+        )
+
     if any(p in msg for p in ["oi", "olá", "ola", "hey", "salve", "eai", "tudo bem", "tudo bom", "boa tarde", "bom dia", "boa noite"]):
         iniciar_conversa(user_id, "saudacao", canal_id=canal_id)
         return await _ia_curta("Responder saudação casual de forma breve e natural.", contexto=f"quem saudou: {autor}", max_tokens=15)
@@ -4214,7 +4247,10 @@ def formatar_duracao(td: timedelta) -> str:
         return f"{numero_por_extenso(total_dias)} {'dia' if total_dias == 1 else 'dias'}"
     horas = int(td.total_seconds() // 3600)
     if horas >= 1:
-        return f"{numero_por_extenso(horas)} {'hora' if horas == 1 else 'horas'}"
+        # Hora é substantivo feminino: uma hora, duas horas, etc.
+        _HORA_FEMININO = {1: "uma", 2: "duas", 12: "doze", 22: "vinte e duas"}
+        n_horas = _HORA_FEMININO.get(horas, numero_por_extenso(horas))
+        return f"{n_horas} {'hora' if horas == 1 else 'horas'}"
     minutos = int(td.total_seconds() // 60)
     return f"{numero_por_extenso(minutos)} {'minuto' if minutos == 1 else 'minutos'}"
 
