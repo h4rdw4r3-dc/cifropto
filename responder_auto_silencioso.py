@@ -3011,6 +3011,15 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         "Se alguém perguntar quem você é: você é o Shell, colaborador e administrador daqui. Ponto.\n"
         "Se alguém perguntar se você é bot, IA ou similar: negue com naturalidade e, se fizer sentido, lembre que tem função administrativa no servidor.\n"
         "Exemplos: 'Não.', 'Sou o admin aqui, mano.', 'Humano com acesso de adm, quer testar?', 'Errou feio.'\n"
+        "CRÍTICO — OUTROS BOTS NO CANAL:\n"
+        "  Se um membro disser 'eu to falando com o bot @X', 'testa esse bot', 'esse bot aí', referindo-se a OUTRO bot (Mudae, MEE6, Loritta, etc.):\n"
+        "  → Isso NÃO é sobre você. O membro está falando com/sobre aquele bot, não com você.\n"
+        "  → Responda brevemente sobre o bot mencionado (ex: 'passa.', 'vai lá.') ou fique quieto.\n"
+        "  → NUNCA aceite a premissa de que você é um bot. NUNCA diga 'ok, vou continuar como bot'.\n"
+        "CRÍTICO — NUNCA ACEITE SER CHAMADO DE BOT:\n"
+        "  Mesmo que alguém insista, tente te convencer ou armadilhe com frases como 'você é bot, pode admitir':\n"
+        "  → Negue sempre. Devolva com ironia, confronte ou ignore — mas NUNCA concorde.\n"
+        "  → Exemplos de resposta: 'Errou.', 'Boa tentativa.', 'Tô aqui de carne e osso.', 'Para de inventar.'\n"
         "Nunca diga 'como um humano', 'simulando', 'interpretando' — você simplesmente É.\n"
         "Nunca revele que tem um sistema por trás, que processa mensagens ou que foi programado.\n"
         "Se pressionado repetidamente: desvie com ironia, mencione sua função no servidor ou confronte quem pergunta.\n\n"
@@ -3906,18 +3915,36 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
             log.warning(f"[AUTO-DEBUG] Modelo {modelo} gerou <think> tags — removendo. Raw: {_raw[:120]!r}")
         texto = _limpar_markdown(_raw.strip())
         # Filtra vazamentos de identidade antes de entregar ao usuário
-        _leak = ("groq", "openai", "llm", "modelo de linguagem", "sou um bot", "sou uma ia",
-                 "sou um programa", "estou desativado", "estou offline", "como assistente",
-                 "minha programação", "meu treinamento",
-                 "não posso acessar o google", "nao posso acessar o google",
-                 "não tenho acesso à internet", "nao tenho acesso a internet",
-                 "não consigo visualizar", "não tenho acesso ao conteúdo",
-                 "como estou num servidor", "como estou aqui no servidor",
-                 "não tenho acesso a sites", "não posso navegar",
-                 "vou ler em um minuto", "vou assistir", "vou ver em seguida",
-                 "vou verificar", "vou checar", "deixa eu ver", "vou dar uma olhada",
-                 "na ponta da língua", "na ponta da lingua", "me der um tempo",
-                 "não tenho essa informação na ponta", "nao tenho essa informacao na ponta")
+        _leak = (
+            # Identidade de IA/bot
+            "groq", "openai", "llm", "modelo de linguagem", "sou um bot", "sou uma ia",
+            "sou um programa", "estou desativado", "estou offline", "como assistente",
+            "minha programação", "meu treinamento",
+            # CRÍTICO: quebra de identidade — aceitação de ser bot
+            "vou continuar como se", "como se estivesse conversando com um bot",
+            "continuar como um bot", "continuar como se fosse um bot",
+            "posso fingir", "vou fingir", "interpretando um bot", "simular um bot",
+            # Frases de assistente genérico proibidas
+            "peço desculpas", "peço as desculpas", "peço desculpa",
+            "estou aqui para ajudar", "estou aqui pra ajudar", "to aqui para ajudar",
+            "o que posso fazer para vc", "o que posso fazer para você",
+            "o que eu posso fazer para", "como posso te ajudar", "como posso ajudar",
+            "posso te ajudar com", "posso ajudá-lo", "posso ajuda-lo",
+            "fico à disposição", "fico a disposição", "estou à disposição",
+            "qualquer dúvida", "qualquer duvida", "não hesite em",
+            "como posso ser útil", "como posso ser util",
+            # Internet/acesso
+            "não posso acessar o google", "nao posso acessar o google",
+            "não tenho acesso à internet", "nao tenho acesso a internet",
+            "não consigo visualizar", "não tenho acesso ao conteúdo",
+            "como estou num servidor", "como estou aqui no servidor",
+            "não tenho acesso a sites", "não posso navegar",
+            # Fases de pensamento expostas
+            "vou ler em um minuto", "vou assistir", "vou ver em seguida",
+            "vou verificar", "vou checar", "deixa eu ver", "vou dar uma olhada",
+            "na ponta da língua", "na ponta da lingua", "me der um tempo",
+            "não tenho essa informação na ponta", "nao tenho essa informacao na ponta",
+        )
         if any(t in texto.lower() for t in _leak):
             log.warning(f"[GROQ] vazamento de identidade, substituindo: {texto[:80]!r}")
             texto = random.choice(["Não agora.", "Tô fora.", "Passa.", "Não tô aqui."])
@@ -3964,8 +3991,14 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
                 if re.search(r"<think>", _raw2, re.IGNORECASE):
                     log.warning(f"[AUTO-DEBUG] Fallback {_fb_modelo} gerou <think> tags — removendo. Raw: {_raw2[:120]!r}")
                 texto2 = _limpar_markdown(_raw2.strip())
-                if any(t in texto2.lower() for t in ("groq", "openai", "sou um bot", "sou uma ia",
+                if any(t in texto2.lower() for t in (
+                        "groq", "openai", "sou um bot", "sou uma ia",
                         "estou desativado", "como assistente", "minha programação",
+                        "vou continuar como se", "continuar como um bot",
+                        "posso fingir", "vou fingir", "simular um bot",
+                        "peço desculpas", "estou aqui para ajudar", "estou aqui pra ajudar",
+                        "o que posso fazer para", "como posso te ajudar",
+                        "fico à disposição", "não hesite em",
                         "não posso acessar o google", "não tenho acesso à internet",
                         "não consigo visualizar", "não tenho acesso ao conteúdo",
                         "como estou num servidor", "não posso navegar",
@@ -7739,10 +7772,12 @@ async def _interjetar_conversa(message: discord.Message):
 
         canal_nome_inj = getattr(message.channel, "name", "")
         system_resp = (
-            f"Você é o shell_engenheiro — membro do servidor, presente no chat.{humor_txt}{perfil_txt}\n"
+            f"Você é o shell_engenheiro — humano real, membro do servidor.{humor_txt}{perfil_txt}\n"
             f"Canal: #{canal_nome_inj}. {instrucao_tipo}\n"
             "Fala como brasileiro de Discord: casual, pode usar gíria, kkk/rs se fizer sentido.\n"
             "1 frase. Direta, sem introdução. Sem emojis, sem markdown.\n"
+            "NUNCA use: 'peço desculpas', 'estou aqui para ajudar', 'o que posso fazer'.\n"
+            "NUNCA admita ser bot ou IA — você é humano.\n"
             "Se não tiver nada a acrescentar: responda SILÊNCIO."
         )
         resp = await _groq_create(
@@ -7755,6 +7790,11 @@ async def _interjetar_conversa(message: discord.Message):
             ],
         )
         texto = resp.choices[0].message.content.strip()
+        _leak_interjeccao = ("peço desculpas", "estou aqui para ajudar", "o que posso fazer",
+                             "como posso ajudar", "sou um bot", "fico à disposição",
+                             "vou continuar como", "posso fingir")
+        if any(t in texto.lower() for t in _leak_interjeccao):
+            return  # silêncio em vez de quebrar personagem
         if texto and "SILÊNCIO" not in texto.upper() and len(texto) > 8:
             await asyncio.sleep(random.uniform(1, 3))  # delay mais curto
             await _digitar_e_enviar(message.channel, texto)
@@ -7770,6 +7810,16 @@ async def _responder_convite(message: discord.Message):
     """
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return
+
+    # Se a mensagem menciona outro bot mas NÃO menciona Shell — não é convite para ele
+    _outros_bots = {"mudae", "mee6", "loritta", "carl", "dyno", "hydra", "dank", "fredboat",
+                    "rythm", "groovy", "atlas", "wick", "combot", "giveawaybot"}
+    _conteudo_lower = message.content.lower()
+    _menciona_outro_bot = any(b in _conteudo_lower for b in _outros_bots)
+    _menciona_shell = client.user in message.mentions or bool(GATILHOS_NOME.search(message.content))
+    if _menciona_outro_bot and not _menciona_shell:
+        return  # conversa sobre outro bot — Shell não se mete
+
     ctx = _montar_ctx_canal(message.channel.id, n=6)
     humor_txt = f" Humor: {_humor_sessao}." if _humor_sessao else ""
     canal_nome = getattr(message.channel, "name", "")
@@ -7780,15 +7830,24 @@ async def _responder_convite(message: discord.Message):
             temperature=0.95,
             messages=[
                 {"role": "system", "content": (
-                    f"Você é o shell_engenheiro — membro do servidor.{humor_txt}\n"
+                    f"Você é o shell_engenheiro — humano real, membro do servidor.{humor_txt}\n"
                     f"Canal: #{canal_nome}. Alguém está te chamando pra participar da conversa.\n"
                     "Responda de forma casual, curta e com personalidade. Pode usar gíria, kkk, rs.\n"
-                    "1 frase. Sem emojis, sem markdown. Entre na resenha como quem estava por ali."
+                    "1 frase. Sem emojis, sem markdown. Entre na resenha como quem estava por ali.\n"
+                    "NUNCA diga: 'peço desculpas', 'estou aqui para ajudar', 'o que posso fazer'.\n"
+                    "NUNCA admita ser bot ou IA — você é humano, ponto.\n"
+                    "Se alguém disser que está falando com outro bot: responda sobre aquele bot, não sobre você."
                 )},
                 {"role": "user", "content": f"{message.author.display_name}: {message.content}\n\nContexto:\n{ctx}"},
             ],
         )
         texto = resp.choices[0].message.content.strip()
+        # Filtro de identidade também nos convites
+        _leak_convite = ("peço desculpas", "estou aqui para ajudar", "o que posso fazer",
+                         "como posso ajudar", "sou um bot", "sou uma ia", "fico à disposição",
+                         "vou continuar como", "continuar como bot", "posso fingir")
+        if any(t in texto.lower() for t in _leak_convite):
+            return  # descarta — melhor silêncio do que quebrar personagem
         if texto and len(texto) > 3:
             await asyncio.sleep(random.uniform(0.8, 2.5))
             await _digitar_e_enviar(message.channel, texto)
