@@ -868,7 +868,9 @@ _regras_membro: dict[str, list[str]] = defaultdict(list)
 _MAX_REGRAS_MEMBRO = 10
 
 # ── Perfis de usuário persistidos ────────────────────────────────────────────
-# {user_id: {"resumo": str, "n": int, "atualizado": str, "episodios": list[str]}}
+# {user_id: {"resumo": str, "n": int, "atualizado": str, "episodios": list[dict|str],
+#             "preferencias": list[str], "horarios": list[int], "canais": dict,
+#             "ultima_vez_visto": str}}
 perfis_usuarios: dict[int, dict] = {}
 
 # ── Estado de humor da sessão (gerado no on_ready, persiste até reinício) ─────
@@ -894,11 +896,13 @@ _contexto_compacto: str = ""        # versão curta injetada no Groq (economiza 
 categorias_vistas: set = set()
 
 # ── Token budget diário ───────────────────────────────────────────────────────
-# Cascata de modelos (ordem de preferência):
+# Cascata de modelos (ordem de preferência — revisada para poupar TPD do 70b):
 #   Nível 1 — llama-3.1-8b-instant:              500k TPD  — padrão, mais rápido
-#   Nível 2 — llama-3.3-70b-versatile:           100k TPD  — qualidade superior
-#   Nível 3 — meta-llama/llama-4-scout-17b:      500k TPD  — fallback 1
-#   Nível 4 — qwen/qwen3-32b:                    500k TPD  — fallback 2 (último recurso)
+#   Nível 2 — meta-llama/llama-4-scout-17b:      500k TPD  — fallback 1 (subiu de pos 3)
+#   Nível 3 — llama-3.3-70b-versatile:           100k TPD  — reservado (desceu de pos 2)
+#   Nível 4 — qwen/qwen3-32b:                    500k TPD  — último recurso
+# ⚠️  70b tem 100k TPD — estava na posição 2 e esgotava antes do meio-dia.
+#     Agora só entra quando 8b E scout estiverem indisponíveis/esgotados.
 _tokens_70b_hoje: int = 0       # tokens gastos hoje no modelo 70b
 _tokens_8b_hoje: int = 0        # tokens gastos hoje no modelo 8b
 _tokens_scout_hoje: int = 0     # tokens gastos hoje no llama-4-scout
@@ -2794,7 +2798,7 @@ def _hora_contexto() -> str:
 
 
 def _contexto_usuario(user_id: int) -> str:
-    """Retorna perfil completo do usuário: resumo, episódios e dados comportamentais."""
+    """Retorna perfil completo do usuário: resumo, episódios datados, preferências e dados comportamentais."""
     perfil = perfis_usuarios.get(user_id)
     if not perfil:
         return ""
@@ -2804,10 +2808,22 @@ def _contexto_usuario(user_id: int) -> str:
     if perfil.get("resumo"):
         partes.append(f"[Histórico com esse usuário ({n} interações): {perfil['resumo']}]")
 
+    # Episódios com timestamp (novo formato dict) — compatível com formato antigo (str)
     episodios = perfil.get("episodios", [])
     if episodios:
-        eps_txt = " | ".join(episodios[-5:])
+        _eps_fmt = []
+        for _e in episodios[-5:]:
+            if isinstance(_e, dict):
+                _eps_fmt.append(f"{_e['txt']} ({_e.get('ts', '?')})")
+            else:
+                _eps_fmt.append(str(_e))
+        eps_txt = " | ".join(_eps_fmt)
         partes.append(f"[Memória episódica: {eps_txt}]")
+
+    # Preferências conhecidas do usuário
+    prefs = perfil.get("preferencias", [])
+    if prefs:
+        partes.append(f"[Preferências: {' | '.join(prefs[-5:])}]")
 
     # Dados comportamentais — horário e presença
     _horarios = perfil.get("horarios", [])
@@ -3640,9 +3656,11 @@ def _escolher_modelo(forcar_rapido: bool = False) -> str:
     """
     Cascata de 4 modelos por disponibilidade e budget (TPD):
       1. llama-3.1-8b-instant     — padrão (500k TPD, mais rápido)
-      2. llama-3.3-70b-versatile  — melhor qualidade (100k TPD)
-      3. llama-4-scout-17b        — fallback 1 (500k TPD)
-      4. qwen/qwen3-32b           — fallback 2 / último recurso (500k TPD)
+      2. llama-4-scout-17b        — fallback 1 (500k TPD)  ← subiu de posição
+      3. llama-3.3-70b-versatile  — reservado (100k TPD)   ← posição 3, conservado
+      4. qwen/qwen3-32b           — último recurso (500k TPD)
+    ⚠️  70b tem apenas 100k TPD/dia. Nunca deve ser o fallback padrão de contexto grande
+    porque esgota antes do meio-dia. Só entra quando 8b E scout estiverem indisponíveis.
     Respeita bloqueios por rate limit real da API (retry-after).
     """
     _resetar_tokens_se_novo_dia()
@@ -3651,18 +3669,18 @@ def _escolher_modelo(forcar_rapido: bool = False) -> str:
     if _modelo_disponivel(_MODELO_8B) and _tokens_8b_hoje < LIMITE_8B:
         return _MODELO_8B
 
-    # Nível 2 — 70b (se budget disponível e não forçando rápido)
-    # Guard de 80%: quando o 70b supera 80% do limite diário (100k TPD), é reservado
-    # apenas para fallback de emergência — evita esgotar o budget cedo demais e
-    # causar cascata de 429 antes das 17h UTC como visto nos logs de 09/04/2026.
-    _LIMITE_70B_NORMAL = int(LIMITE_70B * 0.80)  # 80% = 72.000 tokens
-    if not forcar_rapido and _modelo_disponivel(_MODELO_70B) and _tokens_70b_hoje < _LIMITE_70B_NORMAL:
-        return _MODELO_70B
-
-    # Nível 3 — llama-4-scout (500k TPD, nova arquitetura)
+    # Nível 2 — llama-4-scout (500k TPD) — preferido sobre 70b na cascata normal
+    # Subiu de posição 3 para 2: evita tocar no budget limitado do 70b para contextos longos
     if _modelo_disponivel(_MODELO_SCOUT) and _tokens_scout_hoje < LIMITE_SCOUT:
-        log.info("[BUDGET] usando fallback nível 3: llama-4-scout")
+        log.info("[BUDGET] usando fallback nível 2: llama-4-scout")
         return _MODELO_SCOUT
+
+    # Nível 3 — 70b (reservado — só quando 8b e scout estão indisponíveis)
+    # Guard de 60%: preserva 40% do budget para escalação de contexto em responder_com_groq
+    _LIMITE_70B_NORMAL = int(LIMITE_70B * 0.60)  # 60% = 54.000 tokens
+    if not forcar_rapido and _modelo_disponivel(_MODELO_70B) and _tokens_70b_hoje < _LIMITE_70B_NORMAL:
+        log.info("[BUDGET] usando fallback nível 3: llama-3.3-70b (reservado)")
+        return _MODELO_70B
 
     # Nível 4 — qwen3-32b (último recurso)
     if _modelo_disponivel(_MODELO_QWEN) and _tokens_qwen_hoje < LIMITE_QWEN:
@@ -3731,6 +3749,19 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     # raciocínio encadeado (moderação complexa, debug, planejamento em múltiplas etapas)
     if len(hist) > 10:
         hist[:] = hist[-10:]
+
+    # ── Detecção de resposta trivial (ack, reação, continuação breve) ─────────────
+    # Mensagens de 1-3 palavras dentro de uma conversa em andamento ("isso", "perfeito",
+    # "dahora", "vlw", "entendi") NÃO precisam do contexto completo do servidor (22k chars).
+    # Usar contexto mínimo + histórico recente poupa tokens e evita 413/429 desnecessários.
+    _palavras_perg = pergunta.split()
+    _eh_continuacao_trivial = (
+        len(_palavras_perg) <= 3
+        and bool(historico_groq.get(chave_hist))  # há histórico — é continuação
+        and user_id not in DONOS_IDS
+        and not re.search(r'\b(?:bane?|banir|silencia|muta|timeout|expulsa|kick|adverte|pune)\b',
+                          pergunta, re.IGNORECASE)
+    )
 
     # Nível hierárquico
     if user_id in DONOS_IDS:
@@ -3956,19 +3987,38 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     _raciocinar = _precisa_raciocinar(pergunta, nivel)
     if _raciocinar:
         log.debug(f"[THINK] raciocínio ativado para {autor!r}: {pergunta[:60]!r}")
-    _system_base = system_com_contexto(
-        user_id=user_id,
-        mencoes_nomes=_nomes_mencionados,
-        canal_nome=_canal_nome_ctx,
-        raciocinar=_raciocinar,
-    )
-    if _ctx_vetorial:
-        _system_base += f"\n{_ctx_vetorial}\n"
 
-    mensagens = [
-        {"role": "system", "content": _system_base + ctx_canal},
-        {"role": "system", "content": membro_info},
-    ] + hist
+    # ── Montagem de contexto: trivial usa system mínimo, substantivo usa completo ──
+    if _eh_continuacao_trivial:
+        # Mensagem trivial de continuação (≤3 palavras, ex: "isso", "perfeito", "vlw")
+        # Não precisa de todo o servidor — histórico recente já dá contexto suficiente.
+        _perfil_ctx_triv = _contexto_usuario(user_id)
+        _perfil_inj_triv = f"\n{_perfil_ctx_triv}" if _perfil_ctx_triv else ""
+        _system_trivial = (
+            "/no_think\n"
+            "Você é o shell_engenheiro — humano real, admin Discord. "
+            "Carioca direto, 1 frase curta, sem markdown, sem emojis.\n"
+            f"Hora: {_hora_contexto()}. Usuário atual: '{autor}' | nível: {nivel}."
+            f"{autorizacao_extra}{_perfil_inj_triv}"
+        )
+        mensagens = [
+            {"role": "system", "content": _system_trivial},
+        ] + hist[-6:]
+        log.debug(f"[GROQ] contexto trivial para '{pergunta[:40]}' ({len(mensagens)} msgs)")
+    else:
+        _system_base = system_com_contexto(
+            user_id=user_id,
+            mencoes_nomes=_nomes_mencionados,
+            canal_nome=_canal_nome_ctx,
+            raciocinar=_raciocinar,
+        )
+        if _ctx_vetorial:
+            _system_base += f"\n{_ctx_vetorial}\n"
+
+        mensagens = [
+            {"role": "system", "content": _system_base + ctx_canal},
+            {"role": "system", "content": membro_info},
+        ] + hist
 
     # ── Escolha antecipada do modelo para calibrar o limite de contexto ──────────
     # O 8b-instant tem TPM de 6000 tokens (≈ 21000 chars); os demais têm 12k-30k.
@@ -3986,14 +4036,15 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
 
     # ── Escala para modelo maior ANTES de cortar contexto ────────────────────────
-    # Se o contexto estoura o limite do 8b, tenta usar 70b/scout que suportam 40k chars.
-    # Isso preserva o histórico completo e evita respostas burras por falta de contexto.
+    # Se o contexto estoura o limite do 8b, tenta scout > 70b > qwen (nesta ordem).
+    # Scout tem 500k TPD e suporta contexto grande — preferido sobre o 70b aqui também.
+    # 70b entra somente se scout estiver bloqueado E ainda tiver <60% do budget gasto.
     if ctx_chars > _LIMITE_CHARS and modelo == _MODELO_8B:
         _modelo_escalado = None
-        if _modelo_disponivel(_MODELO_70B) and _tokens_70b_hoje < int(LIMITE_70B * 0.80):
-            _modelo_escalado = _MODELO_70B
-        elif _modelo_disponivel(_MODELO_SCOUT) and _tokens_scout_hoje < LIMITE_SCOUT:
+        if _modelo_disponivel(_MODELO_SCOUT) and _tokens_scout_hoje < LIMITE_SCOUT:
             _modelo_escalado = _MODELO_SCOUT
+        elif _modelo_disponivel(_MODELO_70B) and _tokens_70b_hoje < int(LIMITE_70B * 0.60):
+            _modelo_escalado = _MODELO_70B
         elif _modelo_disponivel(_MODELO_QWEN) and _tokens_qwen_hoje < LIMITE_QWEN:
             _modelo_escalado = _MODELO_QWEN
         if _modelo_escalado:
@@ -4002,7 +4053,9 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
             _LIMITE_CHARS = _LIMITE_CHARS_GERAL
     if ctx_chars > _LIMITE_CHARS:
         # Passo 1: remove contexto vetorial e comprime contexto do servidor
-        _sys_enxuto = _system_base.split("\n=== MEM")[0] if "=== MEM" in _system_base else _system_base
+        # _system_base pode não existir se _eh_continuacao_trivial (contexto mínimo já foi usado)
+        _sb = locals().get("_system_base", "")
+        _sys_enxuto = _sb.split("\n=== MEM")[0] if "=== MEM" in _sb else _sb
         # Mantém apenas a seção de hierarquia/identidade + regras do servidor (sem lista de membros)
         _sys_compacto = _sys_enxuto
         if "=== CONTEXTO DO SERVIDOR ===" in _sys_enxuto:
@@ -4121,9 +4174,8 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
 
         # Cascata de fallback — tenta próximo modelo disponível na ordem de prioridade
         # _groq_create já aplicou o bloqueio no modelo que falhou
-        # 70b é incluído aqui: o guard de 80% só age na escolha normal (_escolher_modelo).
-        # Em fallback emergencial, os 20% reservados do 70b ficam acessíveis.
-        _cascata = [_MODELO_70B, _MODELO_8B, _MODELO_SCOUT, _MODELO_QWEN]
+        # Ordem: scout > 8b > 70b > qwen  (70b reservado, vai por último)
+        _cascata = [_MODELO_SCOUT, _MODELO_8B, _MODELO_70B, _MODELO_QWEN]
         for _fb_modelo in _cascata:
             if _fb_modelo == modelo:
                 continue  # não tenta o mesmo que falhou
@@ -7846,9 +7898,10 @@ async def _atualizar_perfil_usuario(user_id: int, autor: str, mensagem: str, res
     """
     perfil = perfis_usuarios.setdefault(user_id, {
         "resumo": "", "n": 0, "atualizado": "", "episodios": [],
-        "ultima_vez_visto": "", "horarios": [], "canais": {},
+        "preferencias": [], "ultima_vez_visto": "", "horarios": [], "canais": {},
     })
     perfil.setdefault("episodios", [])
+    perfil.setdefault("preferencias", [])
     perfil.setdefault("horarios", [])
     perfil.setdefault("canais", {})
     perfil["n"] = perfil.get("n", 0) + 1
@@ -7883,24 +7936,70 @@ async def _atualizar_perfil_usuario(user_id: int, autor: str, mensagem: str, res
             ep_txt = ep_r.choices[0].message.content.strip()
             if ep_txt and ep_txt.upper() != "NENHUM" and len(ep_txt) > 5:
                 episodios = perfil["episodios"]
-                # Evita duplicatas próximas
-                if not episodios or ep_txt.lower() not in episodios[-1].lower():
-                    episodios.append(ep_txt)
-                    if len(episodios) > 20:  # mantém os 20 mais recentes
+                # Evita duplicatas próximas — compara texto
+                _ultimo_ep = episodios[-1] if episodios else None
+                _ultimo_txt = _ultimo_ep.get("txt", _ultimo_ep) if isinstance(_ultimo_ep, dict) else (_ultimo_ep or "")
+                if ep_txt.lower() not in _ultimo_txt.lower():
+                    # Armazena com timestamp para memória cronológica
+                    episodios.append({
+                        "txt": ep_txt,
+                        "ts": agora_utc().strftime("%d/%m/%Y"),
+                        "canal": str(canal_id),
+                    })
+                    if len(episodios) > 30:  # mantém os 30 mais recentes
                         episodios.pop(0)
                     salvar_dados()
                     log.debug(f"[EPISÓDIO] {autor}: {ep_txt}")
         except Exception as e:
             log.debug(f"[EPISÓDIO] falha: {e}")
 
+    # Extrai preferência explícita (gosta de X, usa Y, prefere Z) — a cada interação com substância
+    if GROQ_API_KEY and len(mensagem.split()) >= 8:
+        try:
+            pref_r = await _groq_create(
+                model="llama-3.1-8b-instant",
+                max_tokens=30,
+                temperature=0.1,
+                messages=[
+                    {"role": "system", "content":
+                     "Se a mensagem revela uma preferência clara do usuário (gosta de X, odeia Y, "
+                     "usa Z, prefere W, trabalha com N, joga X), extraia em 1 frase curta e objetiva. "
+                     "Exemplos: 'Prefere Python a JS.', 'Joga Dark Souls.', 'Trabalha à noite.', "
+                     "'Odeia reunião.'. Se nada concreto ou óbvio demais: responda NENHUM"},
+                    {"role": "user", "content": f"{autor}: {mensagem[:300]}"},
+                ],
+            )
+            pref_txt = pref_r.choices[0].message.content.strip()
+            if pref_txt and pref_txt.upper() != "NENHUM" and len(pref_txt) > 5:
+                prefs = perfil.setdefault("preferencias", [])
+                _ult_pref = prefs[-1] if prefs else ""
+                if pref_txt.lower() not in _ult_pref.lower():
+                    prefs.append(pref_txt)
+                    if len(prefs) > 20:
+                        prefs.pop(0)
+                    log.debug(f"[PREF] {autor}: {pref_txt}")
+        except Exception as e:
+            log.debug(f"[PREF] falha: {e}")
+
     # Só gera resumo a cada 5 interações (evita chamadas desnecessárias)
     if perfil["n"] % 5 != 0 or not GROQ_API_KEY:
         return
 
-    # Constrói contexto rico: últimas interações + episódios + dados comportamentais
+    # Constrói contexto rico: últimas interações + episódios + preferências + dados comportamentais
     resumo_anterior = perfil.get("resumo", "")
-    _eps = perfil.get("episodios", [])[-5:]
-    _eps_txt = " | ".join(_eps) if _eps else ""
+    _eps_raw = perfil.get("episodios", [])[-8:]
+    # Formata episódios com data se disponível (novo formato dict) ou texto puro (legado)
+    _eps_fmt = []
+    for _e in _eps_raw:
+        if isinstance(_e, dict):
+            _eps_fmt.append(f"{_e['txt']} ({_e.get('ts', '?')})")
+        else:
+            _eps_fmt.append(str(_e))
+    _eps_txt = " | ".join(_eps_fmt) if _eps_fmt else ""
+
+    # Preferências conhecidas
+    _prefs = perfil.get("preferencias", [])[-8:]
+    _prefs_txt = " | ".join(_prefs) if _prefs else ""
 
     # Horário mais frequente (UTC → BRT -3)
     _horarios = perfil.get("horarios", [])
@@ -7923,6 +8022,7 @@ async def _atualizar_perfil_usuario(user_id: int, autor: str, mensagem: str, res
     _contexto_perfil = (
         f"Resumo anterior: {resumo_anterior}\n"
         + (f"Episódios memoráveis: {_eps_txt}\n" if _eps_txt else "")
+        + (f"Preferências conhecidas: {_prefs_txt}\n" if _prefs_txt else "")
         + (f"Comportamento: {_hora_ativa} {_canal_fav}\n" if (_hora_ativa or _canal_fav) else "")
         + f"Total de interações: {perfil['n']}\n\n"
         + f"Nova interação:\n{_historico_recente}"
@@ -7931,14 +8031,14 @@ async def _atualizar_perfil_usuario(user_id: int, autor: str, mensagem: str, res
     try:
         r = await _groq_create(
             model="llama-3.1-8b-instant",
-            max_tokens=100,
+            max_tokens=120,
             temperature=0.3,
             messages=[
                 {"role": "system", "content":
                  "Você mantém um perfil compacto de como um usuário de Discord se comunica. "
                  "Atualize o resumo em 2-3 frases. Inclua: tom predominante, assuntos recorrentes, "
-                 "comportamentos notáveis, horário ativo se relevante. "
-                 "Seja específico — nomes próprios, temas concretos. Não genérico."},
+                 "preferências e comportamentos notáveis, horário ativo se relevante. "
+                 "Seja específico — nomes próprios, temas concretos, preferências reais. Não genérico."},
                 {"role": "user", "content": _contexto_perfil},
             ],
         )
