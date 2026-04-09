@@ -98,12 +98,12 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 SERVIDOR_ID = 1487599082825584761
 
 # ── Hierarquia do servidor (4 níveis) ────────────────────────────────────────
-# Nível 1 — Proprietários: controle total do agente (usuários específicos)
-DONOS_IDS = {1487591389653897306, 1321848653878661172, 1375560046930563306}
-_PROPRIETARIOS_IDS: frozenset[int] = frozenset({1321848653878661172, 1375560046930563306})
+# Nível 1 — Proprietário: controle total do agente (usuário único)
+DONOS_IDS = {1375560046930563306}
+_PROPRIETARIOS_IDS: frozenset[int] = frozenset({1375560046930563306})
 
 # Nível 2 — Colaboradores: cargo com permissão de dar ordens gerais ao bot
-CARGOS_SUPERIORES_IDS = {1487599082934636628, 1487599082934636627}
+CARGOS_SUPERIORES_IDS = {1487599082934636628}
 _CARGO_COLABORADORES_ID: int = 1487599082934636628
 
 # Nível 3 — Moderadores: equipe de moderação com acesso a comandos de moderação
@@ -115,7 +115,7 @@ _CARGO_MODERADORES_ID: int = 1487859369008697556
 _CARGO_MEMBROS_ID: int = 1487599082825584762
 
 # Retrocompatibilidade
-DONOS_ABSOLUTOS_IDS = {1487591389653897306, 1321848653878661172}
+DONOS_ABSOLUTOS_IDS = {1375560046930563306}
 CONTAS_TESTE = set()  # sem contas de teste no momento
 
 # ── Canal de auditoria ───────────────────────────────────────────────────────
@@ -568,6 +568,11 @@ _CFG_DEFAULTS: dict = {
     "cargos_superiores_ids":   list(CARGOS_SUPERIORES_IDS),
     "usuarios_superiores_ids": list(USUARIOS_SUPERIORES_IDS),
     "contas_teste_ids":        [],
+    # Presença inicial customizável pelo Proprietário
+    # status: "online" | "idle" | "dnd" | "invisible"
+    # atividade: texto livre ou null para nenhuma
+    "presenca_inicial_status":    "online",
+    "presenca_inicial_atividade": None,
 }
 
 def cfg(chave: str):
@@ -6660,7 +6665,11 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
         "'muda sua atividade para Observando o servidor' → mudar_status(online, atividade='Observando o servidor'), "
         "'tira a atividade' → mudar_status(online, atividade=null), "
         "'coloca na sua bio que você é o engenheiro' → alterar_bio('Engenheiro do servidor'), "
-        "'muda seu apelido para Shell_v2' → alterar_apelido('Shell_v2'). "
+        "'muda seu apelido para Shell_v2' → alterar_apelido('Shell_v2'), "
+        "'define minha presença inicial como dnd com Trabalhando' → definir_presenca_inicial(status=dnd, atividade='Trabalhando') (exclusivo do Proprietário — persiste no reinício). "
+        "editar_codigo(pedido) — [EXCLUSIVO DO PROPRIETÁRIO] edita o próprio código-fonte do bot em disco e reinicia o processo. "
+        "Use quando o Proprietário pedir mudanças diretas no código/comportamento. "
+        "Exemplos: 'adiciona isso no meu código', 'muda como você faz X', 'corrige o bug de Y' → editar_codigo(pedido='<pedido literal>'). "
         "usar_bot(bot,comando,args=null) — aciona um bot do servidor enviando o comando como mensagem isolada. "
         "Use quando fizer sentido acionar outro bot naturalmente (limpar canal, música, etc.). "
         "NUNCA retorne acao banir, silenciar ou qualquer punição — punições requerem comando explícito. "
@@ -6690,6 +6699,333 @@ _ACOES_DESTRUTIVAS = frozenset({
     "criar_cargo", "criar_canal", "banir", "expulsar", "silenciar",
     "aviso", "remover_cargo", "deletar_canal",
 })
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AUTO-EDIÇÃO DE CÓDIGO — permite ao bot reescrever seu próprio .py em disco
+# e reiniciar o processo para aplicar as mudanças em tempo real.
+# Acesso exclusivo: Proprietário (ID em _PROPRIETARIOS_IDS).
+# Fluxo:
+#   1. IA recebe o pedido em linguagem natural + trecho relevante do arquivo
+#   2. Devolve JSON: {"buscar": "<trecho exato atual>", "substituir": "<novo trecho>",
+#                     "descricao": "<resumo humano da mudança>"}
+#   3. Bot aplica str_replace atômico no arquivo fonte
+#   4. Valida sintaxe (py_compile)
+#   5. Reinicia o processo via os.execv preservando mesmo PID no Railway
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_CAMINHO_PROPRIO = os.path.abspath(__file__)
+_BACKUP_MAXIMO   = 5          # quantos backups rotativos manter
+
+
+def _backup_codigo() -> str:
+    """Cria backup numerado do arquivo atual. Retorna caminho do backup."""
+    base = _CAMINHO_PROPRIO
+    i = 1
+    while os.path.exists(f"{base}.bak{i}") and i <= _BACKUP_MAXIMO:
+        i += 1
+    if i > _BACKUP_MAXIMO:
+        # Rotaciona: apaga o mais antigo (bak1), renumera e cria bak{MAX}
+        try:
+            os.remove(f"{base}.bak1")
+        except OSError:
+            pass
+        for j in range(2, _BACKUP_MAXIMO + 1):
+            src, dst = f"{base}.bak{j}", f"{base}.bak{j-1}"
+            try:
+                os.rename(src, dst)
+            except OSError:
+                pass
+        i = _BACKUP_MAXIMO
+    destino = f"{base}.bak{i}"
+    import shutil
+    shutil.copy2(base, destino)
+    return destino
+
+
+def _aplicar_patch(buscar: str, substituir: str) -> tuple[bool, str]:
+    """
+    Aplica str_replace atômico no arquivo fonte.
+    Retorna (sucesso, mensagem_de_erro).
+    """
+    try:
+        codigo = open(_CAMINHO_PROPRIO, "r", encoding="utf-8").read()
+    except Exception as e:
+        return False, f"Não consegui ler o arquivo: {e}"
+
+    ocorrencias = codigo.count(buscar)
+    if ocorrencias == 0:
+        return False, (
+            "Trecho a substituir não encontrado no arquivo.\n"
+            f"Procurei por:\n```\n{buscar[:300]}\n```"
+        )
+    if ocorrencias > 1:
+        return False, (
+            f"Trecho ambíguo — encontrado {ocorrencias}x no arquivo. "
+            "Preciso de um trecho mais específico/único."
+        )
+
+    novo_codigo = codigo.replace(buscar, substituir, 1)
+
+    # Valida sintaxe antes de salvar
+    import py_compile, tempfile
+    fd, tmp = tempfile.mkstemp(suffix=".py")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(novo_codigo)
+        py_compile.compile(tmp, doraise=True)
+    except py_compile.PyCompileError as e:
+        os.unlink(tmp)
+        return False, f"Erro de sintaxe no código gerado:\n```\n{e}\n```"
+    except Exception as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False, f"Erro inesperado na validação: {e}"
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+    # Salva de forma atômica (write-then-rename)
+    dir_ = os.path.dirname(_CAMINHO_PROPRIO)
+    import tempfile as _tf
+    fd2, tmp2 = _tf.mkstemp(dir=dir_, suffix=".tmp")
+    try:
+        with os.fdopen(fd2, "w", encoding="utf-8") as f:
+            f.write(novo_codigo)
+        os.replace(tmp2, _CAMINHO_PROPRIO)
+    except Exception as e:
+        try:
+            os.unlink(tmp2)
+        except OSError:
+            pass
+        return False, f"Erro ao salvar arquivo: {e}"
+
+    return True, ""
+
+
+async def _extrair_trechos_relevantes(codigo: str, pedido: str) -> list[tuple[int,int,str]]:
+    """
+    Extrai trechos do código relevantes para o pedido usando palavras-chave.
+    Divide o arquivo em blocos (funções/classes/seções) e pontua cada um
+    pela frequência de termos do pedido. Retorna lista de (linha_inicio, linha_fim, trecho).
+    """
+    linhas = codigo.splitlines(keepends=True)
+    total  = len(linhas)
+
+    # Palavras-chave do pedido (≥3 chars)
+    termos = set(re.findall(r"[a-záéíóúâêîôûãõç_]{3,}", pedido.lower()))
+    # Ignora stopwords genéricas
+    termos -= {"que", "para", "com", "uma", "meu", "seu", "minha", "como", "esse",
+               "isto", "isso", "mais", "quando", "onde", "quem", "deve", "pode",
+               "fazer", "muda", "adiciona", "remove", "coloca", "tira", "bot",
+               "codigo", "função", "trecho", "parte", "arquivo", "linha"}
+
+    # Detecta limites de blocos: linhas que iniciam "def " ou "async def " ou "class " no nível 0
+    blocos: list[tuple[int,int]] = []
+    inicio_bloco = 0
+    for i, ln in enumerate(linhas):
+        stripped = ln.lstrip()
+        eh_def = (
+            stripped.startswith("def ") or
+            stripped.startswith("async def ") or
+            stripped.startswith("class ") or
+            stripped.startswith("# ══") or
+            stripped.startswith("# ──")
+        ) and (ln[0] not in (" ", "\t") or stripped.startswith("# ══") or stripped.startswith("# ──"))
+        if eh_def and i > inicio_bloco:
+            blocos.append((inicio_bloco, i - 1))
+            inicio_bloco = i
+    blocos.append((inicio_bloco, total - 1))
+
+    def pontuar(ini: int, fim: int) -> float:
+        trecho_txt = "".join(linhas[ini:fim+1]).lower()
+        return sum(1 for t in termos if t in trecho_txt)
+
+    # Pega os 3 blocos mais relevantes
+    scored = sorted(blocos, key=lambda b: pontuar(b[0], b[1]), reverse=True)
+    selecionados = scored[:3]
+    # Ordena por posição no arquivo (para manter contexto sequencial)
+    selecionados.sort(key=lambda b: b[0])
+
+    resultado = []
+    for ini, fim in selecionados:
+        trecho = "".join(linhas[ini:fim+1])
+        resultado.append((ini + 1, fim + 1, trecho))  # +1: linha 1-indexed
+    return resultado
+
+
+async def _auto_editar_codigo(pedido: str, canal: discord.TextChannel, autor: str) -> bool:
+    """
+    Auto-edição do código-fonte via Groq.
+
+    Estratégia para caber na janela de contexto limitada:
+      1. Lê o arquivo completo
+      2. Extrai os trechos mais relevantes ao pedido (busca por palavras-chave)
+      3. Envia à IA apenas esses trechos + índice de funções do arquivo
+      4. IA devolve patch JSON: {buscar, substituir, descricao}
+      5. Valida unicidade do trecho + sintaxe Python
+      6. Aplica com escrita atômica e reinicia via os.execv
+
+    Se o patch falha (trecho não encontrado, sintaxe inválida), reporta o
+    erro exato no canal sem tocar no arquivo.
+    """
+    if not GROQ_DISPONIVEL or not GROQ_API_KEY:
+        await canal.send("IA indisponível — sem chave Groq.")
+        return False
+
+    try:
+        codigo_atual = open(_CAMINHO_PROPRIO, "r", encoding="utf-8").read()
+    except Exception as e:
+        await canal.send(f"Erro ao ler meu código: {e}")
+        return False
+
+    linhas_totais = codigo_atual.count("\n")
+    log.info(f"[AUTOEDIC] Pedido='{pedido}' | {linhas_totais} linhas | autor={autor}")
+
+    # ── Índice de funções (mapa estrutural do arquivo) ────────────────────────
+    # Permite à IA saber onde cada função está sem receber o arquivo todo
+    _idx_linhas: list[str] = []
+    for i, ln in enumerate(codigo_atual.splitlines(), 1):
+        s = ln.lstrip()
+        if s.startswith(("def ", "async def ", "class ")):
+            _idx_linhas.append(f"  L{i}: {s.split('(')[0].split(':')[0][:80]}")
+    indice_funcoes = "\n".join(_idx_linhas[:200])  # max 200 entradas
+
+    # ── Trechos relevantes ao pedido ──────────────────────────────────────────
+    trechos = await _extrair_trechos_relevantes(codigo_atual, pedido)
+    contexto_trechos = ""
+    for (l_ini, l_fim, txt) in trechos:
+        # Limita cada trecho a 6000 chars para caber no contexto
+        txt_limitado = txt[:6000] + ("\n... [TRECHO CORTADO]" if len(txt) > 6000 else "")
+        contexto_trechos += f"\n\n### TRECHO (linhas {l_ini}–{l_fim}):\n{txt_limitado}"
+
+    # ── Prompt ────────────────────────────────────────────────────────────────
+    system_patch = (
+        "Você é engenheiro Python especialista em Discord bots (discord.py-self).\n"
+        "Receberá: (A) índice de todas as funções do arquivo, (B) trechos relevantes.\n"
+        "Sua tarefa: gerar um patch JSON para aplicar a mudança pedida via str_replace.\n\n"
+        "REGRAS CRÍTICAS:\n"
+        "1. 'buscar' = string IDÊNTICA ao trecho atual — indentação, espaços, quebras de linha.\n"
+        "   Copie LITERALMENTE dos trechos fornecidos. 1 char errado = patch falha.\n"
+        "2. 'substituir' = novo trecho que substitui o anterior.\n"
+        "3. 'buscar' deve ser ÚNICO no arquivo (escolha um anchor suficientemente longo).\n"
+        "4. Preserve tudo que não foi pedido para mudar.\n"
+        "5. Python válido, indentação correta, sem imports desnecessários.\n"
+        "6. 'descricao' = frase curta descrevendo a mudança.\n"
+        "7. Se a mudança exige código NOVO (sem 'buscar' existente), use como 'buscar'\n"
+        "   o fim de uma função próxima (última linha + newline) e adicione após ela.\n\n"
+        "Responda SOMENTE com JSON puro, sem markdown nem texto fora do JSON:\n"
+        '{"buscar": "...", "substituir": "...", "descricao": "..."}'
+    )
+
+    user_patch = (
+        f"PEDIDO: {pedido}\n\n"
+        f"ÍNDICE DE FUNÇÕES DO ARQUIVO ({linhas_totais} linhas totais):\n{indice_funcoes}\n"
+        f"\nTRECHOS RELEVANTES AO PEDIDO:{contexto_trechos}"
+    )
+
+    # ── Chama Groq ────────────────────────────────────────────────────────────
+    # Usa 70b por capacidade de raciocínio; fallback para scout/8b
+    patch_json = None
+    fonte_ia   = None
+    for _modelo_tentativa in [_MODELO_70B, _MODELO_SCOUT, _MODELO_8B]:
+        if not _modelo_disponivel(_modelo_tentativa):
+            continue
+        try:
+            resp = await _groq_create(
+                model=_modelo_tentativa,
+                max_tokens=4000,
+                temperature=0.05,
+                messages=[
+                    {"role": "system", "content": system_patch},
+                    {"role": "user",   "content": user_patch},
+                ],
+            )
+            patch_json = resp.choices[0].message.content.strip()
+            fonte_ia   = _modelo_tentativa
+            break
+        except Exception as e:
+            log.warning(f"[AUTOEDIC] {_modelo_tentativa} falhou: {e}")
+
+    if patch_json is None:
+        await canal.send("❌ Todos os modelos Groq indisponíveis agora. Tenta de novo em alguns minutos.")
+        return False
+
+    # ── Parse do JSON ─────────────────────────────────────────────────────────
+    try:
+        _raw = patch_json.strip()
+        # Remove blocos ```json ... ``` que alguns modelos insistem em adicionar
+        if _raw.startswith("```"):
+            _raw = re.sub(r"^```[a-z]*\n?", "", _raw, flags=re.IGNORECASE)
+            _raw = _raw.rstrip().rstrip("`").strip()
+        # Alguns modelos adicionam texto antes/depois do JSON — extrai o objeto
+        _m_json = re.search(r'\{.*\}', _raw, re.DOTALL)
+        if _m_json:
+            _raw = _m_json.group(0)
+        patch     = json.loads(_raw)
+        buscar    = patch["buscar"]
+        substituir = patch["substituir"]
+        descricao = patch.get("descricao", "mudança sem descrição")
+    except Exception as e:
+        log.error(f"[AUTOEDIC] Parse falhou: {e} | raw={patch_json[:300]!r}")
+        await canal.send(
+            f"❌ A IA ({fonte_ia}) não retornou JSON válido.\n"
+            f"Erro: `{e}`\n"
+            f"Início da resposta:\n```\n{patch_json[:500]}\n```"
+        )
+        return False
+
+    # ── Validação prévia: o trecho está no arquivo? ───────────────────────────
+    ocorrencias = codigo_atual.count(buscar)
+    if ocorrencias == 0:
+        # Tenta heurística: às vezes a IA introduz espaços/tabs ligeiramente diferentes
+        # Oferece diagnóstico útil ao proprietário
+        _buscar_norm = re.sub(r'[ \t]+', ' ', buscar)
+        _code_norm   = re.sub(r'[ \t]+', ' ', codigo_atual)
+        _encontrou_aprox = _buscar_norm in _code_norm
+        dica = (" (espaçamento diferente — a IA alterou indentação)" if _encontrou_aprox
+                else " (trecho não existe no arquivo)")
+        await canal.send(
+            f"❌ Patch não aplicado — trecho `buscar` não encontrado{dica}.\n"
+            f"Primeiros 300 chars do trecho que a IA tentou buscar:\n"
+            f"```python\n{buscar[:300]}\n```\n"
+            f"Tente reformular o pedido com mais detalhes sobre onde fica o código."
+        )
+        return False
+
+    if ocorrencias > 1:
+        await canal.send(
+            f"❌ Patch ambíguo — trecho encontrado {ocorrencias}x no arquivo.\n"
+            f"A IA precisa de um anchor mais específico. Reformule o pedido."
+        )
+        return False
+
+    # ── Backup + aplicação atômica ────────────────────────────────────────────
+    bak = _backup_codigo()
+    log.info(f"[AUTOEDIC] Backup: {bak}")
+
+    ok, erro = _aplicar_patch(buscar, substituir)
+    if not ok:
+        await canal.send(f"❌ {erro}\n*(backup em `{os.path.basename(bak)}`)*")
+        return False
+
+    log.info(f"[AUTOEDIC] OK | modelo={fonte_ia} | '{descricao}' | autor={autor}")
+
+    await canal.send(
+        f"✅ **{descricao}**\n"
+        f"modelo: `{fonte_ia}` · backup: `{os.path.basename(bak)}`\n"
+        f"🔄 Reiniciando..."
+    )
+    await asyncio.sleep(1.5)
+
+    import sys
+    log.info(f"[AUTOEDIC] os.execv → {sys.executable} {sys.argv}")
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+    return True
+
 
 async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.Guild) -> bool:
     """Executa ação parseada pela IA. Retorna True se executou algo."""
@@ -7093,6 +7429,25 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
             await canal.send(f"Erro ao criar planilha: {e}")
         return True
 
+    if acao == "definir_presenca_inicial":
+        # Exclusivo do Proprietário — salva presença inicial no config.json
+        if message.author.id not in _PROPRIETARIOS_IDS:
+            await canal.send("Apenas o Proprietário pode definir a presença inicial.")
+            return True
+        _dpi_status = params.get("status", "online").lower().strip()
+        _dpi_ativ   = params.get("atividade", None)
+        _cfg["presenca_inicial_status"]    = _dpi_status
+        _cfg["presenca_inicial_atividade"] = _dpi_ativ or None
+        salvar_config()
+        _ativ_txt = f" com atividade '{_dpi_ativ}'" if _dpi_ativ else " sem atividade customizada"
+        await canal.send(
+            f"Presença inicial salva: **{_dpi_status}**{_ativ_txt}.\n"
+            f"Na próxima vez que eu reiniciar, já apareço assim.",
+            reference=message,
+        )
+        log.info(f"[CONFIG] presenca_inicial={_dpi_status!r} ativ={_dpi_ativ!r} — definida por {autor}")
+        return True
+
     if acao == "mudar_status":
         _status_raw = params.get("status", "online").lower().strip()
         _atividade_txt = params.get("atividade", None)
@@ -7224,6 +7579,21 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
             log.info(f"[BOT_CMD] Enviado '{_cmd_final}' (bot={_bot_nome!r})  -  ordem de {autor}")
         except Exception as e:
             log.warning(f"[BOT_CMD] Falha ao enviar comando: {e}")
+        return True
+
+    # ── Auto-edição de código (exclusivo do Proprietário) ───────────────────────
+    if acao == "editar_codigo":
+        if message.author.id not in _PROPRIETARIOS_IDS:
+            await canal.send("Só o Proprietário pode editar meu código.")
+            return True
+
+        pedido = params.get("pedido", "").strip()
+        if not pedido:
+            await canal.send("Qual mudança quer que eu faça no meu próprio código?")
+            return True
+
+        await canal.send("⚙️ Analisando o código e preparando o patch...", reference=message)
+        resultado = await _auto_editar_codigo(pedido, canal, autor)
         return True
 
     log.debug(f"[IA_EXEC] ação '{acao}' não reconhecida  -  passando adiante")
@@ -9432,13 +9802,28 @@ async def on_ready():
             log.debug(f"[HUMOR] falha ao gerar: {e}")
 
     # ── Presença inicial — como um usuário real que acabou de abrir o Discord ────
+    # O Proprietário pode customizar via comando: "muda presença inicial para dnd com Jogando xadrez"
+    # O valor é salvo no config.json e carregado a cada reinício.
     try:
-        await client.change_presence(
-            status=discord.Status.online,
-            activity=discord.CustomActivity(name="Custom Status", state="ativo caralho"),
+        _pi_status_raw = cfg("presenca_inicial_status") or "online"
+        _pi_ativ_txt   = cfg("presenca_inicial_atividade")
+        _pi_status_map = {
+            "online":   discord.Status.online,
+            "idle":     discord.Status.idle,
+            "ausente":  discord.Status.idle,
+            "dnd":      discord.Status.dnd,
+            "ocupado":  discord.Status.dnd,
+            "invisible": discord.Status.invisible,
+            "invisivel": discord.Status.invisible,
+        }
+        _pi_ds = _pi_status_map.get(_pi_status_raw, discord.Status.online)
+        _pi_activity = (
+            discord.CustomActivity(name="Custom Status", state=_pi_ativ_txt)
+            if _pi_ativ_txt else None
         )
-        await client.edit_settings(status=discord.Status.online)
-        log.info("[PRESENCE] Status inicial definido: online")
+        await client.change_presence(status=_pi_ds, activity=_pi_activity)
+        await client.edit_settings(status=_pi_ds)
+        log.info(f"[PRESENCE] Status inicial: {_pi_status_raw!r} | atividade: {_pi_ativ_txt!r}")
     except Exception as _pe:
         log.debug(f"[PRESENCE] Falha ao definir status inicial: {_pe}")
 
