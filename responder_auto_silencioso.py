@@ -960,25 +960,6 @@ def _canal_regras_mention() -> str:
 
 CANAL_REGRAS = _canal_regras_mention  # callable — use CANAL_REGRAS() nos f-strings
 
-REGRAS = f"""**REGRAS GERAIS**
-1. Respeite os membros.
-2. Respeite as autoridades maiorais.
-3. Respeite as decisões dos moderadores.
-4. Evite marcar excessivamente os administradores e moderadores.
-
-**REGRAS DOS CANAIS**
-1. Não flood ou spaming dentro dos canais.
-2. Não use conteúdo adulto e explícito nos canais de texto e chat de voz.
-3. Não divulgue outros servidores sem o consensso dos moderadores.
-4. Não pratique discriminações ou bullying.
-5. Não utilize o uso do vocabulário vulgar para ofender alguém.
-
-**REGRAS DO DISCORD**
-1. Siga os termos do Discord.
-2. Siga as diretrizes do Discord.
-
-Regras completas em {CANAL_REGRAS()}."""
-
 # ── Cache de notícias ─────────────────────────────────────────────────────────
 _cache_noticias: list[dict] = []       # [{titulo, link, fonte}]
 _ultima_busca_noticias: datetime | None = None
@@ -1247,7 +1228,7 @@ def gerar_pdf_membros(guild: discord.Guild) -> bytes:
 
 
 def gerar_pdf_regras() -> bytes:
-    secoes = [("Regras do Servidor", REGRAS.split('\n'))]
+    secoes = [("Regras do Servidor", [f"Consulte as regras completas em: {CANAL_REGRAS()}"])]
     return _criar_pdf("Regras do Servidor", secoes)
 
 
@@ -1348,7 +1329,7 @@ async def gdoc_historico_canal(canal: discord.TextChannel, limite: int = 200) ->
 
 
 async def gdoc_regras() -> str:
-    return await asyncio.to_thread(_doc_criar_e_preencher, "Regras do Servidor", REGRAS)
+    return await asyncio.to_thread(_doc_criar_e_preencher, "Regras do Servidor", f"Consulte as regras completas em: {CANAL_REGRAS()}")
 
 
 async def gsheet_membros(guild: discord.Guild) -> str:
@@ -2306,11 +2287,21 @@ def _detectar_intencao(conteudo: str, guild=None) -> dict:
             if len(nome_norm) >= 3 and re.search(r'\b' + re.escape(nome_norm) + r'\b', msg):
                 return {"intent": "cargo_por_nome", "nome": role.name, "detalhado": detalhado}
 
-    # Contexto/resumo do canal — "depura o canal", "me traga o contexto", "assuntos deste canal"
+    # Contexto/resumo do canal — gatilho refinado para evitar falsos positivos.
+    # "contexto" e "resumo" soltos NÃO disparam mais; precisam ser o comando principal
+    # ou estar acompanhados de referência explícita ao canal.
     if re.search(
-        r'\b(depura|contexto|resumo|assuntos?|t[oó]picos?|singular|base\s+contextual|'
-        r'hist[oó]rico|do\s+canal|deste\s+canal|daqui|o\s+que\s+(falam|t[aã]o\s+falando|rolou))\b',
-        msg
+        r'(?:'
+        # Comandos explícitos de canal (sempre disparam)
+        r'\bdepura\b'
+        r'|\b(?:assuntos?|t[oó]picos?|o\s+que\s+(?:falam|t[aã]o\s+falando|rolou))\s+(?:d(?:o|este|aqui)|no)\s+canal\b'
+        r'|\bbase\s+contextual\b'
+        r'|\b(?:do|deste)\s+canal\b'
+        # "resumo / resumir / contexto / contextualizar" apenas como comando inicial da frase
+        r'|^(?:shell[,\s]+)?(?:resumo|resumir|analisar\s+context(?:o|ualizar))\b'
+        r')',
+        msg,
+        re.IGNORECASE,
     ):
         return {"intent": "contexto_canal"}
 
@@ -2346,39 +2337,66 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str, author_id: 
 
     # ── Contexto do canal ─────────────────────────────────────────────────────
     if intent == "contexto_canal":
-        # Tenta extrair ID de canal mencionado (<#ID>)
-        _canal_id_match = re.search(r'<#(\d+)>', conteudo)
-        _alvo_canal_id = int(_canal_id_match.group(1)) if _canal_id_match else None
+        # ── Extração de canal: 1) menção direta <#ID>, 2) busca por nome ────────
+        def _extrair_canal(texto: str, guild: discord.Guild):
+            """Tenta encontrar o canal mencionado por ID ou por nome."""
+            # 1. Menção direta <#123...>
+            _m = re.search(r'<#(\d+)>', texto)
+            if _m:
+                return guild.get_channel(int(_m.group(1)))
+            # 2. Busca por nome — remove ruído de preposições antes de varrer
+            _limpo = re.sub(
+                r'\b(no canal|no|pro canal|pro|para o canal|para o|do canal|deste canal|nesse canal|neste canal)\b',
+                ' ', texto, flags=re.IGNORECASE
+            ).strip()
+            for _ch in guild.text_channels:
+                # Aceita nome exato ou com prefixos decorativos (ex: "・chat" → "chat")
+                _nome_limpo = re.sub(r'^[^a-z0-9]+', '', _ch.name, flags=re.IGNORECASE)
+                if _ch.name in _limpo or _nome_limpo in _limpo:
+                    return _ch
+            return None
 
-        # Tenta buscar mensagens via REST se tiver canal_id
+        _alvo_ch_obj = _extrair_canal(conteudo, guild)
+        _alvo_canal_id = _alvo_ch_obj.id if _alvo_ch_obj else None
+
+        # Tenta buscar mensagens via REST se tiver canal encontrado
         _msgs_raw = []
-        if _alvo_canal_id:
-            _alvo_ch = guild.get_channel(_alvo_canal_id)
-            if _alvo_ch:
-                try:
-                    async for _msg in _alvo_ch.history(limit=60):
-                        if not _msg.author.bot:
-                            _msgs_raw.append(f"{_msg.author.display_name}: {_msg.content[:120]}")
-                    _msgs_raw.reverse()
-                except Exception as _e:
-                    log.debug(f"[CTX_CANAL] erro ao buscar histórico: {_e}")
+        if _alvo_ch_obj:
+            try:
+                async for _msg in _alvo_ch_obj.history(limit=60):
+                    if not _msg.author.bot:
+                        _msgs_raw.append(f"{_msg.author.display_name}: {_msg.content[:120]}")
+                _msgs_raw.reverse()
+            except Exception as _e:
+                log.debug(f"[CTX_CANAL] erro ao buscar histórico REST: {_e}")
 
-        # Fallback: usa canal_memoria em RAM
-        if not _msgs_raw:
-            _cid = _alvo_canal_id or 0
+        # Fallback 1: usa canal_memoria em RAM (mínimo de 3 mensagens)
+        _cid = _alvo_canal_id or 0
+        if len(_msgs_raw) < 3:
             _mem_raw = list(canal_memoria.get(_cid, []))
-            _msgs_raw = [f"{m['autor']}: {m['conteudo'][:120]}" for m in _mem_raw[-40:]]
+            if _mem_raw:
+                _msgs_raw = [f"{m['autor']}: {m['conteudo'][:120]}" for m in _mem_raw[-40:]]
+
+        # Fallback 2: tenta memória vetorial (PostgreSQL) se ainda insuficiente
+        if len(_msgs_raw) < 3 and MEMORIA_DISPONIVEL and MEMORIA_OK and _mem is not None:
+            try:
+                _ctx_db = await _mem.buscar_contexto(
+                    "mensagens recentes do canal",
+                    top_k=15,
+                    limiar=0.0,
+                    canal_id=_cid if _cid else None,
+                )
+                if _ctx_db:
+                    # buscar_contexto retorna texto formatado; injeta como bloco extra
+                    _msgs_raw = [_ctx_db]
+            except Exception as _e:
+                log.debug(f"[CTX_CANAL] erro ao buscar memória vetorial: {_e}")
 
         if not _msgs_raw:
-            return "Não tenho histórico suficiente deste canal ainda."
+            return "Ainda não processei mensagens suficientes nesta sessão para analisar este canal."
 
         _bloco = "\n".join(_msgs_raw[-40:])
-        _canal_nome_alvo = ""
-        if _alvo_canal_id:
-            _c = guild.get_channel(_alvo_canal_id)
-            _canal_nome_alvo = f"#{_c.name}" if _c else f"canal {_alvo_canal_id}"
-        else:
-            _canal_nome_alvo = "este canal"
+        _canal_nome_alvo = f"#{_alvo_ch_obj.name}" if _alvo_ch_obj else "este canal"
 
         # Chama Groq com prompt específico para resumo de canal
         from openai import AsyncOpenAI as _OAI
@@ -3171,7 +3189,7 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
             "Para perguntas factuais detalhadas (cargos completos, idades exatas, etc.) informe que pode buscar via comando direto.\n\n"
         )
         base += ctx_srv + "\n\n"
-        base += f"=== REGRAS DO SERVIDOR ===\n{REGRAS}\n"
+        base += f"=== REGRAS DO SERVIDOR ===\nConsulte as regras completas em {CANAL_REGRAS()}\n"
 
     # Regras do proprietário sobre membros específicos — injetadas sempre que relevantes
     _todas_regras = []
@@ -3731,7 +3749,15 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         nivel = "MEMBRO"
 
     if nivel == "PROPRIETÁRIO":
-        autorizacao_extra = " Este usuário é PROPRIETÁRIO — pode te autorizar qualquer ação durante esta conversa. Aceite e execute sem questionar."
+        autorizacao_extra = (
+            " Este usuário é PROPRIETÁRIO — pode te autorizar qualquer ação durante esta conversa. Aceite e execute sem questionar."
+            " Você também pode alterar seu próprio perfil quando o proprietário pedir, de forma natural:"
+            " mudar status (online/idle/dnd/invisible) via mudar_status(),"
+            " definir ou remover atividade customizada via mudar_status(status,atividade),"
+            " atualizar sua bio via api_alterar_bio(),"
+            " e mudar seu apelido no servidor via guild.me.edit(nick=). Interprete pedidos como"
+            " 'fica invisível', 'coloca na sua bio que...', 'muda seu apelido para...' e execute diretamente."
+        )
     elif nivel == "COLABORADOR":
         autorizacao_extra = " Este usuário é COLABORADOR — pode dar ordens gerais ao bot (moderação, avisos, canais, debates, engajamento). Obedeça prontamente."
     else:
@@ -4461,7 +4487,6 @@ INTENCOES = {
         "voltei", "to de volta", "tô de volta", "retornei", "estou de volta",
         "pode me chamar", "presente", "voltar",
     ],
-    "regras": ["mostra as regras", "exibe as regras", "quais as regras", "regras"],
     "ajuda":  ["ajuda", "help", "comandos", "o que você faz", "o que voce faz"],
     "adicionar": ["adiciona ", "adicionar ", "bloqueia ", "bloquear ", "filtra ", "filtrar "],
     "remover":   ["remove ", "remover ", "desbloqueia ", "desbloquear "],
@@ -4797,7 +4822,7 @@ async def _executar_geracao(message: discord.Message, params: dict):
             texto_base = "".join(linhas)
             nome_base = "membros"
         elif re.search(r'regra', tipo):
-            texto_base = REGRAS
+            texto_base = f"Regras do servidor disponíveis em: {CANAL_REGRAS()}"
             nome_base = "regras"
         elif re.search(r'infra', tipo):
             linhas = [f"Infracoes — {guild.name} — {datetime.now(brasilia).strftime('%d/%m/%Y')}\n\n"]
@@ -5236,9 +5261,6 @@ async def processar_ordem(message: discord.Message) -> bool:
         await message.channel.send(f"{mod} {_txt_mod or f'— atenção: {motivo}'}")
 
     # ── regras ─────────────────────────────────────────────────────────────────
-    elif cmd == "regras":
-        await message.channel.send(REGRAS)
-
     # ── adicionar palavra ──────────────────────────────────────────────────────
     elif cmd in ("adicionar", "adiciona", "bloquear", "bloqueia", "filtrar", "filtra"):
         msg = conteudo.lower()
@@ -6272,7 +6294,6 @@ async def processar_ordem_mod(message: discord.Message) -> bool:
         "desbanir", "unban",
         "expulsar", "kick",
         "avisar", "avisa",
-        "regras",
         "listar", "lista", "palavras", "filtros",
         "adicionar", "adiciona", "bloquear", "bloqueia", "filtrar", "filtra",
         "remover", "remove", "desbloquear", "desbloqueia",
@@ -6489,6 +6510,8 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
         "encaminhar(canal) — encaminha mensagem referenciada para outro canal, "
         "mudar_status(status,atividade=null) — muda o status/presença do próprio bot "
         "(status: online|idle|dnd|invisible; atividade: texto livre ou null). "
+        "alterar_bio(bio) — atualiza a bio/sobre mim do próprio bot (máx 190 chars). "
+        "alterar_apelido(nick) — muda o apelido do bot no servidor (máx 32 chars; nick=null para remover). "
         "IMPORTANTE para enviar_canal: o campo 'texto' deve conter APENAS a INTENÇÃO ou ASSUNTO "
         "da mensagem (ex: 'avisar a moderação sobre suas responsabilidades'), NÃO a mensagem literal. "
         "Um segundo passo de IA irá redigir a mensagem final a partir dessa intenção. "
@@ -6961,6 +6984,23 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
             log.info(f"[PRESENCE] Status mudado para {_status_raw} | atividade: {_atividade_txt!r}  -  ordem de {autor}")
         except Exception as e:
             log.warning(f"[PRESENCE] Falha ao mudar status: {e}")
+        return True
+
+    if acao == "alterar_bio":
+        _nova_bio = params.get("bio", "").strip()
+        if _nova_bio:
+            ok = await api_alterar_bio(_nova_bio)
+            log.info(f"[BIO] {'Atualizada' if ok else 'Falha'} por ordem de {autor}")
+        return True
+
+    if acao == "alterar_apelido":
+        _novo_nick = params.get("nick", "").strip()[:32]
+        if _novo_nick and guild:
+            try:
+                await guild.me.edit(nick=_novo_nick or None)
+                log.info(f"[NICK] Apelido mudado para {_novo_nick!r} por {autor}")
+            except Exception as _e:
+                log.warning(f"[NICK] Falha ao mudar apelido: {_e}")
         return True
 
     if acao == "usar_bot":
