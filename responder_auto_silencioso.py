@@ -1828,12 +1828,43 @@ async def processar_links(message: discord.Message):
 # ── Auditoria de ofensas ──────────────────────────────────────────────────────
 
 async def enviar_auditoria(guild: discord.Guild, membro: discord.Member, violacoes: list[str], msg_id: int):
-    """Envia log da ofensa apagada para o canal de auditoria como arquivo .txt."""
+    """Registra ofensa no canal de auditoria como embed (sem arquivo .txt automático)."""
     canal_audit = guild.get_channel(_canal_auditoria_id())
     if not canal_audit:
         log.error(f"Canal de auditoria {_canal_auditoria_id()} não encontrado.")
         return
 
+    brasilia = timezone(timedelta(hours=-3))
+    agora = datetime.now(brasilia)
+    count = infracoes.get(membro.id, 0)
+
+    linhas_violacoes = []
+    for desc_v, palavra in violacoes:
+        partes = desc_v.split(", ", 1)
+        categoria = partes[0]
+        ref = partes[1] if len(partes) > 1 else ""
+        entrada = f"**{categoria}**"
+        if ref:
+            entrada += f" — {ref}"
+        entrada += f"\n> `{palavra}`"
+        linhas_violacoes.append(entrada)
+    violacoes_desc = "\n".join(linhas_violacoes) or "—"
+
+    embed = discord.Embed(
+        title="🔴 Ofensa detectada",
+        color=0xE74C3C,
+        timestamp=agora,
+    )
+    embed.add_field(name="Membro", value=f"{membro.mention} (`{membro.id}`)", inline=False)
+    embed.add_field(name=f"Infração nº {count}", value=violacoes_desc, inline=False)
+    embed.add_field(name="Ação", value=f"Mensagem removida (ID `{msg_id}`)", inline=False)
+    embed.set_footer(text="Sistema de moderação automática")
+
+    await canal_audit.send(embed=embed)
+
+
+async def exportar_auditoria_txt(canal_destino, membro: discord.Member, violacoes: list[str], msg_id: int):
+    """Gera e envia arquivo .txt de auditoria apenas quando solicitado explicitamente."""
     brasilia = timezone(timedelta(hours=-3))
     agora = datetime.now(brasilia)
     data_emissao = agora.strftime("%d/%m/%Y %H:%M:%S")
@@ -1852,7 +1883,7 @@ async def enviar_auditoria(guild: discord.Guild, membro: discord.Member, violaco
     violacoes_txt = "\n".join(linhas_violacoes)
 
     conteudo = (
-        f"REGISTRO DE AUDITORIA DE TEXTO\n"
+        f"REGISTRO DE AUDITORIA\n"
         f"Emissao: {data_emissao}\n"
         f"{'-' * 40}\n\n"
         f"MEMBRO:       {membro.display_name}\n"
@@ -1861,19 +1892,14 @@ async def enviar_auditoria(guild: discord.Guild, membro: discord.Member, violaco
         f"OFENSA(S) DETECTADA(S):\n{violacoes_txt}\n\n"
         f"ACAO TOMADA:  Mensagem removida (ID {msg_id})\n"
         f"{'-' * 40}\n"
-        f"Registrado automaticamente pelo sistema de moderacao.\n"
+        f"Exportado manualmente.\n"
     )
 
     arquivo = io.BytesIO(conteudo.encode("utf-8"))
     nome_arquivo = f"auditoria_{membro.id}_{agora.strftime('%Y%m%d_%H%M%S')}.txt"
-    _legenda = await _ia_curta(
-        "Notificar equipe sobre ofensa detectada e remoção de mensagem. Natural, objetivo.",
-        contexto=f"membro: {membro.display_name}, infração nº {count}, violações: {', '.join(v[0] for v in violacoes[:3])}",
-        max_tokens=60,
-    )
-    await canal_audit.send(
-        _legenda or f"Ofensa detectada: {membro.display_name}, infração nº {count}",
-        file=discord.File(arquivo, filename=nome_arquivo)
+    await canal_destino.send(
+        f"Exportação de auditoria: **{membro.display_name}**, infração nº {count}.",
+        file=discord.File(arquivo, filename=nome_arquivo),
     )
 
 
@@ -9578,7 +9604,43 @@ async def _on_message_impl(message: discord.Message):
                     "conteudo": f"RESPOSTA: {_txt_bot[:200]}",
                 })
                 log.debug(f"[BOT] resposta de {message.author.display_name}: {_txt_bot[:60]}")
-        return  # bots não passam pelo fluxo principal
+
+        # ── Interação ativa com bots ──────────────────────────────────────────
+        # Shell pode responder a bots quando mencionada ou quando há conversa
+        # ativa no canal (ex: jogar com Mudae, reagir a resultados de bots).
+        _bot_mencionou_shell = client.user in message.mentions
+        _conversa_ativa_bot = (
+            message.channel.id in canal_memoria
+            and len(canal_memoria[message.channel.id]) > 0
+        )
+        _deve_interagir_bot = _bot_mencionou_shell or (
+            _conversa_ativa_bot and _txt_bot and len(_txt_bot) < 300
+            and not re.search(r'(https?://|\u200b)', _txt_bot)
+        )
+        if not _deve_interagir_bot:
+            return  # bots sem menção e sem conversa ativa não passam
+
+        # Passa para o fluxo principal como se fosse uma mensagem normal,
+        # mas sem aplicar moderação ou wizard de denúncia.
+        conteudo_raw = _txt_bot
+        conteudo = _txt_bot
+        autor = message.author.display_name
+        user_id = message.author.id
+        mencionado = _bot_mencionou_shell
+
+        if mencionado or conversas_groq.get(user_id):
+            _tp, _tt = await _iniciar_typing_antes(message.channel)
+            try:
+                resposta = await resposta_inicial(
+                    conteudo, autor, user_id, message.guild, message.author, message.channel.id
+                ) if mencionado else await responder_com_groq(
+                    conteudo, autor, user_id, message.guild, message.channel.id
+                )
+            finally:
+                await _parar_typing(_tp, _tt)
+            if resposta:
+                await _reagir_ou_responder(message, resposta)
+        return  # bots não passam pelo restante do fluxo (moderação etc.)
 
     # Ignorar mensagens de outros bots com prefixo (ex: 7!afk, !cmd, /cmd)
     # Só ignora se começar com prefixo e não mencionar este bot
