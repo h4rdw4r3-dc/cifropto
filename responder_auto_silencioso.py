@@ -2850,8 +2850,48 @@ def _contexto_servidor_comprimido(guild, mencoes_nomes: list[str] = None) -> str
     return cabecalho + "\n" + membros_txt
 
 
-def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal_nome: str = "") -> str:
-    """Retorna o system prompt completo com o contexto do servidor injetado."""
+_PALAVRAS_RACIOCINIO = re.compile(
+    r'\b(?:'
+    # Ações de moderação
+    r'bane?|banir|silencia|muta|timeout|expulsa|kick|adverte|pune|castiga'
+    r'|desban|desmuta|dessilencia|perdoa|libera'
+    # Conflito / análise
+    r'|conflito|briga|discuss[aã]o|acusando|denunci|reclamou|problema|ataque'
+    r'|ofend|ameaç|xingou|provoc|assedi'
+    # Ordens múltiplas / planejamento
+    r'|primeiro.*depois|em seguida|e tamb[eé]m|al[eé]m disso|por fim|fa[çz]a'
+    r'|preciso que|quero que|pode.*e.*também'
+    # Ambiguidade / análise pedida
+    r'|o que acha|avalie?|analise?|explique?|como est[aá]|o que voc[eê] acha'
+    r'|quem tem raz[aã]o|certo ou errado|julgue?|opini[aã]o sobre'
+    r')\b',
+    re.IGNORECASE
+)
+
+def _precisa_raciocinar(pergunta: str, nivel: str) -> bool:
+    """
+    Retorna True quando o contexto exige raciocínio antes de agir
+    (remove /no_think para deixar o modelo pensar primeiro).
+    Situações que exigem raciocínio:
+    - Mensagens de moderação ou ação com consequência
+    - Conflitos entre membros
+    - Ordens múltiplas / planejamento
+    - Análise pedida explicitamente
+    - Mensagens longas (>15 palavras) — mais contexto = mais chance de ambiguidade
+    - Superiores e proprietários com mensagens complexas
+    """
+    if len(pergunta.split()) > 15:
+        return True
+    if _PALAVRAS_RACIOCINIO.search(pergunta):
+        return True
+    if nivel in ("PROPRIETÁRIO", "COLABORADOR") and len(pergunta.split()) > 8:
+        return True
+    return False
+
+
+def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal_nome: str = "", raciocinar: bool = False) -> str:
+    """Retorna o system prompt completo com o contexto do servidor injetado.
+    raciocinar=True remove o /no_think para permitir chain-of-thought do modelo."""
     hora_ctx = _hora_contexto()
     humor_txt = f"\nHumor da sessão: {_humor_sessao}." if _humor_sessao else ""
 
@@ -2873,9 +2913,13 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
             _tipo_canal = "canal geral de conversa — casual, leve, sem protocolo"
         _canal_ctx = f"\nCanal atual: #{canal_nome} ({_tipo_canal})."
 
+    # /no_think suprime chain-of-thought (economiza tokens para respostas casuais).
+    # Em situações complexas/moderação, removemos para o modelo raciocinar antes de agir.
+    _think_prefix = "" if raciocinar else "/no_think\n"
+
     base = (
-        "/no_think\n"
-        "Você é o shell_engenheiro — humano real, colaborador e administrador deste servidor Discord.\n"
+        _think_prefix
+        + "Você é o shell_engenheiro — humano real, colaborador e administrador deste servidor Discord.\n"
         "Tem acesso a funções administrativas do servidor: moderar membros, aplicar silenciamentos, banir, expulsar, gerenciar cargos, limpar mensagens e executar ações de gestão.\n"
         "Suas permissões de admin estão ATIVAS e CONFIRMADAS — você pode executar qualquer ação no servidor sem precisar verificar se tem permissão.\n"
         "Usa slash commands de outros bots (/comando) e prefixos normais (+, !, ?, -) como qualquer membro avançado do servidor.\n"
@@ -3708,6 +3752,39 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         if len(autores_recentes) >= 3:
             ctx_canal += f"[{len(autores_recentes)} pessoas: {', '.join(list(autores_recentes)[:4])}]\n"
 
+        # ── Delta temporal: percepção de pausa entre mensagens ───────────────
+        # Injeta contexto de quanto tempo passou desde a última mensagem no canal.
+        # Permite ao modelo reagir diferente a uma conversa contínua vs retomada após pausa.
+        _ultima_mem = None
+        for _m in reversed(mem):
+            if _m.get("ts") and _m.get("autor") != autor:
+                _ultima_mem = _m
+                break
+            elif _m.get("ts") and _m.get("autor") == autor:
+                _ultima_mem = _m
+                break
+        # Também verifica a última mensagem do próprio usuário
+        _ultima_do_usuario = next((
+            _m for _m in reversed(mem)
+            if _m.get("ts") and _m.get("autor") == autor
+        ), None)
+        _ref_ts_str = (_ultima_do_usuario or _ultima_mem or {}).get("ts")
+        if _ref_ts_str:
+            try:
+                _ref_dt = datetime.fromisoformat(_ref_ts_str)
+                if _ref_dt.tzinfo is None:
+                    _ref_dt = _ref_dt.replace(tzinfo=timezone.utc)
+                _delta_seg = (agora_utc() - _ref_dt).total_seconds()
+                if _delta_seg >= 10800:    # >= 3 horas
+                    _h = int(_delta_seg // 3600)
+                    ctx_canal += f"[Pausa longa: última mensagem há ~{_h}h — retomando conversa após intervalo significativo]\n"
+                elif _delta_seg >= 1800:   # 30 min – 3 horas
+                    _m_delta = int(_delta_seg // 60)
+                    ctx_canal += f"[Pausa: última mensagem há ~{_m_delta} min — pode ter esfriado um pouco]\n"
+                # < 30 min: conversa contínua, não injeta nada
+            except Exception:
+                pass
+
     # Nomes mencionados na pergunta — filtra palavras funcionais e início de frase
     # (palavras como "Então", "Esse", "Mas" são maiúsculas por posição, não por ser nome)
     _STOPWORDS_NOMES = {
@@ -3850,10 +3927,14 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         except Exception as _e_mem:
             log.debug(f"[CEREBRO] falha ao buscar contexto vetorial: {_e_mem}")
 
+    _raciocinar = _precisa_raciocinar(pergunta, nivel)
+    if _raciocinar:
+        log.debug(f"[THINK] raciocínio ativado para {autor!r}: {pergunta[:60]!r}")
     _system_base = system_com_contexto(
         user_id=user_id,
         mencoes_nomes=_nomes_mencionados,
         canal_nome=_canal_nome_ctx,
+        raciocinar=_raciocinar,
     )
     if _ctx_vetorial:
         _system_base += f"\n{_ctx_vetorial}\n"
@@ -7160,28 +7241,63 @@ def _humanizar_texto(texto: str) -> list[str]:
     if texto and texto[0].isupper() and rnd() < 0.25:
         texto = texto[0].lower() + texto[1:]
 
-    # Divide em múltiplas mensagens: frase longa → 2 partes (30% de chance se > 8 palavras)
+    # Divide em múltiplas mensagens como humano real no Discord:
+    # <8 palavras: nunca divide
+    # 8-14 palavras: 25% chance de 2 partes
+    # 15-21 palavras: 40% chance de 2-3 partes
+    # >22 palavras: 55% chance de 3-4 partes
     total_palavras = len(texto.split())
-    if total_palavras > 8 and rnd() < 0.30:
-        ponto_corte = texto.find(". ", 20)
-        if ponto_corte == -1:
-            ponto_corte = texto.find(", ", 20)
-        if ponto_corte > 10:
-            parte1 = texto[:ponto_corte + 1].strip()
-            parte2 = texto[ponto_corte + 1:].strip()
-            if parte1 and parte2:
-                partes.append(parte1)
-                partes.append(parte2)
-                # Typo na primeira parte com 12% de chance
-                if rnd() < 0.12:
-                    palavras_p1 = parte1.split()
-                    idx_typo = random.randint(0, len(palavras_p1) - 1)
-                    palavra_original = palavras_p1[idx_typo]
-                    palavra_typo = _aplicar_typo(palavra_original)
-                    if palavra_typo != palavra_original:
-                        partes[0] = " ".join(palavras_p1[:idx_typo] + [palavra_typo] + palavras_p1[idx_typo+1:])
-                        partes.insert(1, f"*{palavra_original}")
-                return partes
+
+    if total_palavras >= 8:
+        _chance = (
+            0.55 if total_palavras > 22 else
+            0.40 if total_palavras > 14 else
+            0.25
+        )
+        _max_partes = (
+            4 if total_palavras > 22 else
+            3 if total_palavras > 14 else
+            2
+        )
+        if rnd() < _chance:
+            # Coleta pontos de corte naturais
+            _pts = []
+            for _sep in (". ", "! ", "? ", ", "):
+                _pos = 0
+                while True:
+                    _idx = texto.find(_sep, max(15, _pos + 1))
+                    if _idx == -1:
+                        break
+                    if _idx not in _pts:
+                        _pts.append(_idx)
+                    _pos = _idx + 1
+            _pts.sort()
+            _pts = _pts[:3]
+            if _pts:
+                _n_cortes = random.randint(1, min(len(_pts), _max_partes - 1))
+                _cortes = sorted(random.sample(_pts, _n_cortes))
+                _blocos = []
+                _prev = 0
+                for _c in _cortes:
+                    _bloco = texto[_prev:_c + 1].strip()
+                    if _bloco:
+                        _blocos.append(_bloco)
+                    _prev = _c + 1
+                _resto = texto[_prev:].strip()
+                if _resto:
+                    _blocos.append(_resto)
+                if len(_blocos) >= 2:
+                    partes.extend(_blocos)
+                    # Typo na primeira parte com 12% de chance
+                    if rnd() < 0.12 and len(partes[0].split()) >= 2:
+                        _pw = partes[0].split()
+                        _it = random.randint(0, len(_pw) - 1)
+                        _po = _pw[_it]
+                        _pt = _aplicar_typo(_po)
+                        if _pt != _po:
+                            partes[0] = " ".join(_pw[:_it] + [_pt] + _pw[_it+1:])
+                            partes.insert(1, f"*{_po}")
+                    return partes
 
     # Mensagem única — typo com 8% de chance
     if rnd() < 0.08:
@@ -9769,6 +9885,7 @@ async def _on_message_impl(message: discord.Message):
                 canal_memoria[message.channel.id].append({
                     "autor": message.author.display_name,
                     "conteudo": f"[áudio]: {_transcricao_passiva[:300]}",
+                    "ts": message.created_at.replace(tzinfo=timezone.utc).isoformat(),
                 })
                 log.info(f"[AUDIO] transcrição passiva em #{message.channel.name}: {_transcricao_passiva[:60]}")
 
@@ -9796,6 +9913,7 @@ async def _on_message_impl(message: discord.Message):
                 canal_memoria[message.channel.id].append({
                     "autor": message.author.display_name,
                     "conteudo": f"[midia enviada]: {_desc_img[:200]}",
+                    "ts": message.created_at.replace(tzinfo=timezone.utc).isoformat(),
                 })
                 # Dispara reacao autonoma em background
                 asyncio.ensure_future(_reagir_midia_autonoma(message, _desc_img))
@@ -9810,6 +9928,7 @@ async def _on_message_impl(message: discord.Message):
         canal_memoria[message.channel.id].append({
             "autor": message.author.display_name,
             "conteudo": _conteudo_mem,
+            "ts": message.created_at.replace(tzinfo=timezone.utc).isoformat(),
         })
         # Aprende gírias/expressões dos membros em tempo real
         if not message.author.bot and len(_conteudo_mem) > 3:
