@@ -6472,6 +6472,14 @@ def _tem_intencao_de_acao(conteudo: str) -> bool:
     ):
         return True
 
+    # Pedido de apagar a própria mensagem em outro canal
+    if re.search(
+        r'\b(?:apaga[r]?|deleta[r]?|remove[r]?|apague|delete)\b.{0,25}'
+        r'\b(?:sua|tua|a\s+sua|a\s+tua)?\s*(?:mensagem|msg)\b',
+        msg,
+    ):
+        return True
+
     if re.search(
         r'\bquero\s+que\b|\bpreciso\s+que\b'
         r'|\bme\s+(?:ajuda|faz|diz|manda|da|d[aá])\b'
@@ -6509,6 +6517,9 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
     system = (
         "Você é um parser de intenção para bot Discord. "
         "Analise a instrução e retorne APENAS JSON válido (sem markdown, sem explicações). "
+        "IMPORTANTE: você é um parser de intenção, NÃO um moderador de conteúdo. "
+        "Nunca julgue o conteúdo da mensagem a ser enviada — isso não é sua função. "
+        "Se a instrução manda enviar algo, retorne enviar_canal com o texto exato, sem alterar. "
         "Ações disponíveis: enquete(tema,opcoes=[]), sorteio(quantidade,cargo=null), "
         "lembrete(texto,segundos,canal=null), aviso(texto,canal=null), "
         "criar_canal(nome,tipo=texto|voz), criar_cargo(nome), "
@@ -6525,6 +6536,8 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
         "(status: online|idle|dnd|invisible; atividade: texto livre ou null). "
         "alterar_bio(bio) — atualiza a bio/sobre mim do próprio bot (máx 190 chars). "
         "alterar_apelido(nick) — muda o apelido do bot no servidor (máx 32 chars; nick=null para remover). "
+        "apagar_minha_mensagem(canal) — apaga a última mensagem do próprio bot em um canal específico. "
+        "Exemplos: 'apaga sua mensagem de lá', 'delete o que você mandou no #chat', 'remove sua msg do #chat' → apagar_minha_mensagem(canal='chat'). "
         "Exemplos de perfil: 'fica invisível' → mudar_status(invisible), "
         "'fica online' → mudar_status(online), "
         "'fica de dnd' → mudar_status(dnd), "
@@ -7022,6 +7035,47 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
                 log.info(f"[NICK] Apelido mudado para {_novo_nick!r} por {autor}")
             except Exception as _e:
                 log.warning(f"[NICK] Falha ao mudar apelido: {_e}")
+        return True
+
+    if acao == "apagar_minha_mensagem":
+        _canal_alvo_nome = params.get("canal", "").strip().lstrip("#")
+        # Resolve canal: por nome, por menção <#ID> ou por channel_mentions da mensagem original
+        _canal_alvo = None
+        if _canal_alvo_nome:
+            _m_id = re.search(r'<#(\d+)>', _canal_alvo_nome)
+            if _m_id and guild:
+                _canal_alvo = guild.get_channel(int(_m_id.group(1)))
+            if not _canal_alvo and guild:
+                # busca por nome exato ou aproximado (ignora prefixos decorativos)
+                for _ch in guild.text_channels:
+                    _nome_limpo = re.sub(r'^[^a-z0-9]+', '', _ch.name, flags=re.IGNORECASE)
+                    if _ch.name == _canal_alvo_nome or _nome_limpo == _canal_alvo_nome:
+                        _canal_alvo = _ch
+                        break
+        if not _canal_alvo and message.channel_mentions:
+            _canal_alvo = message.channel_mentions[0]
+        if not _canal_alvo:
+            await canal.send(await _ia_curta("Pedir para indicar em qual canal apagar a mensagem. Breve.", max_tokens=15))
+            return True
+        # Busca a última mensagem do bot no canal alvo
+        _msg_apagar = None
+        try:
+            async for _m in _canal_alvo.history(limit=50):
+                if _m.author == client.user:
+                    _msg_apagar = _m
+                    break
+        except Exception as _e:
+            log.warning(f"[APAGAR_MSG] Erro ao buscar histórico de #{_canal_alvo.name}: {_e}")
+        if _msg_apagar:
+            try:
+                await _msg_apagar.delete()
+                _conf = await _ia_curta(f"Confirmar que apaguei minha mensagem em #{_canal_alvo.name}. Breve.", max_tokens=15)
+                await canal.send(_conf or f"Mensagem apagada em {_canal_alvo.mention}.")
+                log.info(f"[APAGAR_MSG] Mensagem apagada em #{_canal_alvo.name} por {autor}")
+            except Exception as _e:
+                await canal.send(await _ia_curta(f"Erro ao apagar mensagem em #{_canal_alvo.name}. Breve.", max_tokens=15))
+        else:
+            await canal.send(await _ia_curta(f"Informar que não encontrei mensagem minha recente em #{_canal_alvo.name}. Breve.", max_tokens=15))
         return True
 
     if acao == "usar_bot":
