@@ -6459,6 +6459,19 @@ def _tem_intencao_de_acao(conteudo: str) -> bool:
     ):
         return True
 
+    # Pedidos de alteração de perfil/presença do bot
+    if re.search(
+        r'\b(?:fica[r]?\s+(?:invisível|invisivel|online|ausente|ocupado|dnd|idle)'
+        r'|muda[r]?\s+(?:seu|o)\s+(?:status|apelido|nick|nome)'
+        r'|coloca[r]?\s+(?:na\s+)?(?:sua\s+)?bio'
+        r'|atualiza[r]?\s+(?:a\s+)?bio'
+        r'|muda[r]?\s+(?:sua\s+)?atividade'
+        r'|tira[r]?\s+(?:a\s+)?atividade'
+        r'|vai\s+(?:pra?\s+)?(?:invisível|invisivel|online|ausente))\b',
+        msg,
+    ):
+        return True
+
     if re.search(
         r'\bquero\s+que\b|\bpreciso\s+que\b'
         r'|\bme\s+(?:ajuda|faz|diz|manda|da|d[aá])\b'
@@ -6512,6 +6525,13 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
         "(status: online|idle|dnd|invisible; atividade: texto livre ou null). "
         "alterar_bio(bio) — atualiza a bio/sobre mim do próprio bot (máx 190 chars). "
         "alterar_apelido(nick) — muda o apelido do bot no servidor (máx 32 chars; nick=null para remover). "
+        "Exemplos de perfil: 'fica invisível' → mudar_status(invisible), "
+        "'fica online' → mudar_status(online), "
+        "'fica de dnd' → mudar_status(dnd), "
+        "'muda sua atividade para Observando o servidor' → mudar_status(online, atividade='Observando o servidor'), "
+        "'tira a atividade' → mudar_status(online, atividade=null), "
+        "'coloca na sua bio que você é o engenheiro' → alterar_bio('Engenheiro do servidor'), "
+        "'muda seu apelido para Shell_v2' → alterar_apelido('Shell_v2'). "
         "IMPORTANTE para enviar_canal: o campo 'texto' deve conter APENAS a INTENÇÃO ou ASSUNTO "
         "da mensagem (ex: 'avisar a moderação sobre suas responsabilidades'), NÃO a mensagem literal. "
         "Um segundo passo de IA irá redigir a mensagem final a partir dessa intenção. "
