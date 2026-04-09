@@ -7017,14 +7017,18 @@ async def _auto_editar_codigo(pedido: str, canal: discord.TextChannel, autor: st
     await canal.send(
         f"✅ **{descricao}**\n"
         f"modelo: `{fonte_ia}` · backup: `{os.path.basename(bak)}`\n"
-        f"🔄 Reiniciando..."
+        f"🔄 Encerrando para o Railway reiniciar com o código novo..."
     )
-    await asyncio.sleep(1.5)
 
-    import sys
-    log.info(f"[AUTOEDIC] os.execv → {sys.executable} {sys.argv}")
-    os.execv(sys.executable, [sys.executable] + sys.argv)
-    return True
+    # Aguarda a mensagem chegar ao Discord antes de encerrar
+    await asyncio.sleep(2.0)
+
+    # No Railway, restartPolicyType = "ON_FAILURE" faz o container reiniciar
+    # automaticamente quando o processo encerra com código != 0.
+    # os._exit(1) encerra imediatamente sem passar pelo cleanup do asyncio
+    # (evita exceções de loop fechado que mascariam o exit code).
+    log.info(f"[AUTOEDIC] Encerrando com exit(1) para Railway reiniciar. desc='{descricao}'")
+    os._exit(1)
 
 
 async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.Guild) -> bool:
