@@ -16,10 +16,38 @@ Variáveis de ambiente necessárias (lidas pelo bot):
 from __future__ import annotations
 
 import asyncio
-import json
+import hashlib
 import logging
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Optional
+
+
+# ── Cache LRU de embeddings ───────────────────────────────────────────────────
+# Evita chamadas repetidas à OpenAI para textos idênticos ou muito frequentes.
+# Tamanho 512: ocupa ~3 MB de RAM (512 × 1536 floats × 4 bytes).
+class _LRUCache:
+    def __init__(self, maxsize: int = 512):
+        self._cache: OrderedDict[str, list[float]] = OrderedDict()
+        self._maxsize = maxsize
+
+    def get(self, key: str) -> Optional[list[float]]:
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            return self._cache[key]
+        return None
+
+    def put(self, key: str, value: list[float]) -> None:
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        else:
+            if len(self._cache) >= self._maxsize:
+                self._cache.popitem(last=False)
+            self._cache[key] = value
+
+    @staticmethod
+    def key(texto: str) -> str:
+        return hashlib.md5(texto.encode(), usedforsecurity=False).hexdigest()
 
 log = logging.getLogger("shell")
 
@@ -110,6 +138,11 @@ class MemoriaVetorial:
         self._oai_key  = openai_key
         self._pool: Optional["asyncpg.Pool"] = None
         self._oai: Optional["AsyncOpenAI"]   = None
+        # Cache LRU: reutiliza embeddings já gerados
+        self._embed_cache = _LRUCache(maxsize=512)
+        # Fila de batch insert: acumula até 10 mensagens ou 5s antes de persistir
+        self._fila_batch: list[dict] = []
+        self._flush_task: Optional[asyncio.Task] = None
 
     # ── Inicialização ─────────────────────────────────────────────────────────
 
@@ -137,21 +170,30 @@ class MemoriaVetorial:
         if OPENAI_OK and self._oai_key:
             self._oai = AsyncOpenAI(api_key=self._oai_key)
 
+        # Inicia worker de flush em background
+        self._flush_task = asyncio.ensure_future(self._flush_worker())
+
         log.info("[CEREBRO] Pool PostgreSQL criado e schema inicializado.")
 
     # ── Embeddings ────────────────────────────────────────────────────────────
 
     async def _embed(self, texto: str) -> Optional[list[float]]:
-        """Gera embedding via OpenAI. Retorna None se indisponível."""
+        """Gera embedding via OpenAI. Usa cache LRU para evitar chamadas repetidas."""
         if not self._oai:
             return None
-        texto = texto[:8000]  # limite de segurança
+        texto = texto[:8000]
+        cache_key = _LRUCache.key(texto)
+        cached = self._embed_cache.get(cache_key)
+        if cached is not None:
+            return cached
         try:
             resp = await self._oai.embeddings.create(
                 model=_EMBED_MODEL,
                 input=texto,
             )
-            return resp.data[0].embedding
+            vec = resp.data[0].embedding
+            self._embed_cache.put(cache_key, vec)
+            return vec
         except Exception as e:
             log.debug(f"[CEREBRO] Falha ao gerar embedding: {e}")
             return None
@@ -173,41 +215,86 @@ class MemoriaVetorial:
         ts: Optional[datetime] = None,
     ) -> None:
         """
-        Persiste uma mensagem do Discord com seu embedding.
-        Chamado de forma assíncrona no on_message — falhas são silenciosas.
+        Enfileira a mensagem para persistência em batch.
+        O flush ocorre automaticamente a cada 10 mensagens ou 5 segundos.
         """
         if not self._pool:
             return
         if ts is None:
             ts = datetime.now(timezone.utc)
+        self._fila_batch.append({
+            "canal_id":   canal_id,
+            "canal_nome": canal_nome,
+            "autor_id":   autor_id,
+            "autor_nome": autor_nome,
+            "conteudo":   conteudo[:2000],
+            "ts":         ts,
+        })
+        if len(self._fila_batch) >= 10:
+            await self._flush_batch()
 
-        embedding = await self._embed(conteudo)
+    async def _flush_worker(self) -> None:
+        """Worker contínuo: faz flush da fila a cada 5 segundos."""
+        while True:
+            await asyncio.sleep(5)
+            if self._fila_batch:
+                await self._flush_batch()
+
+    async def _flush_batch(self) -> None:
+        """
+        Persiste todas as mensagens na fila de uma vez.
+        Gera embeddings em paralelo e faz um único executemany no banco.
+        """
+        if not self._fila_batch:
+            return
+        lote, self._fila_batch = self._fila_batch, []
+
+        # Gera embeddings em paralelo para todo o lote
+        embeddings = await asyncio.gather(
+            *[self._embed(m["conteudo"]) for m in lote],
+            return_exceptions=True,
+        )
+
+        registros_com = []
+        registros_sem = []
+        for msg, emb in zip(lote, embeddings):
+            if isinstance(emb, list):
+                registros_com.append((
+                    msg["canal_id"], msg["canal_nome"],
+                    msg["autor_id"], msg["autor_nome"],
+                    msg["conteudo"], msg["ts"],
+                    self._vec_str(emb),
+                ))
+            else:
+                registros_sem.append((
+                    msg["canal_id"], msg["canal_nome"],
+                    msg["autor_id"], msg["autor_nome"],
+                    msg["conteudo"], msg["ts"],
+                ))
 
         try:
             async with self._pool.acquire() as conn:
-                if embedding is not None:
-                    await conn.execute(
+                if registros_com:
+                    await conn.executemany(
                         """
                         INSERT INTO mensagens
                             (canal_id, canal_nome, autor_id, autor_nome, conteudo, ts, embedding)
                         VALUES ($1, $2, $3, $4, $5, $6, $7::vector)
                         """,
-                        canal_id, canal_nome, autor_id, autor_nome,
-                        conteudo[:2000], ts, self._vec_str(embedding),
+                        registros_com,
                     )
-                else:
-                    # Sem embedding — persiste só texto (busca vetorial não funcionará)
-                    await conn.execute(
+                if registros_sem:
+                    await conn.executemany(
                         """
                         INSERT INTO mensagens
                             (canal_id, canal_nome, autor_id, autor_nome, conteudo, ts)
                         VALUES ($1, $2, $3, $4, $5, $6)
                         """,
-                        canal_id, canal_nome, autor_id, autor_nome,
-                        conteudo[:2000], ts,
+                        registros_sem,
                     )
+            log.debug(f"[CEREBRO] Batch flush: {len(lote)} mensagens persistidas.")
         except Exception as e:
-            log.debug(f"[CEREBRO] Falha ao ingerir mensagem: {e}")
+            log.warning(f"[CEREBRO] Falha no batch flush: {e}")
 
     # ── Busca ─────────────────────────────────────────────────────────────────
 
@@ -220,11 +307,10 @@ class MemoriaVetorial:
     ) -> str:
         """
         Busca as mensagens/resumos mais relevantes para a pergunta.
-        - limiar 0.60: captura paráfrases e contextos relacionados (0.75 era restritivo demais)
-        - Ordenação final por similaridade real (não por tabela)
+        - UNION ALL numa única conexão (era dois SELECTs separados)
+        - Deduplicação por similaridade vetorial real (cosseno > 0.92)
         - Penalidade temporal: mensagens antigas pesam menos
-        - Deduplicação por similaridade entre resultados (sim > 0.92 = duplicata)
-        - canal_id opcional: filtra por canal quando fornecido
+        - limiar 0.60: captura paráfrases e contextos relacionados
         Retorna string formatada para injetar no system prompt, ou '' se nada relevante.
         """
         if not self._pool or not self._oai:
@@ -235,104 +321,102 @@ class MemoriaVetorial:
             return ""
 
         vec = self._vec_str(embedding)
+        canal_filtro = "AND canal_id = $3" if canal_id else ""
+        params = [vec, top_k * 3, canal_id] if canal_id else [vec, top_k * 3]
 
         try:
             async with self._pool.acquire() as conn:
-                # Filtro de canal opcional
-                canal_filtro_msg = "AND canal_id = $3" if canal_id else ""
-                canal_filtro_res = "AND canal_id = $3" if canal_id else ""
-                params_msg = [vec, top_k * 3, canal_id] if canal_id else [vec, top_k * 3]
-                params_res = [vec, max(3, top_k), canal_id] if canal_id else [vec, max(3, top_k)]
-
-                # Busca em mensagens não-resumidas — recupera mais do que top_k para filtrar depois
-                rows_msg = await conn.fetch(
+                rows = await conn.fetch(
                     f"""
-                    SELECT autor_nome, conteudo, ts,
-                           1 - (embedding <=> $1::vector) AS sim
-                    FROM mensagens
-                    WHERE embedding IS NOT NULL
-                      AND resumida = FALSE
-                      {canal_filtro_msg}
+                    SELECT fonte, autor_label, conteudo, ts,
+                           1 - (embedding <=> $1::vector) AS sim,
+                           embedding::text AS emb_txt
+                    FROM (
+                        SELECT 'msg'   AS fonte,
+                               autor_nome AS autor_label,
+                               conteudo, ts, embedding
+                        FROM mensagens
+                        WHERE embedding IS NOT NULL
+                          AND resumida = FALSE
+                          {canal_filtro}
+                        ORDER BY embedding <=> $1::vector
+                        LIMIT $2
+
+                        UNION ALL
+
+                        SELECT 'resumo' AS fonte,
+                               canal_nome AS autor_label,
+                               conteudo, periodo_ini AS ts, embedding
+                        FROM resumos
+                        WHERE embedding IS NOT NULL
+                          {canal_filtro}
+                        ORDER BY embedding <=> $1::vector
+                        LIMIT $2
+                    ) sub
                     ORDER BY embedding <=> $1::vector
                     LIMIT $2
                     """,
-                    *params_msg,
-                )
-
-                # Busca em resumos
-                rows_res = await conn.fetch(
-                    f"""
-                    SELECT canal_nome, conteudo, periodo_ini AS ts,
-                           1 - (embedding <=> $1::vector) AS sim
-                    FROM resumos
-                    WHERE embedding IS NOT NULL
-                      {canal_filtro_res}
-                    ORDER BY embedding <=> $1::vector
-                    LIMIT $2
-                    """,
-                    *params_res,
+                    *params,
                 )
         except Exception as e:
             log.debug(f"[CEREBRO] Falha na busca vetorial: {e}")
             return ""
 
-        from datetime import timezone as _tz
-        agora = datetime.now(_tz.utc)
+        agora = datetime.now(timezone.utc)
 
-        # Monta lista unificada com score ajustado por tempo
+        # Monta candidatos com score ajustado por tempo
         candidatos: list[dict] = []
-
-        for r in rows_res:
+        for r in rows:
             sim = float(r["sim"])
             if sim < limiar:
                 continue
             ts = r["ts"]
-            # Penalidade temporal: -0.01 por semana, máx -0.10
-            dias = (agora - ts.replace(tzinfo=_tz.utc)).days if ts else 0
+            dias = (agora - ts.replace(tzinfo=timezone.utc)).days if ts else 0
             penalidade = min(0.10, dias / 700)
             score = sim - penalidade
-            data = ts.strftime("%d/%m/%Y") if ts else "?"
-            candidatos.append({
-                "score": score,
-                "texto": f"[Resumo #{r['canal_nome']} em {data}]\n{r['conteudo'][:350]}",
-            })
 
-        for r in rows_msg:
-            sim = float(r["sim"])
-            if sim < limiar:
-                continue
-            ts = r["ts"]
-            dias = (agora - ts.replace(tzinfo=_tz.utc)).days if ts else 0
-            penalidade = min(0.10, dias / 700)
-            score = sim - penalidade
-            data = ts.strftime("%d/%m %H:%M") if ts else "?"
-            candidatos.append({
-                "score": score,
-                "texto": f"[{r['autor_nome']} em {data}] {r['conteudo'][:350]}",
-            })
+            if r["fonte"] == "resumo":
+                data = ts.strftime("%d/%m/%Y") if ts else "?"
+                texto = f"[Resumo #{r['autor_label']} em {data}]\n{r['conteudo'][:350]}"
+            else:
+                data = ts.strftime("%d/%m %H:%M") if ts else "?"
+                texto = f"[{r['autor_label']} em {data}] {r['conteudo'][:350]}"
+
+            # Parseia vetor para deduplicação real
+            try:
+                emb_vec = [float(x) for x in r["emb_txt"].strip("[]").split(",")]
+            except Exception:
+                emb_vec = None
+
+            candidatos.append({"score": score, "texto": texto, "vec": emb_vec})
 
         if not candidatos:
             return ""
 
-        # Ordena por score descendente
         candidatos.sort(key=lambda x: x["score"], reverse=True)
 
-        # Deduplicação simples: descarta candidatos cujo texto começa igual (primeiros 60 chars)
-        vistos: set[str] = set()
-        resultados: list[str] = []
+        # Deduplicação por similaridade vetorial (cosseno > 0.92 = duplicata)
+        def _cos(a: list[float], b: list[float]) -> float:
+            dot = sum(x * y for x, y in zip(a, b))
+            na  = sum(x * x for x in a) ** 0.5
+            nb  = sum(x * x for x in b) ** 0.5
+            return dot / (na * nb) if na and nb else 0.0
+
+        aceitos: list[dict] = []
         for c in candidatos:
-            chave = c["texto"][:60].lower().strip()
-            if chave in vistos:
-                continue
-            vistos.add(chave)
-            resultados.append(c["texto"])
-            if len(resultados) >= top_k:
+            if c["vec"] and any(
+                a["vec"] and _cos(c["vec"], a["vec"]) > 0.92
+                for a in aceitos
+            ):
+                continue  # duplicata vetorial — descarta
+            aceitos.append(c)
+            if len(aceitos) >= top_k:
                 break
 
-        if not resultados:
+        if not aceitos:
             return ""
 
-        bloco = "\n".join(resultados)
+        bloco = "\n".join(c["texto"] for c in aceitos)
         return (
             "── Memória de longo prazo (contexto relevante recuperado) ──\n"
             + bloco
@@ -490,12 +574,36 @@ class MemoriaVetorial:
                 log.warning(f"[CEREBRO] Erro ao sumarizar canal {canal_id}: {e}")
                 continue
 
+        # Limpeza física: remove mensagens resumidas com mais de 30 dias
+        # Mantém apenas os resumos — impede crescimento infinito da tabela
+        try:
+            async with self._pool.acquire() as conn:
+                deleted = await conn.fetchval(
+                    """
+                    WITH del AS (
+                        DELETE FROM mensagens
+                        WHERE resumida = TRUE
+                          AND ts < NOW() - INTERVAL '30 days'
+                        RETURNING id
+                    )
+                    SELECT COUNT(*) FROM del
+                    """
+                )
+                if deleted:
+                    log.info(f"[CEREBRO] Limpeza física: {deleted} mensagens antigas removidas.")
+        except Exception as e:
+            log.warning(f"[CEREBRO] Falha na limpeza física: {e}")
+
         return n_resumos
 
     # ── Utilitários ───────────────────────────────────────────────────────────
 
     async def fechar(self) -> None:
         """Fecha o pool de conexões (chamar ao desligar o bot, opcional)."""
+        if self._flush_task:
+            self._flush_task.cancel()
+        if self._fila_batch:
+            await self._flush_batch()  # drena o que sobrou antes de fechar
         if self._pool:
             await self._pool.close()
             self._pool = None
