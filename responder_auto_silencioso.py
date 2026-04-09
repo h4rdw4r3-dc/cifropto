@@ -3652,7 +3652,11 @@ def _escolher_modelo(forcar_rapido: bool = False) -> str:
         return _MODELO_8B
 
     # Nível 2 — 70b (se budget disponível e não forçando rápido)
-    if not forcar_rapido and _modelo_disponivel(_MODELO_70B) and _tokens_70b_hoje < LIMITE_70B:
+    # Guard de 80%: quando o 70b supera 80% do limite diário (100k TPD), é reservado
+    # apenas para fallback de emergência — evita esgotar o budget cedo demais e
+    # causar cascata de 429 antes das 17h UTC como visto nos logs de 09/04/2026.
+    _LIMITE_70B_NORMAL = int(LIMITE_70B * 0.80)  # 80% = 72.000 tokens
+    if not forcar_rapido and _modelo_disponivel(_MODELO_70B) and _tokens_70b_hoje < _LIMITE_70B_NORMAL:
         return _MODELO_70B
 
     # Nível 3 — llama-4-scout (500k TPD, nova arquitetura)
@@ -3972,7 +3976,11 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     modelo = _escolher_modelo()
 
     # ── Anti-413: limita contexto antes de chamar a API ──────────────────────────
-    _LIMITE_CHARS_8B    = 21000  # ~5250 tokens — margem segura abaixo do TPM de 6000 do 8b-instant
+    # Ratio real medido nos logs: ~3,1 chars/token (pt-BR com acentos + contexto de servidor).
+    # TPM do 8b = 6000 tokens/min; max_tokens=180 de output reservado.
+    # Input máximo seguro: (6000 - 180) * 3.1 = 17.919 chars → com margem de 10%: ~16.000.
+    # Valor anterior (21000) causava 413 recorrente porque assumia 3,5 chars/token (otimista demais).
+    _LIMITE_CHARS_8B    = 16000  # ~5160 tokens — calibrado com ratio real 3.1 chars/tok + margem 10%
     _LIMITE_CHARS_GERAL = 40000  # ~10000 tokens — 70b/scout/qwen têm TPM ≥ 12k, contexto 128k+
     _LIMITE_CHARS = _LIMITE_CHARS_8B if modelo == _MODELO_8B else _LIMITE_CHARS_GERAL
     ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
@@ -3982,7 +3990,7 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     # Isso preserva o histórico completo e evita respostas burras por falta de contexto.
     if ctx_chars > _LIMITE_CHARS and modelo == _MODELO_8B:
         _modelo_escalado = None
-        if _modelo_disponivel(_MODELO_70B) and _tokens_70b_hoje < LIMITE_70B:
+        if _modelo_disponivel(_MODELO_70B) and _tokens_70b_hoje < int(LIMITE_70B * 0.80):
             _modelo_escalado = _MODELO_70B
         elif _modelo_disponivel(_MODELO_SCOUT) and _tokens_scout_hoje < LIMITE_SCOUT:
             _modelo_escalado = _MODELO_SCOUT
@@ -4113,7 +4121,9 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
 
         # Cascata de fallback — tenta próximo modelo disponível na ordem de prioridade
         # _groq_create já aplicou o bloqueio no modelo que falhou
-        _cascata = [_MODELO_8B, _MODELO_SCOUT, _MODELO_QWEN]
+        # 70b é incluído aqui: o guard de 80% só age na escolha normal (_escolher_modelo).
+        # Em fallback emergencial, os 20% reservados do 70b ficam acessíveis.
+        _cascata = [_MODELO_70B, _MODELO_8B, _MODELO_SCOUT, _MODELO_QWEN]
         for _fb_modelo in _cascata:
             if _fb_modelo == modelo:
                 continue  # não tenta o mesmo que falhou
