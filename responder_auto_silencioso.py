@@ -3970,7 +3970,7 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     # ── Anti-413: limita contexto antes de chamar a API ──────────────────────────
     # llama-3.1-8b-instant: TPM = 6000 tokens ≈ 22000 chars (margem de segurança)
     # Os outros modelos têm limites maiores, mas usamos o mesmo threshold conservador
-    _LIMITE_CHARS = 18000  # ~4500 tokens — margem segura abaixo do TPM de 6000 do 8b
+    _LIMITE_CHARS = 26000  # ~6500 tokens — acomoda system completo + histórico razoável; 8b-instant tem 131k ctx
     ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
     if ctx_chars > _LIMITE_CHARS:
         # Passo 1: remove contexto vetorial e comprime contexto do servidor
@@ -7289,6 +7289,10 @@ async def _safe_send(
                     log.warning(f"[RATE_LIMIT] aguardando {retry_after:.1f}s")
                     await asyncio.sleep(retry_after + 0.5)
                     tentativas += 1
+                elif e.status == 400 and i == 0 and reply_msg is not None:
+                    # Mensagem original foi deletada — fallback silencioso para channel.send
+                    reply_msg = None
+                    log.warning(f"[SEND] reply falhou (mensagem deletada?), usando channel.send")
                 else:
                     log.error(f"[SEND] HTTP {e.status}: {e.text[:80]}")
                     break
@@ -9306,18 +9310,21 @@ async def on_ready():
         canal_audit = client.get_guild(SERVIDOR_ID)
         canal_audit_ch = canal_audit.get_channel(CANAL_AUDITORIA_ID) if canal_audit else None
         if webhook_secret:
-            try:
-                _webhook_server = WebhookServer(
-                    secret=webhook_secret,
-                    port=webhook_port,
-                    groq_key=GROQ_API_KEY,
-                    canal_discord=canal_audit_ch,
-                    mem=_mem if MEMORIA_OK else None,
-                )
-                asyncio.ensure_future(_webhook_server.iniciar())
-                log.info(f"[WEBHOOK] Servidor GitHub iniciado na porta {webhook_port}.")
-            except Exception as e:
-                log.warning(f"[WEBHOOK] Falha ao iniciar servidor de webhook: {e}")
+            if _webhook_server is not None:
+                log.info("[WEBHOOK] Servidor já em execução — reconexão ignorada.")
+            else:
+                try:
+                    _webhook_server = WebhookServer(
+                        secret=webhook_secret,
+                        port=webhook_port,
+                        groq_key=GROQ_API_KEY,
+                        canal_discord=canal_audit_ch,
+                        mem=_mem if MEMORIA_OK else None,
+                    )
+                    asyncio.ensure_future(_webhook_server.iniciar())
+                    log.info(f"[WEBHOOK] Servidor GitHub iniciado na porta {webhook_port}.")
+                except Exception as e:
+                    log.warning(f"[WEBHOOK] Falha ao iniciar servidor de webhook: {e}")
         else:
             log.warning("[WEBHOOK] GITHUB_WEBHOOK_SECRET não definida  -  webhook desativado.")
 
