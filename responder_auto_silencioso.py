@@ -9435,7 +9435,7 @@ async def on_ready():
     try:
         await client.change_presence(
             status=discord.Status.online,
-            activity=discord.CustomActivity(name="Custom Status", state="no servidor"),
+            activity=discord.CustomActivity(name="Custom Status", state="ativo caralho"),
         )
         await client.edit_settings(status=discord.Status.online)
         log.info("[PRESENCE] Status inicial definido: online")
