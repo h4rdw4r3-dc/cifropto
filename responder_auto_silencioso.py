@@ -3967,10 +3967,15 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         {"role": "system", "content": membro_info},
     ] + hist
 
+    # ── Escolha antecipada do modelo para calibrar o limite de contexto ──────────
+    # O 8b-instant tem TPM de 6000 tokens (≈ 21000 chars); os demais têm 12k-30k.
+    # Precisamos saber o modelo ANTES de cortar o contexto para usar o threshold certo.
+    modelo = _escolher_modelo()
+
     # ── Anti-413: limita contexto antes de chamar a API ──────────────────────────
-    # llama-3.1-8b-instant: TPM = 6000 tokens ≈ 22000 chars (margem de segurança)
-    # Os outros modelos têm limites maiores, mas usamos o mesmo threshold conservador
-    _LIMITE_CHARS = 26000  # ~6500 tokens — acomoda system completo + histórico razoável; 8b-instant tem 131k ctx
+    _LIMITE_CHARS_8B    = 21000  # ~5250 tokens — margem segura abaixo do TPM de 6000 do 8b-instant
+    _LIMITE_CHARS_GERAL = 40000  # ~10000 tokens — 70b/scout/qwen têm TPM ≥ 12k, contexto 128k+
+    _LIMITE_CHARS = _LIMITE_CHARS_8B if modelo == _MODELO_8B else _LIMITE_CHARS_GERAL
     ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
     if ctx_chars > _LIMITE_CHARS:
         # Passo 1: remove contexto vetorial e comprime contexto do servidor
@@ -4021,8 +4026,6 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
         log.warning(f"[GROQ] contexto reduzido (passo 3 ultra-emergência): {ctx_chars} chars")
 
-    # Escolha do modelo: 8b-instant por padrão (500k TPD), 70b só quando budget disponível
-    modelo = _escolher_modelo()
     ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
     log.info(f"[GROQ] {modelo} | user={autor} | chars={ctx_chars} | {_budget_status()}")
 
