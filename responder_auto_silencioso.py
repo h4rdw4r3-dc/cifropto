@@ -60,74 +60,6 @@ _mem: "MemoriaVetorial | None" = None
 MEMORIA_OK: bool = False
 _webhook_server = None
 
-# ── Modo silêncio global ──────────────────────────────────────────────────────
-# Quando ativo, bloqueia todas as saídas autônomas do bot (interjections,
-# boas-vindas orgânicas, canal quieto, convites).  Respostas a ordens diretas
-# de Proprietários/Colaboradores ainda funcionam normalmente.
-_modo_silencio: dict = {
-    "ativo": False,
-    "quem_id": None,       # user_id de quem ordenou
-    "quem_nome": "",       # display_name para o log
-    "canal_id": None,      # canal específico (None = global)
-    "desde": None,         # datetime UTC
-}
-
-# Detecta ordem de silêncio (qualquer variação natural)
-_RE_SILENCIO = re.compile(
-    r"(fique\s+quieto|fica\s+quieto|para\s+de\s+falar|pare\s+de\s+falar"
-    r"|cala\s+(a\s+)?boca|cale\s+(a\s+)?boca|n[ãa]o\s+mande?\s+(nada|mensagem)"
-    r"|proibido\s+de\s+interagir|modo\s+sil[eê]ncio|entra\s+em\s+sil[eê]ncio"
-    r"|sil[eê]ncio\s+agora|fica\s+em\s+sil[eê]ncio|fique\s+em\s+sil[eê]ncio"
-    r"|desativa\s+(as?\s+)?sa[ií]das\s+aut[oô]nomas|para\s+de\s+mandar\s+coisa"
-    r"|n[ãa]o\s+fala?\s+nada|n[ãa]o\s+interaja|n[ãa]o\s+mande?\s+nada)",
-    re.IGNORECASE,
-)
-
-# Detecta liberação do silêncio
-_RE_LIBERACAO = re.compile(
-    r"(pode\s+falar|volta\s+ao\s+normal|liberado|libera|desbloqueado"
-    r"|segunda\s+ordem|retoma\s+normal|volta\s+a\s+interagir"
-    r"|desativa\s+(o\s+)?modo\s+sil[eê]ncio|sai\s+do\s+sil[eê]ncio"
-    r"|encerra\s+(o\s+)?sil[eê]ncio|fim\s+do\s+sil[eê]ncio)",
-    re.IGNORECASE,
-)
-
-
-def _bot_silenciado(canal_id: int | None = None) -> bool:
-    """
-    Retorna True se o bot está em modo silêncio para o canal informado.
-    Silêncio global (canal_id=None no estado) bloqueia todos os canais.
-    Silêncio específico só bloqueia aquele canal.
-    """
-    if not _modo_silencio["ativo"]:
-        return False
-    sc = _modo_silencio["canal_id"]
-    if sc is None:
-        return True          # global — bloqueia tudo
-    return canal_id == sc    # específico — só aquele canal
-
-
-def _ativar_silencio(user_id: int, nome: str, canal_id: int | None = None) -> None:
-    """Ativa o modo silêncio, registrando quem ordenou e em qual escopo."""
-    _modo_silencio["ativo"] = True
-    _modo_silencio["quem_id"] = user_id
-    _modo_silencio["quem_nome"] = nome
-    _modo_silencio["canal_id"] = canal_id
-    _modo_silencio["desde"] = datetime.now(timezone.utc)
-    escopo = f"canal {canal_id}" if canal_id else "global"
-    log.info(f"[SILENCIO] Modo silêncio ATIVADO por {nome} ({user_id}) — escopo: {escopo}")
-
-
-def _desativar_silencio(user_id: int, nome: str) -> None:
-    """Desativa o modo silêncio."""
-    _modo_silencio["ativo"] = False
-    _modo_silencio["quem_id"] = None
-    _modo_silencio["quem_nome"] = ""
-    _modo_silencio["canal_id"] = None
-    _modo_silencio["desde"] = None
-    log.info(f"[SILENCIO] Modo silêncio DESATIVADO por {nome} ({user_id})")
-
-
 # Rotinas de saudacao agendadas {canal_id: {manha, tarde, noite}}
 _rotinas_saudacao: dict[int, dict[str, str]] = {}
 _saudacoes_enviadas: dict[int, dict[tuple, bool]] = {}
@@ -8185,8 +8117,6 @@ async def _interjetar_conversa(message: discord.Message):
       DISCORDA — discorda de algo dito
       PASS     — não tem nada genuíno a dizer
     """
-    if _bot_silenciado(message.channel.id):
-        return
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return
 
@@ -8199,14 +8129,23 @@ async def _interjetar_conversa(message: discord.Message):
     perfil_txt = f"\n{perfil_autor}" if perfil_autor else ""
 
     # Etapa 1: triagem qualificada — não só GO/PASS, mas define o ângulo
+    # Rejeição antecipada: se o contexto é todo mensagens curtas/rasas, não vale triagem
+    _linhas_ctx = [l for l in ctx.splitlines() if l.strip()]
+    _media_len = sum(len(l.split(":", 1)[-1].strip()) for l in _linhas_ctx) / max(len(_linhas_ctx), 1)
+    _tem_substancia = _media_len >= 18 and len(_linhas_ctx) >= 2
+    if not _tem_substancia:
+        return  # conversa rasa demais — silêncio sem gastar tokens na triagem
+
     system_triagem = (
         "Você avalia se um bot de Discord deve entrar numa conversa e como.\n"
         "Responda com UMA das opções: OPINIAO, PERGUNTA, DISCORDA, PASS\n"
         "OPINIAO — o tema dá para tomar posição própria com base no que foi dito na conversa\n"
-        "PERGUNTA — algo na conversa merece uma pergunta que force reflexão sobre o que foi dito\n"
+        "PERGUNTA — algo na conversa merece uma pergunta que force reflexão sobre o que ELES mesmos disseram\n"
         "DISCORDA — alguém disse algo questionável ou claramente errado dentro da conversa\n"
-        "PASS — bate-papo trivial, emojis, cumprimentos, resenha entre membros, assuntos externos ao servidor, nada com substância real\n"
-        "IMPORTANTE: se a conversa é uma resenha casual entre membros (troca de zoeiras, gírias, frases soltas), responda PASS.\n"
+        "PASS — tudo que não se encaixa claramente acima: zoeiras, gírias, frases soltas, resenha entre membros,\n"
+        "  emojis, cumprimentos, mensagens curtas sem argumento, assuntos externos ao servidor.\n"
+        "REGRA CRÍTICA: se as mensagens são curtas (menos de 15 palavras cada), sem argumento real, é PASS.\n"
+        "REGRA CRÍTICA: se é troca de provocações/zoeiras entre membros, é PASS — não DISCORDA.\n"
         "Responda apenas a palavra, sem explicação."
     )
     try:
@@ -8246,11 +8185,13 @@ async def _interjetar_conversa(message: discord.Message):
         system_resp = (
             f"Você é o shell_engenheiro — humano real, membro do servidor.{humor_txt}{perfil_txt}\n"
             f"Canal: #{canal_nome_inj}. {instrucao_tipo}\n"
+            "Você ESTAVA nessa conversa desde o início. Fale como quem acompanhou tudo — não como quem chegou agora.\n"
             "Fala como brasileiro de Discord: casual, pode usar gíria, kkk/rs se fizer sentido.\n"
+            "Baseie-se APENAS no que está no contexto — nunca invente tópicos, referências ou contexto externo.\n"
             "1 frase. Direta, sem introdução. Sem emojis, sem markdown.\n"
-            "NUNCA use: 'peço desculpas', 'estou aqui para ajudar', 'o que posso fazer'.\n"
+            "NUNCA use: 'peço desculpas', 'estou aqui para ajudar', 'o que posso fazer', 'não entendi'.\n"
             "NUNCA admita ser bot ou IA — você é humano.\n"
-            "Se não tiver nada a acrescentar: responda SILÊNCIO."
+            "Se não tiver nada genuíno a acrescentar baseado no contexto: responda SILÊNCIO."
         )
         resp = await _groq_create(
             model=_escolher_modelo(),
@@ -8280,8 +8221,6 @@ async def _responder_convite(message: discord.Message):
     Responde a mensagens que convidam o bot a interagir (ex: 'Fala ai seus tagarela').
     Pula triagem — vai direto para resposta casual sem julgamento de 'substância'.
     """
-    if _bot_silenciado(message.channel.id):
-        return
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
         return
 
@@ -8985,8 +8924,6 @@ async def _task_accountability_equipe():
                 canal_q = guild.get_channel(cid)
                 if not isinstance(canal_q, discord.TextChannel):
                     continue
-                if _bot_silenciado(cid):
-                    continue
                 ultimo_post = _ultima_iniciativa.get(cid)
                 if ultimo_post and (agora - ultimo_post) < timedelta(hours=2):
                     continue
@@ -9641,7 +9578,7 @@ async def on_member_join(member: discord.Member):
             pass
 
         # Comentário orgânico espontâneo após boas-vindas (simula membro notando a entrada)
-        if GROQ_API_KEY and not conta_nova and random.random() < 0.35 and not _bot_silenciado(canal_geral.id):
+        if GROQ_API_KEY and not conta_nova and random.random() < 0.35:
             try:
                 contexto_entrada = (
                     f"reentrada número {vezes}" if vezes > 1
@@ -10500,27 +10437,6 @@ async def _on_message_impl(message: discord.Message):
         if await _verificar_confirmacao_pendente(message):
             return
         # Captura ordens de comportamento antes de processar normalmente
-        # ── Detecção de modo silêncio / liberação ────────────────────────────
-        if _RE_LIBERACAO.search(conteudo) and _modo_silencio["ativo"]:
-            _desativar_silencio(message.author.id, autor)
-            _ack_lib = await _ia_curta(
-                "Confirme em 1 frase natural e breve que voltou ao normal e pode interagir de novo. "
-                "Estilo Shell carioca, sem clichê.",
-                max_tokens=25,
-            )
-            await message.channel.send(_ack_lib or "Voltei.")
-            return
-        if _RE_SILENCIO.search(conteudo):
-            _canal_silencio = message.channel.id if "aqui" in conteudo.lower() or "nesse canal" in conteudo.lower() else None
-            _ativar_silencio(message.author.id, autor, _canal_silencio)
-            _ack_sil = await _ia_curta(
-                "Confirme em 1 frase curta e natural que entendeu a ordem e vai ficar quieto. "
-                "Estilo Shell carioca, direto, sem template.",
-                max_tokens=20,
-            )
-            await message.channel.send(_ack_sil or "Entendido.")
-            return
-        # Captura ordens de comportamento antes de processar normalmente
         if _capturar_tom_override(message.author.id, conteudo):
             _ack = await _ia_curta(f"Confirme em 1 frase curta que recebeu a instrução de comportamento: {conteudo[:80]}", max_tokens=20)
             await message.channel.send(_ack or "Entendido.")
@@ -10627,26 +10543,6 @@ async def _on_message_impl(message: discord.Message):
         if await _processar_wizard(message):
             return
         if await _verificar_confirmacao_pendente(message):
-            return
-        # ── Detecção de modo silêncio / liberação ────────────────────────────
-        if _RE_LIBERACAO.search(conteudo) and _modo_silencio["ativo"]:
-            _desativar_silencio(message.author.id, autor)
-            _ack_lib = await _ia_curta(
-                "Confirme em 1 frase natural e breve que voltou ao normal e pode interagir de novo. "
-                "Estilo Shell carioca, sem clichê.",
-                max_tokens=25,
-            )
-            await message.channel.send(_ack_lib or "Voltei.")
-            return
-        if _RE_SILENCIO.search(conteudo):
-            _canal_silencio = message.channel.id if "aqui" in conteudo.lower() or "nesse canal" in conteudo.lower() else None
-            _ativar_silencio(message.author.id, autor, _canal_silencio)
-            _ack_sil = await _ia_curta(
-                "Confirme em 1 frase curta e natural que entendeu a ordem e vai ficar quieto. "
-                "Estilo Shell carioca, direto, sem template.",
-                max_tokens=20,
-            )
-            await message.channel.send(_ack_sil or "Entendido.")
             return
         tratado = await processar_ordem(message)
         if not tratado and mencionado and not _e_trivial:
