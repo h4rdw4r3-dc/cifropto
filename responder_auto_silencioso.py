@@ -3630,9 +3630,10 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     chave_hist = (user_id, canal_id or 0)
     hist = historico_groq.setdefault(chave_hist, [])
     hist.append({"role": "user", "content": f"{autor}: {pergunta}"})
-    # Mantém apenas as últimas 3 trocas (3 pares user+assistant) — reduz tokens para evitar erro 413
-    if len(hist) > 6:
-        hist[:] = hist[-6:]
+    # Mantém as últimas 5 trocas (5 pares user+assistant) — 3 era insuficiente para
+    # raciocínio encadeado (moderação complexa, debug, planejamento em múltiplas etapas)
+    if len(hist) > 10:
+        hist[:] = hist[-10:]
 
     # Nível hierárquico
     if user_id in DONOS_IDS:
@@ -3672,8 +3673,24 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         if len(autores_recentes) >= 3:
             ctx_canal += f"[{len(autores_recentes)} pessoas: {', '.join(list(autores_recentes)[:4])}]\n"
 
-    # Nomes mencionados na pergunta (para contexto comprimido relevante)
-    _nomes_mencionados = [w for w in pergunta.split() if len(w) > 2 and w[0].isupper()]
+    # Nomes mencionados na pergunta — filtra palavras funcionais e início de frase
+    # (palavras como "Então", "Esse", "Mas" são maiúsculas por posição, não por ser nome)
+    _STOPWORDS_NOMES = {
+        "então", "esse", "essa", "esses", "essas", "este", "esta", "estes", "estas",
+        "mas", "por", "para", "com", "sem", "que", "quando", "onde", "quem",
+        "como", "porque", "pois", "uma", "uns", "umas", "não", "sim", "isso",
+        "aqui", "ali", "lá", "já", "ainda", "também", "até", "será", "acho",
+        "será", "tipo", "cara", "mano", "veio", "quer", "pode", "vou", "tô",
+        "discordamos", "discord", "servidor",
+    }
+    _nomes_mencionados = [
+        w for w in pergunta.split()
+        if len(w) > 2
+        and w[0].isupper()
+        and w.lower() not in _STOPWORDS_NOMES
+        and not w.startswith("<")   # exclui menções Discord <@ID>
+        and not w[0].isdigit()
+    ]
 
     # Instrução adicional de colaboração quando há conversa em andamento
     _instrucao_collab = ""
@@ -3790,7 +3807,11 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     _ctx_vetorial = ""
     if MEMORIA_OK and pergunta:
         try:
-            _ctx_vetorial = await _mem.buscar_contexto(pergunta, top_k=2)
+            # top_k=4 + limiar 0.60 (no módulo) garante memórias reais retornadas
+            # canal_id filtra por canal atual para contexto mais preciso
+            _ctx_vetorial = await _mem.buscar_contexto(
+                pergunta, top_k=4, canal_id=canal_id
+            )
         except Exception as _e_mem:
             log.debug(f"[CEREBRO] falha ao buscar contexto vetorial: {_e_mem}")
 

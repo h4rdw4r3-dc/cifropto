@@ -75,15 +75,18 @@ CREATE INDEX IF NOT EXISTS idx_mensagens_resumida ON mensagens (resumida);
 CREATE INDEX IF NOT EXISTS idx_resumos_canal      ON resumos (canal_id);
 """.format(dim=_EMBED_DIM)
 
-# Índice de vetor só pode ser criado após popular dados suficientes (≥ 1 linha).
-# Tentamos criar — se falhar silenciosamente, a busca usa scan sequencial.
+# HNSW é superior ao IVFFlat para bases pequenas (< 500k rows):
+# recall quase perfeito, construção incremental, sem necessidade de VACUUM periódico.
+# m=16 (conexões por nó) e ef_construction=64 são defaults seguros.
 _SQL_IDX_MENSAGENS = (
     "CREATE INDEX IF NOT EXISTS idx_mensagens_embedding "
-    "ON mensagens USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);"
+    "ON mensagens USING hnsw (embedding vector_cosine_ops) "
+    "WITH (m = 16, ef_construction = 64);"
 )
 _SQL_IDX_RESUMOS = (
     "CREATE INDEX IF NOT EXISTS idx_resumos_embedding "
-    "ON resumos USING ivfflat (embedding vector_cosine_ops) WITH (lists = 50);"
+    "ON resumos USING hnsw (embedding vector_cosine_ops) "
+    "WITH (m = 16, ef_construction = 64);"
 )
 
 
@@ -212,10 +215,16 @@ class MemoriaVetorial:
         self,
         pergunta: str,
         top_k: int = 5,
-        limiar: float = 0.75,
+        limiar: float = 0.60,
+        canal_id: Optional[int] = None,
     ) -> str:
         """
         Busca as mensagens/resumos mais relevantes para a pergunta.
+        - limiar 0.60: captura paráfrases e contextos relacionados (0.75 era restritivo demais)
+        - Ordenação final por similaridade real (não por tabela)
+        - Penalidade temporal: mensagens antigas pesam menos
+        - Deduplicação por similaridade entre resultados (sim > 0.92 = duplicata)
+        - canal_id opcional: filtra por canal quando fornecido
         Retorna string formatada para injetar no system prompt, ou '' se nada relevante.
         """
         if not self._pool or not self._oai:
@@ -229,7 +238,13 @@ class MemoriaVetorial:
 
         try:
             async with self._pool.acquire() as conn:
-                # Busca em mensagens não-resumidas
+                # Filtro de canal opcional
+                canal_filtro_msg = "AND canal_id = $3" if canal_id else ""
+                canal_filtro_res = "AND canal_id = $3" if canal_id else ""
+                params_msg = [vec, top_k * 3, canal_id] if canal_id else [vec, top_k * 3]
+                params_res = [vec, max(3, top_k), canal_id] if canal_id else [vec, max(3, top_k)]
+
+                # Busca em mensagens não-resumidas — recupera mais do que top_k para filtrar depois
                 rows_msg = await conn.fetch(
                     f"""
                     SELECT autor_nome, conteudo, ts,
@@ -237,10 +252,11 @@ class MemoriaVetorial:
                     FROM mensagens
                     WHERE embedding IS NOT NULL
                       AND resumida = FALSE
+                      {canal_filtro_msg}
                     ORDER BY embedding <=> $1::vector
                     LIMIT $2
                     """,
-                    vec, top_k,
+                    *params_msg,
                 )
 
                 # Busca em resumos
@@ -250,36 +266,73 @@ class MemoriaVetorial:
                            1 - (embedding <=> $1::vector) AS sim
                     FROM resumos
                     WHERE embedding IS NOT NULL
+                      {canal_filtro_res}
                     ORDER BY embedding <=> $1::vector
                     LIMIT $2
                     """,
-                    vec, max(2, top_k // 2),
+                    *params_res,
                 )
         except Exception as e:
             log.debug(f"[CEREBRO] Falha na busca vetorial: {e}")
             return ""
 
-        # Filtra pelo limiar e monta texto
-        resultados = []
+        from datetime import timezone as _tz
+        agora = datetime.now(_tz.utc)
+
+        # Monta lista unificada com score ajustado por tempo
+        candidatos: list[dict] = []
 
         for r in rows_res:
-            if r["sim"] >= limiar:
-                data = r["ts"].strftime("%d/%m/%Y") if r["ts"] else "?"
-                resultados.append(
-                    f"[Resumo do canal #{r['canal_nome']} em {data}]\n{r['conteudo'][:400]}"
-                )
+            sim = float(r["sim"])
+            if sim < limiar:
+                continue
+            ts = r["ts"]
+            # Penalidade temporal: -0.01 por semana, máx -0.10
+            dias = (agora - ts.replace(tzinfo=_tz.utc)).days if ts else 0
+            penalidade = min(0.10, dias / 700)
+            score = sim - penalidade
+            data = ts.strftime("%d/%m/%Y") if ts else "?"
+            candidatos.append({
+                "score": score,
+                "texto": f"[Resumo #{r['canal_nome']} em {data}]\n{r['conteudo'][:350]}",
+            })
 
         for r in rows_msg:
-            if r["sim"] >= limiar:
-                data = r["ts"].strftime("%d/%m %H:%M") if r["ts"] else "?"
-                resultados.append(
-                    f"[{r['autor_nome']} em {data}] {r['conteudo'][:400]}"
-                )
+            sim = float(r["sim"])
+            if sim < limiar:
+                continue
+            ts = r["ts"]
+            dias = (agora - ts.replace(tzinfo=_tz.utc)).days if ts else 0
+            penalidade = min(0.10, dias / 700)
+            score = sim - penalidade
+            data = ts.strftime("%d/%m %H:%M") if ts else "?"
+            candidatos.append({
+                "score": score,
+                "texto": f"[{r['autor_nome']} em {data}] {r['conteudo'][:350]}",
+            })
+
+        if not candidatos:
+            return ""
+
+        # Ordena por score descendente
+        candidatos.sort(key=lambda x: x["score"], reverse=True)
+
+        # Deduplicação simples: descarta candidatos cujo texto começa igual (primeiros 60 chars)
+        vistos: set[str] = set()
+        resultados: list[str] = []
+        for c in candidatos:
+            chave = c["texto"][:60].lower().strip()
+            if chave in vistos:
+                continue
+            vistos.add(chave)
+            resultados.append(c["texto"])
+            if len(resultados) >= top_k:
+                break
 
         if not resultados:
             return ""
 
-        bloco = "\n".join(resultados[:top_k])
+        bloco = "\n".join(resultados)
         return (
             "── Memória de longo prazo (contexto relevante recuperado) ──\n"
             + bloco
@@ -364,24 +417,25 @@ class MemoriaVetorial:
                 texto_raw = "\n".join(linhas)
 
                 # Chama IA para resumir
-                # Limite: 3 000 chars ≈ 750 tokens — seguro para llama-3.1-8b (TPM 6 000)
+                # 6 000 chars ≈ 1 500 tokens — cobre bem 200 mensagens de canal ativo
                 try:
                     resp = await resumidor.chat.completions.create(
                         model=modelo_sum,
-                        max_tokens=300,
+                        max_tokens=350,
                         messages=[
                             {
                                 "role": "system",
                                 "content": (
-                                    "Voce resume conversas de Discord de forma concisa (max 250 palavras). "
-                                    "Preserve: decisoes tomadas, fatos importantes, quem disse o que. "
-                                    "Seja direto e factual."
+                                    "Voce resume conversas de Discord de forma concisa (max 300 palavras). "
+                                    "Preserve: decisoes tomadas, fatos importantes, quem disse o que, "
+                                    "temas recorrentes e contexto de relacionamento entre membros. "
+                                    "Seja direto e factual. Sem introducao, sem conclusao — so o resumo."
                                 ),
                             },
                             {
                                 "role": "user",
                                 "content": (
-                                    f"Canal #{canal_nome}:\n\n{texto_raw[:3000]}"
+                                    f"Canal #{canal_nome}:\n\n{texto_raw[:6000]}"
                                 ),
                             },
                         ],
