@@ -1828,17 +1828,16 @@ async def enviar_auditoria(guild: discord.Guild, membro: discord.Member, violaco
         linhas_violacoes.append(entrada)
     violacoes_desc = "\n".join(linhas_violacoes) or "—"
 
-    embed = discord.Embed(
-        title="🔴 Ofensa detectada",
-        color=0xE74C3C,
-        timestamp=agora,
+    # discord.py-self não suporta embeds — envia como texto formatado
+    timestamp_fmt = agora.strftime("%d/%m/%Y %H:%M:%S")
+    texto_audit = (
+        f"🔴 **Ofensa detectada** — {timestamp_fmt}\n"
+        f"**Membro:** {membro.mention} (`{membro.id}`)\n"
+        f"**Infração nº {count}:**\n{violacoes_desc}\n"
+        f"**Ação:** Mensagem removida (ID `{msg_id}`)\n"
+        f"*Sistema de moderação automática*"
     )
-    embed.add_field(name="Membro", value=f"{membro.mention} (`{membro.id}`)", inline=False)
-    embed.add_field(name=f"Infração nº {count}", value=violacoes_desc, inline=False)
-    embed.add_field(name="Ação", value=f"Mensagem removida (ID `{msg_id}`)", inline=False)
-    embed.set_footer(text="Sistema de moderação automática")
-
-    await canal_audit.send(embed=embed)
+    await canal_audit.send(texto_audit)
 
 
 async def exportar_auditoria_txt(canal_destino, membro: discord.Member, violacoes: list[str], msg_id: int):
@@ -3977,6 +3976,22 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     _LIMITE_CHARS_GERAL = 40000  # ~10000 tokens — 70b/scout/qwen têm TPM ≥ 12k, contexto 128k+
     _LIMITE_CHARS = _LIMITE_CHARS_8B if modelo == _MODELO_8B else _LIMITE_CHARS_GERAL
     ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
+
+    # ── Escala para modelo maior ANTES de cortar contexto ────────────────────────
+    # Se o contexto estoura o limite do 8b, tenta usar 70b/scout que suportam 40k chars.
+    # Isso preserva o histórico completo e evita respostas burras por falta de contexto.
+    if ctx_chars > _LIMITE_CHARS and modelo == _MODELO_8B:
+        _modelo_escalado = None
+        if _modelo_disponivel(_MODELO_70B) and _tokens_70b_hoje < LIMITE_70B:
+            _modelo_escalado = _MODELO_70B
+        elif _modelo_disponivel(_MODELO_SCOUT) and _tokens_scout_hoje < LIMITE_SCOUT:
+            _modelo_escalado = _MODELO_SCOUT
+        elif _modelo_disponivel(_MODELO_QWEN) and _tokens_qwen_hoje < LIMITE_QWEN:
+            _modelo_escalado = _MODELO_QWEN
+        if _modelo_escalado:
+            log.info(f"[GROQ] contexto {ctx_chars} chars > limite 8b — escalando para {_modelo_escalado}")
+            modelo = _modelo_escalado
+            _LIMITE_CHARS = _LIMITE_CHARS_GERAL
     if ctx_chars > _LIMITE_CHARS:
         # Passo 1: remove contexto vetorial e comprime contexto do servidor
         _sys_enxuto = _system_base.split("\n=== MEM")[0] if "=== MEM" in _system_base else _system_base
