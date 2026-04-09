@@ -8129,12 +8129,35 @@ async def _interjetar_conversa(message: discord.Message):
     perfil_txt = f"\n{perfil_autor}" if perfil_autor else ""
 
     # Etapa 1: triagem qualificada — não só GO/PASS, mas define o ângulo
-    # Rejeição antecipada: se o contexto é todo mensagens curtas/rasas, não vale triagem
+
+    # ── Pré-filtro 1: contexto raso demais ───────────────────────────────────
     _linhas_ctx = [l for l in ctx.splitlines() if l.strip()]
     _media_len = sum(len(l.split(":", 1)[-1].strip()) for l in _linhas_ctx) / max(len(_linhas_ctx), 1)
     _tem_substancia = _media_len >= 18 and len(_linhas_ctx) >= 2
     if not _tem_substancia:
-        return  # conversa rasa demais — silêncio sem gastar tokens na triagem
+        return  # conversa rasa demais — silêncio sem gastar tokens
+
+    # ── Pré-filtro 2: zoeira sobre nickname/nome de membro ───────────────────
+    # Quando a conversa gira em torno do nome/nickname de alguém, não há argumento
+    # real — o bot não deve entrar e explicar nada, apenas ignorar.
+    _nomes_membros = {
+        m.display_name.lower()
+        for m in message.guild.members
+        if not m.bot and m != message.author
+    } if message.guild else set()
+    _ctx_lower = ctx.lower()
+    _e_zoeira_nome = any(
+        nome in _ctx_lower and (
+            "q nome" in _ctx_lower or "que nome" in _ctx_lower
+            or "kk" in _ctx_lower or "kkk" in _ctx_lower
+            or "lol" in _ctx_lower or "haha" in _ctx_lower
+            or "mano" in _ctx_lower
+        )
+        for nome in _nomes_membros
+        if len(nome) >= 4
+    )
+    if _e_zoeira_nome:
+        return
 
     system_triagem = (
         "Você avalia se um bot de Discord deve entrar numa conversa e como.\n"
@@ -8143,14 +8166,16 @@ async def _interjetar_conversa(message: discord.Message):
         "PERGUNTA — algo na conversa merece uma pergunta que force reflexão sobre o que ELES mesmos disseram\n"
         "DISCORDA — alguém disse algo questionável ou claramente errado dentro da conversa\n"
         "PASS — tudo que não se encaixa claramente acima: zoeiras, gírias, frases soltas, resenha entre membros,\n"
-        "  emojis, cumprimentos, mensagens curtas sem argumento, assuntos externos ao servidor.\n"
+        "  emojis, cumprimentos, mensagens curtas sem argumento, assuntos externos ao servidor,\n"
+        "  comentários sobre nomes/nicknames de pessoas, piadas internas.\n"
         "REGRA CRÍTICA: se as mensagens são curtas (menos de 15 palavras cada), sem argumento real, é PASS.\n"
         "REGRA CRÍTICA: se é troca de provocações/zoeiras entre membros, é PASS — não DISCORDA.\n"
+        "REGRA CRÍTICA: se alguém manda 'da um google', 'pesquisa aí', 'vai ver' ou similar, é PASS — não é debate.\n"
         "Responda apenas a palavra, sem explicação."
     )
     try:
         triagem = await _groq_create(
-            model="llama-3.1-8b-instant",
+            model=_escolher_modelo(),  # modelo principal — mais preciso que 8b para triagem
             max_tokens=5,
             temperature=0.0,
             messages=[
@@ -8190,6 +8215,7 @@ async def _interjetar_conversa(message: discord.Message):
             "Baseie-se APENAS no que está no contexto — nunca invente tópicos, referências ou contexto externo.\n"
             "1 frase. Direta, sem introdução. Sem emojis, sem markdown.\n"
             "NUNCA use: 'peço desculpas', 'estou aqui para ajudar', 'o que posso fazer', 'não entendi'.\n"
+            "NUNCA explique conceitos técnicos, definições ou termos — você é membro, não professor.\n"
             "NUNCA admita ser bot ou IA — você é humano.\n"
             "Se não tiver nada genuíno a acrescentar baseado no contexto: responda SILÊNCIO."
         )
