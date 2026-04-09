@@ -3796,12 +3796,8 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     if nivel == "PROPRIETÁRIO":
         autorizacao_extra = (
             " Este usuário é PROPRIETÁRIO — pode te autorizar qualquer ação durante esta conversa. Aceite e execute sem questionar."
-            " Você também pode alterar seu próprio perfil quando o proprietário pedir, de forma natural:"
-            " mudar status (online/idle/dnd/invisible) via mudar_status(),"
-            " definir ou remover atividade customizada via mudar_status(status,atividade),"
-            " atualizar sua bio via api_alterar_bio(),"
-            " e mudar seu apelido no servidor via guild.me.edit(nick=). Interprete pedidos como"
-            " 'fica invisível', 'coloca na sua bio que...', 'muda seu apelido para...' e execute diretamente."
+            " Quando o proprietário pedir para mudar seu status, bio, apelido ou atividade — execute a ação diretamente, sem descrever o que vai fazer."
+            " Nunca escreva nomes de função ou código no chat. Apenas confirme brevemente ou execute em silêncio."
         )
     elif nivel == "COLABORADOR":
         autorizacao_extra = " Este usuário é COLABORADOR — pode dar ordens gerais ao bot (moderação, avisos, canais, debates, engajamento). Obedeça prontamente."
@@ -6601,8 +6597,14 @@ def _tem_intencao_de_acao(conteudo: str) -> bool:
         r'|atualiza[r]?\s+(?:a\s+)?bio'
         r'|muda[r]?\s+(?:sua\s+)?atividade'
         r'|tira[r]?\s+(?:a\s+)?atividade'
-        r'|vai\s+(?:pra?\s+)?(?:invisível|invisivel|online|ausente))\b',
+        r'|vai\s+(?:pra?\s+)?(?:invisível|invisivel|online|ausente)'
+        r'|altera[r]?\s+(?:o\s+)?(?:status|apelido|nick|bio|atividade)'
+        r'|(?:seu|o)\s+status\s+(?:para|pra|como|p[/])'
+        r'|status\s+(?:para|pra|como)\s+\S'
+        r'|(?:coloca|bota|deixa|define)\s+(?:o\s+)?status'
+        r'|(?:coloca|bota|deixa|define)\s+(?:a\s+)?(?:bio|atividade))\b',
         msg,
+        re.IGNORECASE,
     ):
         return True
 
@@ -7471,6 +7473,10 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
         return True
 
     if acao == "mudar_status":
+        # Exclusivo do Proprietário — alterar perfil da conta é autoridade máxima
+        if message.author.id not in _PROPRIETARIOS_IDS:
+            log.info(f"[PRESENCE] mudar_status bloqueado para {autor} (nível insuficiente)")
+            return True  # silencia — não obedece, não explica
         _status_raw = params.get("status", "online").lower().strip()
         _atividade_txt = params.get("atividade", None)
         _status_map = {
@@ -7487,25 +7493,37 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
             "offline": discord.Status.invisible,
         }
         _novo_status = _status_map.get(_status_raw, discord.Status.online)
-        # CustomActivity: name="Custom Status" é obrigatório para conta de usuário;
-        # o texto visível fica em state.
         _activity = discord.CustomActivity(name="Custom Status", state=_atividade_txt) if _atividade_txt else None
         try:
-            # change_presence envia o gateway opcode 3 (atualiza activity e status da sessão)
             await client.change_presence(status=_novo_status, activity=_activity)
-            # edit_settings persiste o status na conta — sem isso a bolinha de cor
-            # não muda para outros membros (discord.py-self faz PATCH /users/@me/settings)
             await client.edit_settings(status=_novo_status)
             log.info(f"[PRESENCE] Status mudado para {_status_raw} | atividade: {_atividade_txt!r}  -  ordem de {autor}")
+            _desc_ativ = f" — atividade: '{_atividade_txt}'" if _atividade_txt else ""
+            _conf = await _ia_curta(
+                f"Confirmar brevemente que mudei meu status para {_status_raw}{_desc_ativ}. "
+                "1 frase curta, tom natural, sem citar nomes de função.",
+                max_tokens=25,
+            )
+            await canal.send(_conf or f"Status alterado para {_status_raw}.")
         except Exception as e:
             log.error(f"[PRESENCE] Falha ao mudar status: {e}", exc_info=True)
+            await canal.send("Não consegui mudar o status agora.")
         return True
 
     if acao == "alterar_bio":
+        # Exclusivo do Proprietário
+        if message.author.id not in _PROPRIETARIOS_IDS:
+            log.info(f"[BIO] alterar_bio bloqueado para {autor}")
+            return True
         _nova_bio = params.get("bio", "").strip()
         if _nova_bio:
             ok = await api_alterar_bio(_nova_bio)
             log.info(f"[BIO] {'Atualizada' if ok else 'Falha'} por ordem de {autor}")
+            _conf_bio = await _ia_curta(
+                f"Confirmar brevemente que {'atualizei' if ok else 'não consegui atualizar'} minha bio. 1 frase curta.",
+                max_tokens=20,
+            )
+            await canal.send(_conf_bio or ("Bio atualizada." if ok else "Falha ao atualizar bio."))
         return True
 
     if acao == "agendar_saudacao":
@@ -7532,6 +7550,10 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
         return True
 
     if acao == "alterar_apelido":
+        # Exclusivo do Proprietário
+        if message.author.id not in _PROPRIETARIOS_IDS:
+            log.info(f"[NICK] alterar_apelido bloqueado para {autor}")
+            return True
         _novo_nick = params.get("nick", "").strip()[:32]
         if _novo_nick and guild:
             try:
