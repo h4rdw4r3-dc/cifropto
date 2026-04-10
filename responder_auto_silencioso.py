@@ -10848,6 +10848,16 @@ async def _on_message_impl(message: discord.Message):
         or eh_resposta_ao_bot
     )
 
+    # Reply de membro comum ao bot: trata como conversa normal, não como ordem.
+    # Proprietários e colaboradores mantêm o fluxo completo via reply.
+    _reply_apenas_membro = (
+        eh_resposta_ao_bot
+        and not (client.user in message.mentions or client.user.id in ids_mencionados or _gatilho_nome)
+        and not _eh_dono
+        and not _eh_superior_
+        and not _eh_mod_
+    )
+
     # ── Visão: processar anexos quando o bot é acionado ──────────────────────
     # Verifica anexos na mensagem atual E na mensagem referenciada (reply)
     _ref_resolvida = (
@@ -11287,6 +11297,11 @@ async def _on_message_impl(message: discord.Message):
             del conversas_groq[user_id]
 
     # ── Responder menção/gatilho de membros comuns ────────────────────────────
+    # Reply de membro comum ao bot: não interfere, apenas observa a referência.
+    if mencionado and _reply_apenas_membro:
+        log.info(f"[REPLY_MEMBRO] {autor} respondeu ao bot sem @mencionar — ignorando (observando referência).")
+        return
+
     if mencionado:
         for dono_id in DONOS_IDS:
             estado = dono_ausente(dono_id)
