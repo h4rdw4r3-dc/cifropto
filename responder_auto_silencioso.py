@@ -10633,24 +10633,179 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
         }))
 
 
+# ── Estado de progresso das DMs ──────────────────────────────────────────────
+# Rastreia em qual fase da conversa cada usuário está.
+# Fases: "resenha" → "interesse" → "convencido" → "link_enviado"
+_dm_fase: dict[int, str] = {}
+_dm_trocas: dict[int, int] = {}  # conta trocas por usuário
+
+def _system_dm(autor: str, fase: str, trocas: int) -> str:
+    """System prompt adaptado ao progresso da DM."""
+    base_personalidade = (
+        "/no_think\n"
+        f"Você é Shell — pessoa real, carioca, administrador de um servidor Discord chamado Sete.\n"
+        "Não é bot, não é assistente. É um cara que manda DM de boa, sem protocolo.\n"
+        "Tom: resenha, leve, sem forçar. Gírias cariocas naturais (mano, véi, cara, parça, tá ligado, na moral).\n"
+        "Abreviações de chat: vc, pq, tbm, to, oq, cê. Minúscula no início às vezes. Sem emojis, sem markdown.\n"
+        "Tamanho: 1 frase, raramente 2. Nunca parece vendedor, nunca é chato.\n\n"
+    )
+
+    if fase == "resenha" or trocas <= 3:
+        instrucao = (
+            "FASE ATUAL: resenha livre.\n"
+            f"Você tá conversando com {autor} na DM pela primeira vez (ou quase).\n"
+            "Objetivo: só jogar papo. Entender quem é a pessoa. Não mencione o servidor ainda.\n"
+            "Pergunte sobre o que a pessoa faz, curte, de onde veio — de forma natural, não como formulário.\n"
+            "Se a pessoa fizer uma pergunta direta sobre você: responda curto, redirecione com uma pergunta leve.\n"
+        )
+    elif fase == "interesse" or trocas <= 7:
+        instrucao = (
+            "FASE ATUAL: criar interesse no servidor.\n"
+            f"Você já quebrou o gelo com {autor}. Agora pode mencionar o servidor Sete de passagem — casual, sem forçar.\n"
+            "Exemplos de menção natural: 'a galera lá no servidor taria falando disso kk', "
+            "'tem um canal lá que é exatamente sobre isso', 'a comunidade que a gente tem é bem na vibe disso'.\n"
+            "Não peça pra pessoa entrar ainda. Só plante a ideia de que existe uma galera legal lá.\n"
+            "Se a pessoa demonstrar qualquer curiosidade sobre o servidor: mude para fase 'convencido'.\n"
+        )
+    elif fase == "convencido":
+        instrucao = (
+            "FASE ATUAL: convidar.\n"
+            f"{autor} já mostrou interesse. Hora de convidar de forma direta mas despojada.\n"
+            "Algo como: 'mano entra lá no servidor, é gente boa, cê ia curtir', 'posso te mandar o link se quiser'.\n"
+            "Se a pessoa aceitar ou demonstrar que quer o link: responda EXATAMENTE com o token especial:\n"
+            "GERAR_CONVITE\n"
+            "Nada mais além disso — só esse token na mensagem inteira.\n"
+        )
+    else:
+        instrucao = (
+            "FASE ATUAL: follow-up pós-link.\n"
+            f"Você já mandou o link do servidor para {autor}.\n"
+            "Só dê atenção se a pessoa falar algo. Sem cobrar, sem perguntar se entrou.\n"
+            "Se a pessoa entrou e comentou: comemore bem discreto, carioca ('boa mano', 'firmeza').\n"
+        )
+
+    return base_personalidade + instrucao
+
+async def _gerar_link_convite() -> str | None:
+    """Gera um link de convite real para o servidor via Discord API."""
+    try:
+        guild = client.get_guild(SERVIDOR_ID)
+        if not guild:
+            return None
+        # Prioriza canal geral/chat/entrada para o convite
+        canal_convite = (
+            discord.utils.get(guild.text_channels, name="geral")
+            or discord.utils.get(guild.text_channels, name="chat")
+            or discord.utils.get(guild.text_channels, name="entrada")
+            or discord.utils.get(guild.text_channels, name="boas-vindas")
+            or guild.system_channel
+            or (guild.text_channels[0] if guild.text_channels else None)
+        )
+        if not canal_convite:
+            return None
+        invite = await canal_convite.create_invite(
+            max_age=86400,   # expira em 24h
+            max_uses=1,      # uso único — rastreável
+            unique=True,
+            reason=f"Convite via DM gerado por Shell",
+        )
+        return invite.url
+    except Exception as e:
+        log.error(f"[DM] Erro ao gerar convite: {e}")
+        return None
+
+def _detectar_interesse_dm(texto: str) -> bool:
+    """Retorna True se a mensagem indica curiosidade/interesse no servidor."""
+    return bool(re.search(
+        r'\b(servidor|community|comunidade|discord|link|entrar|participar|como entra|'
+        r'qual.*(link|server)|me manda|manda a?í|quero entrar|posso entrar|'
+        r'tem.*discord|discord.*link|me add|me adiciona)\b',
+        texto, re.IGNORECASE
+    ))
+
+def _detectar_aceite_dm(texto: str) -> bool:
+    """Retorna True se a pessoa está aceitando o convite / pedindo o link."""
+    return bool(re.search(
+        r'\b(sim|bora|vai|claro|quero|manda|pode mandar|manda sim|'
+        r'manda o link|quero sim|top|ok|manda aí|manda então|'
+        r'entra onde|como entra|tô dentro|me manda)\b',
+        texto, re.IGNORECASE
+    ))
+
 async def _interagir_na_dm(message: discord.Message) -> None:
-    """Faz o bot conversar na DM usando a lógica da IA Groq."""
+    """Conversa na DM com progressão gradual até enviar o convite do servidor."""
     if message.author.bot:
         return
 
-    # Mostra "Digitando..." para parecer humano
+    uid = message.author.id
+    autor = message.author.display_name
+    texto = message.content.strip()
+
+    # Atualiza contador de trocas
+    _dm_trocas[uid] = _dm_trocas.get(uid, 0) + 1
+    trocas = _dm_trocas[uid]
+
+    # Determina/avança a fase
+    fase_atual = _dm_fase.get(uid, "resenha")
+
+    if fase_atual != "link_enviado":
+        if _detectar_aceite_dm(texto) and fase_atual == "convencido":
+            pass  # mantém "convencido" para a IA emitir GERAR_CONVITE
+        elif _detectar_interesse_dm(texto) and fase_atual in ("resenha", "interesse"):
+            fase_atual = "convencido"
+            _dm_fase[uid] = fase_atual
+        elif trocas > 7 and fase_atual == "resenha":
+            fase_atual = "interesse"
+            _dm_fase[uid] = fase_atual
+        elif trocas > 4 and fase_atual == "interesse":
+            fase_atual = "convencido"
+            _dm_fase[uid] = fase_atual
+
+    system_dm = _system_dm(autor, fase_atual, trocas)
+
     async with message.channel.typing():
         try:
-            # responder_com_groq gerencia o próprio histórico via historico_groq
-            resposta = await responder_com_groq(
-                message.content,
-                message.author.display_name,
-                message.author.id,
-                canal_id=message.channel.id,
+            chave_hist = (uid, message.channel.id)
+            hist = historico_groq.setdefault(chave_hist, [])
+            hist.append({"role": "user", "content": texto})
+            if len(hist) > 12:
+                hist[:] = hist[-12:]
+
+            if not GROQ_DISPONIVEL or not GROQ_API_KEY:
+                return
+
+            client_groq = AsyncOpenAI(
+                api_key=GROQ_API_KEY,
+                base_url="https://api.groq.com/openai/v1",
             )
+            completion = await client_groq.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                max_tokens=80,
+                messages=[
+                    {"role": "system", "content": system_dm},
+                    *hist,
+                ],
+            )
+            resposta = (completion.choices[0].message.content or "").strip()
+
+            # Token especial: gera e envia o link de convite
+            if "GERAR_CONVITE" in resposta:
+                link = await _gerar_link_convite()
+                if link:
+                    _dm_fase[uid] = "link_enviado"
+                    hist.append({"role": "assistant", "content": "manda o link"})
+                    await asyncio.sleep(0.8)
+                    await message.channel.send(link)
+                    log.info(f"[DM] Convite enviado para {autor} ({uid}): {link}")
+                else:
+                    await message.reply("eita, deu ruim aqui pra gerar o link — tenta me chamar de novo daqui a pouco")
+                return
 
             if resposta:
+                hist.append({"role": "assistant", "content": resposta})
+                await asyncio.sleep(0.5)  # pausa mínima, parece humano
                 await message.reply(resposta)
+
         except Exception as e:
             log.error(f"[DM] Erro na interação: {e}")
 
@@ -10661,22 +10816,18 @@ async def on_message(message: discord.Message):
         if message.author.id == client.user.id:
             return
 
-        # Mensagens de bots/embeds: só processa se forem resposta ao bot
-        if message.author.bot or message.embeds:
-            if message.reference and message.reference.resolved:
-                if message.reference.resolved.author.id == client.user.id:
-                    await _processar_bot_ou_embed(message)
-            return
-
         # DMs: roteia entre denúncia e conversa via IA
         if message.guild is None:
-            if "denuncia" in message.content.lower() or "denúncia" in message.content.lower():
-                await _on_dm_denuncia(message)
-            else:
-                await _interagir_na_dm(message)
+            if not message.author.bot:
+                if "denuncia" in message.content.lower() or "denúncia" in message.content.lower():
+                    await _on_dm_denuncia(message)
+                else:
+                    await _interagir_na_dm(message)
             return
 
-        # Mensagens de servidor: lógica principal
+        # Mensagens de servidor (humanos e bots): lógica principal
+        # _on_message_impl contém toda a detecção de bots: catálogo, memória,
+        # aprendizado de comandos e execução autônoma de ações.
         await _on_message_impl(message)
     except Exception as e:
         log.error(f"Erro não tratado em on_message: {e}", exc_info=True)
