@@ -11677,40 +11677,21 @@ async def _on_message_impl(message: discord.Message):
 
 
 if not TOKEN:
-    raise SystemExit("DISCORD_TOKEN não definido. Configure a variável de ambiente antes de iniciar.")
+    raise SystemExit("DISCORD_TOKEN não definido. Configure a variável de ambiente.")
 
-import time as _time
-
-_MAX_TENTATIVAS = 8
-_tentativa = 0
-
-while _tentativa < _MAX_TENTATIVAS:
-    try:
-        client.run(TOKEN)
-        break  # saiu limpo (KeyboardInterrupt ou desconexão normal)
-    except discord.errors.LoginFailure:
-        raise SystemExit("Token inválido ou expirado. Atualize a variável DISCORD_TOKEN no Railway.")
-    except KeyboardInterrupt:
-        break
-    except discord.errors.HTTPException as e:
-        if e.status == 429 or "1015" in str(e) or "Cloudflare" in str(e):
-            _tentativa += 1
-            _espera = min(30 * (2 ** (_tentativa - 1)), 300)  # 30s, 60s, 120s... max 5min
-            log.warning(f"[CLOUDFLARE] Rate limit detectado (tentativa {_tentativa}/{_MAX_TENTATIVAS}). "
-                        f"Aguardando {_espera}s antes de reconectar...")
-            _time.sleep(_espera)
-            # NAO recriar discord.Client() — apagaria todos os event handlers registrados
-            # via @client.event (on_ready, on_message, etc.). O mesmo objeto e retentado.
-        else:
-            log.error(f"[HTTP] Erro inesperado: {e}")
-            _tentativa += 1
-            _time.sleep(15)
-    except Exception as e:
-        log.error(f"[STARTUP] Erro ao iniciar: {e}", exc_info=True)
-        _tentativa += 1
-        _espera = min(15 * _tentativa, 120)
-        log.info(f"[STARTUP] Aguardando {_espera}s antes de nova tentativa ({_tentativa}/{_MAX_TENTATIVAS})...")
-        _time.sleep(_espera)
-
-if _tentativa >= _MAX_TENTATIVAS:
-    raise SystemExit(f"Falha ao conectar após {_MAX_TENTATIVAS} tentativas. Verifique o token e a conectividade.")
+try:
+    # Ao falhar aqui, o Railway reiniciará o container do zero, resolvendo o erro de sessão fechada.
+    client.run(TOKEN)
+except discord.errors.LoginFailure:
+    raise SystemExit("Token inválido ou expirado. Atualize o DISCORD_TOKEN.")
+except KeyboardInterrupt:
+    log.info("Encerrando bot manualmente.")
+except discord.errors.HTTPException as e:
+    # Se houver erro 503 ou bloqueio do Cloudflare, o log avisará e o script fechará
+    log.error(f"[HTTP] Erro crítico ao conectar (possível 503/Cloudflare): {e}")
+    import sys
+    sys.exit(1)
+except Exception as e:
+    log.error(f"[STARTUP] Erro inesperado: {e}", exc_info=True)
+    import sys
+    sys.exit(1)
