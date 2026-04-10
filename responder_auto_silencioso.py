@@ -9916,7 +9916,7 @@ async def _task_accountability_equipe():
                 if not ultima_msg_tempo:
                     continue
                 silencio_min = (agora - ultima_msg_tempo).total_seconds() / 60
-                if not (45 <= silencio_min <= 180):
+                if not (120 <= silencio_min <= 360):
                     continue
                 ctx_q = "\n".join(f"{m['autor']}: {m['conteudo'][:100]}" for m in mem_canal[-8:])
                 try:
@@ -9927,12 +9927,13 @@ async def _task_accountability_equipe():
                         messages=[
                             {"role": "system", "content":
                              f"{system_com_contexto()}\n"
-                             "O canal está quieto. Se o histórico recente tiver um ponto interessante que ficou solto "
-                             "— uma pergunta não respondida, uma afirmação questionável, um tema que dá para aprofundar — "
-                             "retome isso em 1-2 frases. "
-                             "NÃO traga assuntos externos (notícias, tech, política) que não estavam na conversa. "
-                             "NÃO force engajamento com perguntas genéricas como 'o que vocês acham de X?'. "
-                             "Se o histórico não tiver nada concreto para retomar: responda exatamente SILÊNCIO."},
+                             "O canal está quieto. Seu padrão é SILÊNCIO. "
+                             "Só retome a conversa se houver uma pergunta explícita sem resposta OU uma afirmação "
+                             "claramente incorreta no histórico — e apenas em 1-2 frases diretas. "
+                             "NÃO traga assuntos externos que não estavam na conversa. "
+                             "NÃO faça perguntas genéricas de engajamento. "
+                             "NÃO retome um assunto só porque 'poderia ser interessante'. "
+                             "Na dúvida, responda exatamente SILÊNCIO."},
                             {"role": "user", "content":
                              f"Canal quieto há {int(silencio_min)}min. Histórico recente:\n{ctx_q}"},
                         ],
@@ -12175,15 +12176,10 @@ async def _on_message_impl(message: discord.Message):
                             await _reagir_ou_responder(message, resp_fu)
                             asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resp_fu, message.channel.id))
                         return
-                # Sem conversa ativa: responde proativamente a qualquer mensagem de proprietário
-                resposta_p = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
+                # Sem conversa ativa e sem menção: não intercepta mensagens soltas do proprietário no canal
+                log.debug(f"[PROP] sem conversa ativa e sem menção — ignorando mensagem solta de {autor}")
             finally:
                 await _parar_typing(_tp, _tt)
-            if resposta_p and not _e_resposta_generica(resposta_p):
-                await _reagir_ou_responder(message, resposta_p)
-                asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta_p, message.channel.id))
-            elif resposta_p:
-                await _digitar_e_enviar(message.channel, resposta_p, message)
         return
 
     # ── Colaboradores: isentos de punição, comandos + ordens gerais (sem precisar mencionar) ──
@@ -12262,16 +12258,10 @@ async def _on_message_impl(message: discord.Message):
                             await _reagir_ou_responder(message, resp_fu)
                             asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resp_fu, message.channel.id))
                         return
-                resposta_p = await resposta_inicial_superior(conteudo, autor, user_id, message.guild, message.author, message.channel.id, message)
+                # Sem conversa ativa e sem menção: não intercepta mensagens soltas no canal
+                log.debug(f"[COLAB] sem conversa ativa e sem menção — ignorando mensagem solta de {autor}")
             finally:
                 await _parar_typing(_tp, _tt)
-            if resposta_p and not _e_resposta_generica(resposta_p):
-                await _reagir_ou_responder(message, resposta_p)
-                asyncio.ensure_future(_atualizar_perfil_usuario(user_id, autor, conteudo, resposta_p, message.channel.id))
-            elif resposta_p:
-                await _digitar_e_enviar(message.channel, resposta_p, message)
-            return
-            await processar_links(message)
         return
 
     # ── Moderadores: isentos de punições, comandos de moderação (sem precisar mencionar) ──
