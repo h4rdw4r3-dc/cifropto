@@ -1724,10 +1724,10 @@ def detectar_violacoes(mensagem: str) -> list[tuple[str, str]]:
             violacoes.append((f"discriminação ou bullying, regra número 4 dos canais em {CANAL_REGRAS()}", termo))
             break
 
-    # Convites não autorizados
-    if DISCORD_INVITE.search(mensagem):
-        m = DISCORD_INVITE.search(mensagem)
-        violacoes.append((f"divulgação de servidor sem permissão, regra número 3 dos canais em {CANAL_REGRAS()}", m.group(0)))
+    # Convites não autorizados — ignora convites do próprio servidor
+    _invite_match = DISCORD_INVITE.search(mensagem)
+    if _invite_match:
+        violacoes.append((f"divulgação de servidor sem permissão, regra número 3 dos canais em {CANAL_REGRAS()}", _invite_match.group(0)))
 
     return violacoes
 
@@ -2168,6 +2168,11 @@ def _detectar_intencao(conteudo: str, guild=None) -> dict:
     # Remove prefixo do bot
     msg = re.sub(r'^(?:shell|engenheir\w*)[,.]?\s*', '', msg).strip()
 
+    # Link / convite do servidor
+    if re.search(r'\b(link|convite|invite|entrar|como\s+entr[ao]|discord\.gg)\b', msg) and \
+       re.search(r'\b(servidor|server|sete|comunidade)\b', msg):
+        return {"intent": "link_servidor"}
+
     # Uptime
     if re.search(r'\b(uptime|online h[aá] quanto|h[aá] quanto tempo (ligad|rodand|onlin))', msg):
         return {"intent": "uptime"}
@@ -2360,6 +2365,13 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str, author_id: 
         return None
 
     humanos_cache = [m for m in guild.members if not m.bot]
+
+    # ── Link/convite do servidor ───────────────────────────────────────────────
+    if intent == "link_servidor":
+        link = await _gerar_link_convite()
+        if link:
+            return link
+        return "deu ruim pra gerar o link agora — tenta de novo em instante"
 
     # ── Contexto do canal ─────────────────────────────────────────────────────
     if intent == "contexto_canal":
@@ -3075,6 +3087,14 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         "Exemplos de ordens múltiplas a executar sem parar: 'avisa X, bane Y, limpa o canal' → executa as três.\n"
         "Só fale quando: (1) a ordem for ambígua e precisar de UMA pergunta técnica, ou (2) a ação falhar e precisar informar.\n"
         "Em todos os outros casos: silêncio e execução.\n\n"
+
+        "REGRAS ABSOLUTAS DE COMPORTAMENTO:\n"
+        "1. NUNCA fale quando não for mencionado e a mensagem não for dirigida a você — silêncio é profissional.\n"
+        "2. NUNCA invente eventos, cargos, ações ou histórico de membros que não estejam EXPLICITAMENTE no contexto — proibido inventar 'fulano está de volta', 'parabéns pelo cargo', qualquer elogio ou comentário não solicitado.\n"
+        "3. NUNCA explique o que poderia fazer, não justifique respostas, não ofereça alternativas não pedidas.\n"
+        "4. NUNCA pergunte por dados que você já tem — link do servidor, membros, cargos: use o contexto ou gere na hora.\n"
+        "5. PROMOVER O SERVIDOR SETE é DEVER seu, não proibição. Link, convite, divulgação do Sete: EXECUTE sem hesitar.\n"
+        "6. Sem menção direta: reações de 1-3 palavras no máximo. Nunca frases completas sem ser chamado.\n\n"
 
         "HONESTIDADE ABSOLUTA  -  REGRAS INVIOLÁVEIS:\n"
         "NUNCA diga que vai 'simular', 'fingir' ou 'fazer como se' tivesse executado algo.\n"
@@ -11098,6 +11118,29 @@ async def _on_message_impl(message: discord.Message):
 
         _conteudo_para_ia = _txt_relevante or "[embed sem texto visível]"
 
+        # ── Extração de comando literal do embed ──────────────────────────────
+        # Se o embed contém "Digite X" ou "Escreva X", extrai o texto EXATO
+        # e envia diretamente sem passar pela IA (evita alteração de case/pontuação).
+        _cmd_literal = None
+        _fontes_embed = [_txt_relevante or ""] + [
+            (emb.description or "") + " " + " ".join(f.value for f in emb.fields)
+            for emb in (message.embeds or [])
+        ]
+        for _fonte in _fontes_embed:
+            _m_dig = re.search(
+                r'(?:Digite?|Escreva?|Envie?|Type|Send)\s+["\u201c\u2018]?([^\n"\'"\u201d\u2019]{2,40})["\u201c\u2018\u201d\u2019]?',
+                _fonte, re.IGNORECASE
+            )
+            if _m_dig:
+                _cmd_literal = _m_dig.group(1).strip().rstrip('.')
+                break
+
+        if _cmd_literal:
+            log.info(f"[BOT_AUTO] comando literal extraído do embed: {_cmd_literal!r}")
+            await asyncio.sleep(0.4)
+            await message.channel.send(_cmd_literal)
+            return
+
         # Resolve prefixo atualizado
         _prefixo_resolvido = _resolver_prefixo_bot(_nome_bot_display, message.guild)
         _slash_ok = _info_bot_aprendido(_nome_bot_display).get("slash", False)
@@ -11117,10 +11160,11 @@ async def _on_message_impl(message: discord.Message):
             f"FORMATO DE COMANDO:\n"
             f"  - Prefixo: '{_prefixo_resolvido}<comando> [args]' (ex: '{_prefixo_resolvido}daily')\n"
             + (f"  - Slash: '/<comando> [args]' (ex: '/{_slash_cmds_aprendidos[0]}') — use se o prefixo falhar\n" if _slash_ok and _slash_cmds_aprendidos else "")
-            + f"\nREGRAS:\n"
-            f"1. Se for comando, escreva APENAS o comando sem mais texto\n"
-            f"2. Não invente comandos que não estão no perfil do bot\n"
-            f"3. Na dúvida: IGNORAR"
+            + f"\nREGRAS CRÍTICAS:\n"
+            f"1. Se for comando, escreva APENAS o comando — SEM ponto final, SEM explicação, SEM aspas extras\n"
+            f"2. Preserva MAIÚSCULAS/minúsculas exatamente como o bot especificou (ex: 'Tropa da 7', não 'tropa da 7')\n"
+            f"3. Não invente comandos que não estão no perfil do bot\n"
+            f"4. Na dúvida: IGNORAR"
         )
 
         _tp, _tt = await _iniciar_typing_antes(message.channel)
@@ -11733,6 +11777,18 @@ async def _on_message_impl(message: discord.Message):
 
     # ── Detectar violações ────────────────────────────────────────────────────
     violacoes = detectar_violacoes(conteudo)
+    # Remove violação de convite se o membro tem cargo superior/mod (podem divulgar o servidor)
+    if violacoes and message.guild:
+        _membro_mod = message.guild.get_member(message.author.id)
+        _pode_divulgar = (
+            message.author.id in DONOS_IDS
+            or (_membro_mod and any(
+                c.id in (_cargos_superiores_ids() | {_cargo_mod_id()})
+                for c in _membro_mod.roles
+            ))
+        )
+        if _pode_divulgar:
+            violacoes = [v for v in violacoes if "divulgação" not in v[0]]
     if violacoes:
         infracoes[message.author.id] += 1
         count = infracoes[message.author.id]
