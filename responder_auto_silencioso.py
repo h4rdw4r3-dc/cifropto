@@ -7418,9 +7418,10 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
             await canal.send("Qual é o texto que devo enviar?")
             return True
         if not canal_nome_env:
-            await canal.send("Em qual canal devo enviar? Menciona o canal.")
-            return True
-        dest_env = discord.utils.get(guild.text_channels, name=canal_nome_env) if guild else None
+            # Sem canal especificado: usa o canal atual onde o comando foi dado
+            dest_env = canal
+        else:
+            dest_env = discord.utils.get(guild.text_channels, name=canal_nome_env) if guild else None
         if not dest_env:
             # Tenta por ID se o nome vier como <#ID>
             m_id = re.search(r'<#(\d+)>', canal_nome_env)
@@ -11949,6 +11950,10 @@ async def _on_message_impl(message: discord.Message):
     # "kkk", ".", emojis soltos, "ok" — não processam IA mas ainda coletam na memória
     _conteudo_limpo = conteudo.strip()
     _e_trivial = bool(_TRIVIAIS.match(_conteudo_limpo)) and client.user not in message.mentions
+    # Mensagens que começam com prefixo de bot externo ($, +, 7!, /, etc.) — Shell não interfere
+    _e_cmd_bot_externo = bool(re.match(r'^(?:[0-9a-zA-Z]{0,3}[!$+?.]|/[a-zA-Z])', _conteudo_limpo)) and client.user not in message.mentions
+    if _e_cmd_bot_externo:
+        _e_trivial = True
 
     # ── Verificar menção/gatilho ───────────────────────────────────────────────
     ids_mencionados = {m.id for m in message.mentions} | {
