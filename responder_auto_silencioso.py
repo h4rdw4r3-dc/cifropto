@@ -756,6 +756,9 @@ atividade_mensagens: dict[int, int] = defaultdict(int)  # user_id → contagem
 citacoes: list[dict] = []  # {texto, autor, canal, ts}
 
 # ── Deduplicação de respostas por canal ──────────────────────────────────────
+# Deduplicação de eventos on_message (self-bot pode receber o mesmo evento duas vezes)
+_msgs_processadas: set[int] = set()  # IDs de mensagens já processadas nesta sessão
+
 # Evita reenviar a mesma resposta repetida no mesmo canal
 _ultima_resposta_canal: dict[int, str] = {}
 
@@ -6881,6 +6884,9 @@ def _tem_intencao_de_acao(conteudo: str) -> bool:
         return False
 
     # Verbos de ação claros — provavelmente é um pedido
+    # Exige ao menos 3 palavras: verbo sozinho ("Manda", "Envia") não é ordem completa
+    if len(msg.split()) < 3:
+        return False
     if re.search(
         r'\b(?:cria[r]?|gera[r]?|faze[r]?|mand[ae][r]?|envi[ae][r]?'
         r'|bota[r]?|add|adiciona[r]?|remove[r]?|deleta[r]?|apaga[r]?'
@@ -11314,6 +11320,17 @@ async def _on_message_impl(message: discord.Message):
 
     if not message.guild or message.guild.id != SERVIDOR_ID:
         return
+
+    # ── Deduplicação: ignora evento duplicado para o mesmo message.id ──────────
+    if message.id in _msgs_processadas:
+        log.debug(f"[DEDUP] evento duplicado ignorado para msg {message.id}")
+        return
+    _msgs_processadas.add(message.id)
+    # Limita o set para não crescer indefinidamente (mantém últimas 2000 IDs)
+    if len(_msgs_processadas) > 2000:
+        _mais_antigos = sorted(_msgs_processadas)[:500]
+        for _mid in _mais_antigos:
+            _msgs_processadas.discard(_mid)
 
     # ── Captura respostas de outros bots para memória de contexto ───────────────
     # Erros de permissão, rejeições de comandos, etc. precisam estar no contexto
