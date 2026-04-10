@@ -10723,6 +10723,59 @@ async def _interagir_na_dm(message: discord.Message) -> None:
             await _interagir_na_dm(message) 
         return
 
+@client.event
+async def on_message(message: discord.Message):
+    # Se for uma mensagem sua, ignora para não entrar em loop
+    if message.author.id == client.user.id:
+        return
+
+    # --- NOVO BLOCO PARA INTERAÇÃO CONTÍNUA ---
+    # Se a mensagem vier de um BOT ou tiver um EMBED
+    if message.author.bot or message.embeds:
+        # Só processamos se for em resposta a algo nosso ou se nos mencionarem
+        # Ou podes remover as condições abaixo para ele ler TUDO de todos os bots
+        if message.reference and message.reference.resolved:
+            if message.reference.resolved.author.id == client.user.id:
+                await _processar_bot_ou_embed(message)
+                return
+
+    # Se for DM, mantém a lógica que criamos antes
+    if message.guild is None:
+        if "denuncia" in message.content.lower():
+            await _on_dm_denuncia(message)
+        else:
+            await _interagir_na_dm(message)
+        return
+
+async def _processar_bot_ou_embed(message: discord.Message):
+    """Analisa mensagens de bots ou embeds para manter a interação contínua."""
+    conteudo_extra = ""
+    
+    # 1. Extrair texto de Embeds (onde a maioria dos bots manda info)
+    if message.embeds:
+        for emb in message.embeds:
+            tit = emb.title if emb.title else ""
+            desc = emb.description if emb.description else ""
+            conteudo_extra += f"\n[BOT EMBED] {tit}: {desc}"
+            # Opcional: ler campos (fields) do embed
+            for field in emb.fields:
+                conteudo_extra += f"\n{field.name}: {field.value}"
+
+    if not conteudo_extra and not message.content:
+        return # Nada para processar
+
+    # 2. Enviar para a lógica da IA
+    texto_final = f"{message.content} {conteudo_extra}".strip()
+    log.info(f"[CONTÍNUO] Processando resposta de bot/embed em #{message.channel}")
+    
+    # Aqui chamamos a tua função de IA padrão
+    resposta = await responder_com_groq(
+        texto_final, 
+        canal_id=str(message.channel.id)
+    )
+    if resposta:
+        await message.reply(resposta)
+
 async def _on_message_impl(message: discord.Message):
     if message.author == client.user:
         return
