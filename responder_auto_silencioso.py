@@ -275,35 +275,6 @@ async def api_get(endpoint: str) -> dict | list | None:
         log.error(f"api_get {endpoint}: {e}")
         return None
 
-async def _interagir_na_dm(message: discord.Message) -> None:
-    """Faz o bot conversar na DM usando a lógica da IA."""
-    # Evita que o bot responda a si mesmo ou a outros bots
-    if message.author.bot:
-        return
-
-    async with message.channel.typing():
-        try:
-            # Pegamos o histórico recente da DM para dar contexto à IA
-            historico = []
-            async for msg in message.channel.history(limit=5):
-                role = "assistant" if msg.author == client.user else "user"
-                historico.append({"role": role, "content": msg.content})
-            
-            historico.reverse() # Coloca em ordem cronológica
-
-            # Chama a sua função de IA (ajuste o nome se for diferente no seu código)
-            resposta = await responder_com_groq(
-                message.content, 
-                historico_contexto=historico,
-                canal_id=f"dm-{message.author.id}"
-            )
-
-            if resposta:
-                await message.reply(resposta)
-        except Exception as e:
-            log.error(f"[DM] Erro ao responder: {e}")
-            await message.channel.send("Tive um problema aqui no meu processador de DMs... Tenta de novo?")
-
 async def api_get_paginado(endpoint: str, limite: int = 100) -> list:
     """GET paginado usando cursor `after`. Retorna lista com até `limite` itens."""
     resultados = []
@@ -10044,18 +10015,6 @@ async def _task_rotina_saudacao():
             log.warning(f"[SAUDACAO] task erro: {e}")
 
 @client.event
-async def on_message(message: discord.Message):
-    # IGNORA SE FOR DM (TRATAMENTO ESPECIAL)
-    if message.guild is None and not message.author.bot:
-        # Se a pessoa escrever 'denuncia', mandamos o texto fixo
-        if "denúncia" in message.content.lower() or "denuncia" in message.content.lower():
-            await _on_dm_denuncia(message)
-        else:
-            # PARA QUALQUER OUTRA COISA, ELE CONVERSA!
-            await _interagir_na_dm(message)
-        return # Sai daqui para não rodar o resto do código de servidor
-
-@client.event
 async def on_ready():
     global _humor_sessao, _mem, MEMORIA_OK, _webhook_server
     carregar_config()
@@ -10674,17 +10633,6 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
         }))
 
 
-@client.event
-async def on_message(message: discord.Message):
-    try:
-        # ── DMs: tratar denúncias anônimas ───────────────────────────────────
-        if not message.guild and message.author != client.user:
-            await _on_dm_denuncia(message)
-            return
-        await _on_message_impl(message)
-    except Exception as e:
-        log.error(f"Erro não tratado em on_message: {e}", exc_info=True)
-
 async def _interagir_na_dm(message: discord.Message) -> None:
     """Faz o bot conversar na DM usando a lógica da IA Groq."""
     if message.author.bot:
@@ -10693,19 +10641,12 @@ async def _interagir_na_dm(message: discord.Message) -> None:
     # Mostra "Digitando..." para parecer humano
     async with message.channel.typing():
         try:
-            # Pegamos as últimas 6 mensagens para ele ter memória do assunto
-            historico = []
-            async for msg in message.channel.history(limit=6):
-                role = "assistant" if msg.author == client.user else "user"
-                historico.append({"role": role, "content": msg.content})
-            
-            historico.reverse() # Coloca na ordem certa (antiga -> nova)
-
-            # Chama a IA Groq (ajusta o nome se a tua função for diferente)
+            # responder_com_groq gerencia o próprio histórico via historico_groq
             resposta = await responder_com_groq(
-                message.content, 
-                historico_contexto=historico,
-                canal_id=f"dm-{message.author.id}"
+                message.content,
+                message.author.display_name,
+                message.author.id,
+                canal_id=message.channel.id,
             )
 
             if resposta:
@@ -10713,39 +10654,32 @@ async def _interagir_na_dm(message: discord.Message) -> None:
         except Exception as e:
             log.error(f"[DM] Erro na interação: {e}")
 
-# Dentro do async def on_message(message):
-    if message.guild is None and not message.author.bot:
-        # Se o usuário quiser denunciar especificamente, mantém o texto fixo
-        if "denuncia" in message.content.lower() or "report" in message.content.lower():
-            await _on_dm_denuncia(message)
-        else:
-            # Caso contrário, chama a IA para conversar normalmente
-            await _interagir_na_dm(message) 
-        return
-
 @client.event
 async def on_message(message: discord.Message):
-    # Se for uma mensagem sua, ignora para não entrar em loop
-    if message.author.id == client.user.id:
-        return
+    try:
+        # Ignora loop próprio
+        if message.author.id == client.user.id:
+            return
 
-    # --- NOVO BLOCO PARA INTERAÇÃO CONTÍNUA ---
-    # Se a mensagem vier de um BOT ou tiver um EMBED
-    if message.author.bot or message.embeds:
-        # Só processamos se for em resposta a algo nosso ou se nos mencionarem
-        # Ou podes remover as condições abaixo para ele ler TUDO de todos os bots
-        if message.reference and message.reference.resolved:
-            if message.reference.resolved.author.id == client.user.id:
-                await _processar_bot_ou_embed(message)
-                return
+        # Mensagens de bots/embeds: só processa se forem resposta ao bot
+        if message.author.bot or message.embeds:
+            if message.reference and message.reference.resolved:
+                if message.reference.resolved.author.id == client.user.id:
+                    await _processar_bot_ou_embed(message)
+            return
 
-    # Se for DM, mantém a lógica que criamos antes
-    if message.guild is None:
-        if "denuncia" in message.content.lower():
-            await _on_dm_denuncia(message)
-        else:
-            await _interagir_na_dm(message)
-        return
+        # DMs: roteia entre denúncia e conversa via IA
+        if message.guild is None:
+            if "denuncia" in message.content.lower() or "denúncia" in message.content.lower():
+                await _on_dm_denuncia(message)
+            else:
+                await _interagir_na_dm(message)
+            return
+
+        # Mensagens de servidor: lógica principal
+        await _on_message_impl(message)
+    except Exception as e:
+        log.error(f"Erro não tratado em on_message: {e}", exc_info=True)
 
 async def _processar_bot_ou_embed(message: discord.Message):
     """Analisa mensagens de bots ou embeds para manter a interação contínua."""
