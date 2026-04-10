@@ -5773,6 +5773,53 @@ async def processar_ordem(message: discord.Message) -> bool:
         for bloco in blocos:
             await message.channel.send(f"```\n{bloco}```")
 
+    # ── envia/digita comando de bot (sem precisar de <#canal>) ─────────────────
+    # Ex: "envia o comando $help", "digita $rank", "manda o $wa"
+    elif re.search(
+        r'\b(?:envi[aeo]r?|digit[aeo]r?|mand[aeo]r?|execut[aeo]r?|rod[aeo]r?|us[aeo]r?)\b.{0,30}'
+        r'(?:comando|cmd|\$[a-zA-Z]|![a-zA-Z]|/[a-zA-Z]|\+[a-zA-Z]|7![a-zA-Z])',
+        conteudo, re.IGNORECASE
+    ) and not message.channel_mentions:        # Extrai o comando com prefixo diretamente do texto
+        _m_cmd_direto = re.search(r'([+!?/$][a-zA-Z]\w*(?:\s+\S+){0,2}|[0-9a-zA-Z]{1,3}![a-zA-Z]\w*)', conteudo)
+        if _m_cmd_direto:
+            _cmd_direto = _m_cmd_direto.group(1).strip()
+            await message.channel.send(_cmd_direto)
+            log.info(f"[CMD_DIRETO] Enviado por ordem de {autor}: {_cmd_direto!r}")
+            return True
+        # Sem prefixo explícito: usa IA para inferir
+        _cmd_inf = await _ia_curta(
+            f"Extraia APENAS o comando a enviar desta instrução: '{conteudo}'. "
+            "Responda só o comando (ex: $help, $rank, 7!daily). Sem texto extra.",
+            max_tokens=15,
+        )
+        if _cmd_inf and re.match(r'^[+!?/$0-9]', _cmd_inf.strip()):
+            await message.channel.send(_cmd_inf.strip())
+            log.info(f"[CMD_DIRETO] IA extraiu: {_cmd_inf.strip()!r}")
+            return True
+
+    # ── envia/digita comando de bot (sem precisar de <#canal>) ─────────────────
+    # Ex: "envia o comando $help", "digita $rank", "manda o $wa"
+    elif not message.channel_mentions and re.search(
+        r'\b(?:envi[aeo]r?|digit[aeo]r?|mand[aeo]r?|execut[aeo]r?|rod[aeo]r?|us[aeo]r?)\b.{0,30}'
+        r'(?:comando|cmd|\$[a-zA-Z]|![a-zA-Z]|/[a-zA-Z]|\+[a-zA-Z]|7![a-zA-Z])',
+        conteudo, re.IGNORECASE
+    ):
+        _m_cmd_direto = re.search(r'([+!?/$][a-zA-Z]\w*(?:\s+\S+){0,2}|[0-9a-zA-Z]{1,3}![a-zA-Z]\w*)', conteudo)
+        if _m_cmd_direto:
+            _cmd_direto = _m_cmd_direto.group(1).strip()
+            await message.channel.send(_cmd_direto)
+            log.info(f"[CMD_DIRETO] Enviado por ordem de {autor}: {_cmd_direto!r}")
+            return True
+        _cmd_inf = await _ia_curta(
+            f"Extraia APENAS o comando a enviar desta instrução: '{conteudo}'. "
+            "Responda só o comando (ex: $help, $rank, 7!daily). Sem texto extra.",
+            max_tokens=15,
+        )
+        if _cmd_inf and re.match(r'^[+!?/$0-9]', _cmd_inf.strip()):
+            await message.channel.send(_cmd_inf.strip())
+            log.info(f"[CMD_DIRETO] IA extraiu: {_cmd_inf.strip()!r}")
+            return True
+
     # ── envia mensagem em canal específico ─────────────────────────────────────
     # Só dispara se houver menção de canal <#ID>  -  evita falsos positivos com
     # palavras comuns como "fala", "manda", "diz" em frases normais
@@ -11430,8 +11477,13 @@ async def _on_message_impl(message: discord.Message):
                 pass
             _aut = _entrada.get("autor", "")
             _cnt = _entrada.get("conteudo", "")
-            # Shell enviou um comando para esse bot
-            if _aut == (client.user.display_name if client.user else "Shell"):
+            # Shell enviou um COMANDO de bot (prefixo), não apenas uma resposta conversacional
+            # Isso evita o loop onde Shell responde ao bot, entra no histórico, e re-ativa o trigger
+            _e_cmd_shell = (
+                _aut == (client.user.display_name if client.user else "Shell")
+                and bool(re.match(r'^(?:[+!?/$][a-zA-Z]|[0-9a-zA-Z]{1,3}!)', _cnt.strip()))
+            )
+            if _e_cmd_shell:
                 _cmd_recente_shell = True
                 break
 
@@ -11541,7 +11593,8 @@ async def _on_message_impl(message: discord.Message):
                 log.debug(f"[BOT_LEARN] '{message.author.display_name}' ← slash '/{_cmd_slash_ent}' associado pela resposta")
                 break
 
-        # Verifica se Shell enviou algum comando recente para esse bot (últimos 45s)
+        # Verifica se Shell enviou algum COMANDO de bot recente (últimos 45s)
+        # Apenas mensagens com prefixo de bot contam — evita loop por respostas conversacionais
         _cmd_recente_shell = False
         for _entrada in reversed(_mem_canal_list[-15:]):
             _ts_entrada = _entrada.get("ts", "")
@@ -11552,7 +11605,12 @@ async def _on_message_impl(message: discord.Message):
             except Exception:
                 pass
             _aut = _entrada.get("autor", "")
-            if _aut == (client.user.display_name if client.user else "Shell"):
+            _cnt_e = _entrada.get("conteudo", "")
+            _e_cmd_shell2 = (
+                _aut == (client.user.display_name if client.user else "Shell")
+                and bool(re.match(r'^(?:[+!?/$][a-zA-Z]|[0-9a-zA-Z]{1,3}!)', _cnt_e.strip()))
+            )
+            if _e_cmd_shell2:
                 _cmd_recente_shell = True
                 break
 
