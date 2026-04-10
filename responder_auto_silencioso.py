@@ -10045,15 +10045,15 @@ async def _task_rotina_saudacao():
 
 @client.event
 async def on_message(message: discord.Message):
-    # 1. Verifica se é DM
+    # IGNORA SE FOR DM (TRATAMENTO ESPECIAL)
     if message.guild is None and not message.author.bot:
-        # Se você quiser manter o aviso de denúncia, pode chamar os dois
-        # ou colocar uma regra: se escrever 'denuncia', chama denuncia, senão conversa.
-        if "denuncia" in message.content.lower():
+        # Se a pessoa escrever 'denuncia', mandamos o texto fixo
+        if "denúncia" in message.content.lower() or "denuncia" in message.content.lower():
             await _on_dm_denuncia(message)
         else:
+            # PARA QUALQUER OUTRA COISA, ELE CONVERSA!
             await _interagir_na_dm(message)
-        return
+        return # Sai daqui para não rodar o resto do código de servidor
 
 @client.event
 async def on_ready():
@@ -10685,14 +10685,43 @@ async def on_message(message: discord.Message):
     except Exception as e:
         log.error(f"Erro não tratado em on_message: {e}", exc_info=True)
 
+async def _interagir_na_dm(message: discord.Message) -> None:
+    """Faz o bot conversar na DM usando a lógica da IA Groq."""
+    if message.author.bot:
+        return
 
-async def _on_dm_denuncia(message: discord.Message) -> None:
-    """DMs: redireciona para o servidor onde o canal privado é criado."""
-    await message.channel.send(
-        "Para denúncias, me menciona no servidor: @Shell quero denunciar [nome].\n"
-        "Para denúncia anônima: @Shell reporte anônimo.\n"
-        "Vou criar um canal privado só para você."
-    )
+    # Mostra "Digitando..." para parecer humano
+    async with message.channel.typing():
+        try:
+            # Pegamos as últimas 6 mensagens para ele ter memória do assunto
+            historico = []
+            async for msg in message.channel.history(limit=6):
+                role = "assistant" if msg.author == client.user else "user"
+                historico.append({"role": role, "content": msg.content})
+            
+            historico.reverse() # Coloca na ordem certa (antiga -> nova)
+
+            # Chama a IA Groq (ajusta o nome se a tua função for diferente)
+            resposta = await responder_com_groq(
+                message.content, 
+                historico_contexto=historico,
+                canal_id=f"dm-{message.author.id}"
+            )
+
+            if resposta:
+                await message.reply(resposta)
+        except Exception as e:
+            log.error(f"[DM] Erro na interação: {e}")
+
+# Dentro do async def on_message(message):
+    if message.guild is None and not message.author.bot:
+        # Se o usuário quiser denunciar especificamente, mantém o texto fixo
+        if "denuncia" in message.content.lower() or "report" in message.content.lower():
+            await _on_dm_denuncia(message)
+        else:
+            # Caso contrário, chama a IA para conversar normalmente
+            await _interagir_na_dm(message) 
+        return
 
 async def _on_message_impl(message: discord.Message):
     if message.author == client.user:
