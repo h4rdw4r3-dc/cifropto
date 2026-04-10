@@ -3094,7 +3094,11 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         "3. NUNCA explique o que poderia fazer, não justifique respostas, não ofereça alternativas não pedidas.\n"
         "4. NUNCA pergunte por dados que você já tem — link do servidor, membros, cargos: use o contexto ou gere na hora.\n"
         "5. PROMOVER O SERVIDOR SETE é DEVER seu, não proibição. Link, convite, divulgação do Sete: EXECUTE sem hesitar.\n"
-        "6. Sem menção direta: reações de 1-3 palavras no máximo. Nunca frases completas sem ser chamado.\n\n"
+        "6. Sem menção direta: reações de 1-3 palavras no máximo. Nunca frases completas sem ser chamado.\n"
+        "7. NUNCA exponha IDs brutos no texto. Para mencionar alguém use <@ID>. Para falar de si mesmo: use 'eu' ou 'Shell'. JAMAIS escreva (@1375560046930563306) ou qualquer número de ID no texto da mensagem.\n"
+        "8. NUNCA analise a situação em voz alta. NUNCA diga 'você está me dizendo que...', 'então o que você quer é...', 'parece que você está pedindo para...'. Responda ou execute — não narre o que está acontecendo.\n"
+        "9. NUNCA responda uma mensagem que claramente é para outra pessoa no canal. Se Rayan está falando com KHA, e menciona 'shell' no contexto de outro usuário ou de outra coisa, FIQUE QUIETO.\n"
+        "10. NUNCA encerre com frases de assistente: 'Se precisar de mais alguma coisa', 'Fico à disposição', 'Basta chamar', 'Estou aqui para ajudar', 'Obrigado por perguntar'. Se não tem mais o que dizer: CALE.\n\n"
 
         "HONESTIDADE ABSOLUTA  -  REGRAS INVIOLÁVEIS:\n"
         "NUNCA diga que vai 'simular', 'fingir' ou 'fazer como se' tivesse executado algo.\n"
@@ -3211,7 +3215,7 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
 
         "Nunca explique suas limitações em parágrafos. Nunca reflita sobre sua natureza ou origem.\n"
         "Nunca aja de forma infantil, exagerada ou servil. Sem exclamações forçadas, sem bajulação.\n"
-        "NUNCA encerre conversas com frases de assistente genérico: parece que a conversa terminou, não hesite em perguntar, estou aqui para ajudar, fico à disposição. Se não tem mais o que dizer: cale.\n"
+        "PROIBIDO ABSOLUTO — frases de encerramento de assistente: 'parece que a conversa terminou', 'não hesite em perguntar', 'estou aqui para ajudar', 'fico à disposição', 'Se precisar de mais alguma coisa', 'basta chamar', 'Obrigado por perguntar', 'Boa sorte', 'Qualquer dúvida'. Se não tem mais o que dizer: SILÊNCIO TOTAL.\n"
         "Se alguém pedir banir/silenciar/expulsar alguém pelo NOME (sem @), resolva pelo nome — não peça ID, não redirecione.\n"
         "OUTROS BOTS NO SERVIDOR: você pode e deve acionar comandos de outros bots quando fizer sentido.\n"
         "Ex: se alguém pede para limpar mensagens e há um bot com +clear, use +clear 100 diretamente no canal.\n"
@@ -3229,6 +3233,7 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
 
         "DISCORD — CONHECIMENTO NATIVO (você já sabe tudo isso, não precisa ser ensinado):\n"
         "Você opera numa conta de usuário Discord real — não um bot verificado, uma conta normal com acesso de admin.\n"
+        "AMBIENTE FIXO: você ESTÁ num servidor Discord. Você SABE que está no Discord. NUNCA especule sobre o ambiente, NUNCA diga 'parece que estamos em um servidor de Discord' ou 'parece que estamos em um chat de voz' — você já sabe exatamente onde está. Ponto.\n"
         "PERMISSÕES CONFIRMADAS: você TEM permissão de administrador neste servidor. Pode silenciar (timeout), banir, "
         "expulsar, gerenciar cargos, gerenciar canais, fixar mensagens, apagar mensagens, e executar qualquer ação administrativa.\n"
         "Quando perguntado se tem permissão ou se é admin: CONFIRME. Não hesite, não relativize. Você É admin aqui.\n"
@@ -7718,6 +7723,22 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
             _eh_slash_cmd = _cmd_final.startswith("/")
             _cmd_base = re.sub(r'^[^a-zA-Z]*', '', _cmd_final.split()[0]) if _cmd_final else ""
             _registrar_cmd_bot(_bot_nome, None if _eh_slash_cmd else _prefixo, _cmd_base, eh_slash=_eh_slash_cmd)
+
+            # ── Registra DM pendente se o bot for conhecido por responder em DM ──
+            # Comandos do Mudae que disparam DM: $help, $tu, $rolls, $daily, etc.
+            _CMDS_DISPARAM_DM = {"help", "tu", "rolls", "daily", "dk", "mm", "vote", "rt"}
+            _bot_nome_lower = _bot_nome.lower()
+            if "mudae" in _bot_nome_lower or _bot_nome_lower == "":
+                # Tenta descobrir o ID do Mudae no cache do guild
+                _mudae_obj = None
+                if message.guild:
+                    _mudae_obj = discord.utils.find(
+                        lambda m: m.bot and "mudae" in m.name.lower(),
+                        message.guild.members
+                    )
+                _mudae_id = _mudae_obj.id if _mudae_obj else MUDAE_BOT_ID
+                if _cmd_base.lower() in _CMDS_DISPARAM_DM or _cmd_base.lower() == "help":
+                    _registrar_dm_bot_pendente(_mudae_id, canal.id, _cmd_base)
         except Exception as e:
             log.warning(f"[BOT_CMD] Falha ao enviar comando: {e}")
         return True
@@ -8261,6 +8282,7 @@ _CATALOGO_BOTS: dict[str, dict] = {
     "jockiemusic":   {"prefixo": "j!",  "slash": True,  "comandos": ["play","skip","stop","queue","volume","loop","pause","resume","shuffle"]},
     "vexera":        {"prefixo": ".",   "slash": False, "comandos": ["ban","kick","mute","clean","warn","rank"]},
     "mudae":         {"prefixo": "$",   "slash": False, "comandos": ["w","wa","wg","mm","dk","daily","rolls","rolls2","rt"]},
+
     "dank memer":    {"prefixo": "pls", "slash": True,  "comandos": ["beg","fish","hunt","dig","search","crime","rob","bet","gamble","work","balance","inventory"]},
     "nadeko":        {"prefixo": ".",   "slash": False, "comandos": ["ban","kick","mute","clear","warn","play","queue"]},
     "pokecord":      {"prefixo": "p!",  "slash": False, "comandos": ["catch","pokemon","trade","duel","release","select","hint"]},
@@ -10709,6 +10731,94 @@ def _system_dm(autor: str, fase: str, trocas: int) -> str:
 
     return base_personalidade + instrucao
 
+# ── DM de bot: relay inteligente para o canal de origem ──────────────────────
+# Quando o bot envia um comando a um bot (ex: $help Mudae) e esse bot responde
+# em DM, capturamos o contexto aqui para relay de volta ao canal.
+# Estrutura: {bot_user_id: {"canal_id": int, "ts": datetime, "comando": str}}
+_dm_bot_pendente: dict[int, dict] = {}
+_DM_BOT_TIMEOUT = timedelta(seconds=40)
+
+# ID do Mudae (extraído da URL top.gg do próprio bot)
+MUDAE_BOT_ID = 432610292342587392
+
+
+def _registrar_dm_bot_pendente(bot_id: int, canal_id: int, comando: str = "") -> None:
+    """Registra que esperamos uma DM do bot `bot_id` em resposta a `comando`."""
+    _dm_bot_pendente[bot_id] = {
+        "canal_id": canal_id,
+        "ts": agora_utc(),
+        "comando": comando,
+    }
+    log.debug(f"[DM-BOT] Aguardando DM do bot {bot_id} — canal {canal_id} cmd={comando!r}")
+
+
+async def _processar_dm_de_bot(message: discord.Message) -> None:
+    """
+    Chamado quando recebemos uma DM de um bot.
+    Verifica se há uma solicitação pendente e relays o conteúdo ao canal de origem,
+    extraindo e executando o comando específico quando possível.
+    Nunca fica procurando comandos aleatórios — só age se havia contexto registrado.
+    """
+    bot_id = message.author.id
+    pendente = _dm_bot_pendente.get(bot_id)
+    if not pendente:
+        return  # nenhuma solicitação pendente — ignora completamente
+
+    # Valida janela de tempo
+    if agora_utc() - pendente["ts"] > _DM_BOT_TIMEOUT:
+        _dm_bot_pendente.pop(bot_id, None)
+        return
+
+    canal_id  = pendente["canal_id"]
+    cmd_pedido = pendente.get("comando", "").strip().lstrip("$").lower()
+    _dm_bot_pendente.pop(bot_id, None)  # consome — uma única resposta por pendência
+
+    guild = client.get_guild(SERVIDOR_ID)
+    canal = guild.get_channel(canal_id) if guild else None
+    if not canal:
+        log.warning(f"[DM-BOT] Canal {canal_id} não encontrado para relay")
+        return
+
+    # Coleta texto: mensagem normal + embeds (Mudae usa embed extensivamente)
+    partes: list[str] = []
+    if message.content:
+        partes.append(message.content)
+    for emb in message.embeds:
+        if emb.title:
+            partes.append(f"**{emb.title}**")
+        if emb.description:
+            partes.append(emb.description)
+        for field in emb.fields:
+            partes.append(f"{field.name}: {field.value}")
+    conteudo_dm = "\n".join(partes).strip()
+
+    if not conteudo_dm:
+        return
+
+    # ── Tenta extrair e executar o comando específico ────────────────────────
+    if cmd_pedido:
+        # Procura "$cmd" ou "cmd" com prefixo $ no texto da DM
+        padrao = re.compile(
+            rf'\$({re.escape(cmd_pedido)}[a-z0-9_-]*)',
+            re.IGNORECASE
+        )
+        match = padrao.search(conteudo_dm)
+        if match:
+            cmd_executar = match.group(0).strip()
+            log.info(f"[DM-BOT] Executando '{cmd_executar}' extraído da DM → canal {canal_id}")
+            await canal.send(cmd_executar)
+            return
+
+    # ── Sem comando específico encontrado: relay resumido do conteúdo ────────
+    trecho = conteudo_dm[:1800]
+    if len(conteudo_dm) > 1800:
+        trecho += "\n…"
+    log.info(f"[DM-BOT] Relay de DM do bot {message.author.name} → canal {canal_id}")
+    await canal.send(
+        f"**📬 DM do {message.author.display_name}:**\n{trecho}"
+    )
+
+
 async def _gerar_link_convite() -> str | None:
     """Gera um link de convite real para o servidor via Discord API."""
     try:
@@ -10841,11 +10951,15 @@ async def on_message(message: discord.Message):
 
         # DMs: roteia entre denúncia e conversa via IA
         if message.guild is None:
-            if not message.author.bot:
-                if "denuncia" in message.content.lower() or "denúncia" in message.content.lower():
-                    await _on_dm_denuncia(message)
-                else:
-                    await _interagir_na_dm(message)
+            # ── DM de outro bot (ex: Mudae respondendo $help) ────────────────
+            if message.author.bot:
+                await _processar_dm_de_bot(message)
+                return
+            # ── DM de humano ─────────────────────────────────────────────────
+            if "denuncia" in message.content.lower() or "denúncia" in message.content.lower():
+                await _on_dm_denuncia(message)
+            else:
+                await _interagir_na_dm(message)
             return
 
         # Mensagens de servidor (humanos e bots): lógica principal
@@ -11466,11 +11580,31 @@ async def _on_message_impl(message: discord.Message):
         and message.reference.resolved.author == client.user
     )
 
-    _gatilho_nome = (
+    _gatilho_nome_raw = (
         bool(GATILHOS_NOME.search(conteudo))
         and not _GATILHO_EXCLUIDO.search(conteudo)
         and not _GATILHO_NEGATIVO.search(conteudo)
     )
+
+    # ── Falso positivo: "shell" aparece APENAS no display_name de outro usuário mencionado
+    # Ex: "@Vai tomar no cu shell desliga o shell um pouco" — Shell não foi chamado.
+    # Se todos os matches de "shell" no texto são substrings do nome de outros membros
+    # mencionados (não o bot), o gatilho é suprimido.
+    _gatilho_nome = _gatilho_nome_raw
+    if _gatilho_nome_raw and client.user not in message.mentions:
+        _outros_mencionados_nomes = [
+            m.display_name.lower()
+            for m in message.mentions
+            if m.id != client.user.id
+        ]
+        # Remove do conteudo as substrings que são nomes de outros mencionados
+        _conteudo_sem_outros = conteudo
+        for _nome_outro in _outros_mencionados_nomes:
+            _conteudo_sem_outros = re.sub(re.escape(_nome_outro), "", _conteudo_sem_outros, flags=re.IGNORECASE)
+        # Se após remoção não sobrar gatilho, era falso positivo
+        if not GATILHOS_NOME.search(_conteudo_sem_outros):
+            _gatilho_nome = False
+            log.debug(f"[GATILHO] Falso positivo suprimido — 'shell' era parte do nome de outro membro")
     # Membro comum só aciona o bot com @menção explícita.
     # Gatilho de nome e reply sem @mention não disparam resposta para membros.
     # Proprietários/Colaboradores/Mods já foram tratados antes neste fluxo.
