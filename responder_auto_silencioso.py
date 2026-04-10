@@ -8257,6 +8257,9 @@ _CATALOGO_BOTS: dict[str, dict] = {
     "mantis":        {"prefixo": "!",   "slash": True,  "comandos": ["balance","daily","work","shop","rank","leaderboard"]},
     "atlas":         {"prefixo": "!",   "slash": True,  "comandos": ["balance","daily","rank","shop","inventory"]},
     "sete":          {"prefixo": "7!",  "slash": False, "comandos": ["balance","daily","rank","shop","work","inventory","pay","leaderboard"]},
+    "i++":           {"prefixo": "7!",  "slash": False, "comandos": ["balance","daily","rank","shop","work","inventory","pay","leaderboard","tropa"]},
+    "valentina":     {"prefixo": "7!",  "slash": False, "comandos": ["balance","daily","rank","shop","work","inventory","pay","leaderboard","setmoney"]},
+    "cench":         {"prefixo": "!",   "slash": True,  "comandos": ["rank","profile","level","welcome"]},
 }
 
 # Prefixos comuns para detecção automática (ordem: mais específicos primeiro)
@@ -10871,7 +10874,8 @@ async def _on_message_impl(message: discord.Message):
     # ── Captura respostas de outros bots para memória de contexto ───────────────
     # Erros de permissão, rejeições de comandos, etc. precisam estar no contexto
     # para que o bot entenda que sua ação anterior falhou e não repita.
-    if message.author.bot and message.author != client.user:
+    _is_webhook = getattr(message, 'webhook_id', None) is not None
+    if (message.author.bot or _is_webhook) and message.author != client.user:
         _txt_bot = (message.content or "").strip()
         # Embeds sem conteúdo de texto ainda podem ter informação relevante
         _txt_embed = ""
@@ -10959,10 +10963,19 @@ async def _on_message_impl(message: discord.Message):
                     _conversa_autorizada_ativa = True
                     break
 
+        # Padrões de eventos autônomos: economia, boas-vindas, conquistas
+        _e_evento_autonomo = bool(re.search(
+            r'(tropa|moeda|coin|saldo|balance|bem.vindo|welcome|reward|recompensa|'
+            r'level.?up|subiu|ganhou|recebeu|setado|adicionado|removido|rank|xp|exp)',
+            _txt_relevante, re.IGNORECASE
+        )) if _txt_relevante else False
+
         _deve_interagir_bot = (
             _bot_mencionou_shell
             or _cmd_recente_shell
             or (_bot_no_catalogo and _conversa_autorizada_ativa and _txt_relevante)
+            or (_bot_no_catalogo and _e_evento_autonomo)  # reage a eventos conhecidos sem precisar de conversa ativa
+            or (_is_webhook and _txt_relevante)           # webhooks com conteúdo sempre processados
         )
 
         if not _deve_interagir_bot:
@@ -11052,16 +11065,26 @@ async def _on_message_impl(message: discord.Message):
                     _conversa_autorizada_ativa = True
                     break
 
+        # Padrões de eventos autônomos (segunda verificação — bloco de execução)
+        _e_evento_autonomo = bool(re.search(
+            r'(tropa|moeda|coin|saldo|balance|bem.vindo|welcome|reward|recompensa|'
+            r'level.?up|subiu|ganhou|recebeu|setado|adicionado|removido|rank|xp|exp)',
+            _txt_relevante, re.IGNORECASE
+        )) if _txt_relevante else False
+
         _deve_interagir_bot = (
             _bot_mencionou_shell
             or _cmd_recente_shell
             or (_bot_no_catalogo and _conversa_autorizada_ativa and bool(_txt_relevante))
+            or (_bot_no_catalogo and _e_evento_autonomo)
+            or (_is_webhook and bool(_txt_relevante))
         )
 
         if not _deve_interagir_bot:
             return  # bot sem contexto relevante — ignora
 
         # ── Monta perfil completo do bot para a IA ────────────────────────────
+        _is_webhook = getattr(message, 'webhook_id', None) is not None
         _nome_bot_display = message.author.display_name
         _perfil_bot = _bot_info_resumo(_nome_bot_display)
         _info_bot_completa = _perfil_bot
