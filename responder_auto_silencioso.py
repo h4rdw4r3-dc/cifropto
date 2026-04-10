@@ -275,6 +275,34 @@ async def api_get(endpoint: str) -> dict | list | None:
         log.error(f"api_get {endpoint}: {e}")
         return None
 
+async def _interagir_na_dm(message: discord.Message) -> None:
+    """Faz o bot conversar na DM usando a lógica da IA."""
+    # Evita que o bot responda a si mesmo ou a outros bots
+    if message.author.bot:
+        return
+
+    async with message.channel.typing():
+        try:
+            # Pegamos o histórico recente da DM para dar contexto à IA
+            historico = []
+            async for msg in message.channel.history(limit=5):
+                role = "assistant" if msg.author == client.user else "user"
+                historico.append({"role": role, "content": msg.content})
+            
+            historico.reverse() # Coloca em ordem cronológica
+
+            # Chama a sua função de IA (ajuste o nome se for diferente no seu código)
+            resposta = await responder_com_groq(
+                message.content, 
+                historico_contexto=historico,
+                canal_id=f"dm-{message.author.id}"
+            )
+
+            if resposta:
+                await message.reply(resposta)
+        except Exception as e:
+            log.error(f"[DM] Erro ao responder: {e}")
+            await message.channel.send("Tive um problema aqui no meu processador de DMs... Tenta de novo?")
 
 async def api_get_paginado(endpoint: str, limite: int = 100) -> list:
     """GET paginado usando cursor `after`. Retorna lista com até `limite` itens."""
@@ -10016,6 +10044,18 @@ async def _task_rotina_saudacao():
             log.warning(f"[SAUDACAO] task erro: {e}")
 
 @client.event
+async def on_message(message: discord.Message):
+    # 1. Verifica se é DM
+    if message.guild is None and not message.author.bot:
+        # Se você quiser manter o aviso de denúncia, pode chamar os dois
+        # ou colocar uma regra: se escrever 'denuncia', chama denuncia, senão conversa.
+        if "denuncia" in message.content.lower():
+            await _on_dm_denuncia(message)
+        else:
+            await _interagir_na_dm(message)
+        return
+
+@client.event
 async def on_ready():
     global _humor_sessao, _mem, MEMORIA_OK, _webhook_server
     carregar_config()
@@ -10653,7 +10693,6 @@ async def _on_dm_denuncia(message: discord.Message) -> None:
         "Para denúncia anônima: @Shell reporte anônimo.\n"
         "Vou criar um canal privado só para você."
     )
-
 
 async def _on_message_impl(message: discord.Message):
     if message.author == client.user:
