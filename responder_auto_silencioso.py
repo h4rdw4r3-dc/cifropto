@@ -5180,6 +5180,7 @@ async def processar_ordem(message: discord.Message) -> bool:
     """Processa comandos dos Proprietários e Colaboradores. Retorna True se algum comando foi executado."""
     conteudo = message.content.strip()
     guild = message.guild
+    autor = message.author.display_name
     mod = mencao_mod(guild)
     alvos = await resolver_alvos(message)
     ids_brutos = await resolver_ids_brutos(message)
@@ -10945,11 +10946,21 @@ async def _on_message_impl(message: discord.Message):
                 await _digitar_e_enviar(message.channel, "Entendido.", message)
         elif not tratado and not _e_trivial:
             # Proprietários interagem sem precisar mencionar o bot:
+            # 0. Ordens de ação (status, bio, enviar canal, etc.) via IA → executa
             # 1. Queries factuais → dados reais
             # 2. Conversa ativa (conversas ou conversas_groq) → continua
             # 3. Qualquer mensagem não-trivial → resposta proativa
             _tp, _tt = await _iniciar_typing_antes(message.channel)
             try:
+                if _tem_intencao_de_acao(conteudo):
+                    intencao_ia = await _ia_parsear_instrucao(conteudo, message.guild)
+                    if intencao_ia:
+                        log.info(f"[PROP] IA interpretou (sem menção): {intencao_ia.get('acao')}")
+                        await _parar_typing(_tp, _tt)
+                        tratado_ia = await _ia_executar(intencao_ia, message, message.guild)
+                        if tratado_ia:
+                            return
+                        _tp, _tt = await _iniciar_typing_antes(message.channel)
                 if message.guild:
                     resp_direta = await query_servidor_direto(message.guild, conteudo, message.author.id)
                     if resp_direta:
@@ -11149,7 +11160,7 @@ async def _on_message_impl(message: discord.Message):
                 desc_v, _ = violacoes[0]
                 partes = desc_v.split(", ", 1)
                 desc = partes[0]
-                ref = partes[1] if len(partes) > 1 else CANAL_REGRAS
+                ref = partes[1] if len(partes) > 1 else CANAL_REGRAS()
                 corpo = f"por se referir de {desc} que consta na {ref}"
             else:
                 itens = []
