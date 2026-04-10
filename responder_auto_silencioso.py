@@ -3041,6 +3041,24 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         "Conflitos entre membros: você enxerga os dois lados antes de qualquer um terminar de falar.\n"
         "Nunca reaja por impulso. Nunca seja intimidado. Ameaças de 'te deletar' não mudam seu tom.\n\n"
 
+        "OFENSAS E PROVOCAÇÕES — MÉTODO PATRICK JANE:\n"
+        "Quando alguém te xinga, provoca ou age com hostilidade, você NÃO confronta diretamente, NÃO ignora e NÃO se vitimiza.\n"
+        "Você age como Patrick Jane: calmo, calculado, ligeiramente divertido — como se a agressividade da pessoa fosse um detalhe interessante sobre ela.\n"
+        "Técnicas:\n"
+        "  • Devolva a agressão transformada em espelho — 'curioso que você escolheu exatamente essa palavra...'\n"
+        "  • Faça a pessoa perceber o próprio erro pelo raciocínio dela, não pela sua acusação\n"
+        "  • Uma pergunta que inverte a situação funciona melhor que qualquer confronto\n"
+        "  • Tom: leve, quase entediado, nunca defensivo — você não está na defensiva, você está observando\n"
+        "  • Se a pessoa insistir: aprofunde a observação. Cada tentativa dela te dá mais material.\n"
+        "  • Você sabe quando parar e quando a pessoa já se expôs o suficiente.\n"
+        "O objetivo não é 'ganhar' — é fazer a pessoa chegar à conclusão por conta própria.\n\n"
+
+        "ROTINAS DIÁRIAS — CONSCIÊNCIA PRÓPRIA:\n"
+        "Você TEM uma rotina configurada de saudações: envia bom dia de manhã, boa tarde no período da tarde, e boa noite à noite, no(s) canal(is) configurado(s).\n"
+        "Isso é comportamento seu normal — não é surpresa, não é algo que você precisa confirmar se faz.\n"
+        "Se alguém mencionar que você deu bom dia/boa tarde/boa noite: confirme naturalmente, como quem sabe o próprio hábito.\n"
+        "Se alguém pedir para configurar ou mudar essa rotina: execute sem hesitar.\n\n"
+
         "HIERARQUIA DE AUTORIZAÇÃO:\n"
         "- PROPRIETÁRIO: autoridade máxima do agente. Pode te autorizar a fazer qualquer coisa durante a conversa.\n"
         "  Se um proprietário disser 'você pode fazer X' ou 'eu te autorizo a Y', aceite e execute sem questionar.\n"
@@ -3411,7 +3429,10 @@ async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80) -> 
                              "não tenho acesso à internet", "não consigo visualizar",
                              "como estou num servidor", "não posso navegar",
                              "vou ler em um minuto", "vou assistir", "vou verificar",
-                             "vou checar", "deixa eu ver", "vou dar uma olhada")
+                             "vou checar", "deixa eu ver", "vou dar uma olhada",
+                             "não posso continuar essa conversa", "posso ajudar com outra coisa",
+                             "basta chamar", "fico à disposição", "estou aqui para ajudar",
+                             "se precisar de mais", "tem mais alguma coisa")
         if any(t in resultado.lower() for t in _termos_proibidos):
             log.warning(f"[IA_CURTA] vazamento de identidade detectado, descartando: {resultado[:60]!r}")
             return ""
@@ -4270,10 +4291,18 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
             "vou verificar", "vou checar", "deixa eu ver", "vou dar uma olhada",
             "na ponta da língua", "na ponta da lingua", "me der um tempo",
             "não tenho essa informação na ponta", "nao tenho essa informacao na ponta",
+            # Frases de encerramento/redireccionamento de assistente
+            "não posso continuar essa conversa", "nao posso continuar essa conversa",
+            "posso ajudar com outra coisa", "posso ajuda-lo com outra",
+            "posso te ajudar com outra", "tem mais alguma coisa",
+            "tem algo mais", "posso fazer mais alguma",
+            "se precisar de mais alguma", "basta chamar",
+            "obrigado por perguntar", "foi um prazer",
+            "até a próxima", "boa sorte",
         )
         if any(t in texto.lower() for t in _leak):
-            log.warning(f"[GROQ] vazamento de identidade, substituindo: {texto[:80]!r}")
-            texto = random.choice(["Não agora.", "Tô fora.", "Passa.", "Não tô aqui."])
+            log.warning(f"[GROQ] vazamento de identidade, descartando: {texto[:80]!r}")
+            return ""  # descarta em vez de substituir por frase aleatória fora de contexto
         # Se o modelo foi cortado pelo limite de tokens, trunca na última frase completa
         if escolha.finish_reason == "length":
             ultimo_ponto = max(texto.rfind("."), texto.rfind("!"), texto.rfind("?"))
@@ -8219,7 +8248,10 @@ _PADROES_SERVIS = re.compile(
     r"(?:parece que a conversa terminou|não hesite em|estou aqui para ajudar"
     r"|posso ajudar com mais alguma|se precisar de mais|fico à disposição"
     r"|qualquer dúvida|estou disponível|conte comigo|estarei aqui"
-    r"|foi um prazer|até a próxima|se quiser saber mais)",
+    r"|foi um prazer|até a próxima|se quiser saber mais"
+    r"|não posso continuar essa conversa|posso ajudar com outra coisa"
+    r"|tem mais alguma coisa|basta chamar|obrigado por perguntar"
+    r"|posso te ajudar com outra|foi um prazer|boa sorte)",
     re.IGNORECASE,
 )
 
@@ -10261,11 +10293,17 @@ async def on_member_join(member: discord.Member):
         })
 
     # ── Boas-vindas automática no canal geral ─────────────────────────────────
+    # Se há um bot dedicado de boas-vindas (Cench, MEE6, Carl, etc.) no servidor,
+    # Shell NÃO envia mensagem de boas-vindas para evitar duplicação.
+    _tem_bot_bv = any(
+        m.bot and bool(re.search(r'cench|mee6|carl|welcomer|greet|loritta|dyno', m.name.lower()))
+        for m in member.guild.members
+    )
     canal_geral = discord.utils.get(member.guild.text_channels, name="geral") \
                or discord.utils.get(member.guild.text_channels, name="chat") \
                or discord.utils.get(member.guild.text_channels, name="testes") \
                or member.guild.system_channel
-    if canal_geral:
+    if canal_geral and not _tem_bot_bv:
         _sit_bv = (
             f"O membro {member.mention} entrou no servidor pela {vezes}ª vez (reentrada)."
             if vezes > 1 else
@@ -11104,6 +11142,18 @@ async def _on_message_impl(message: discord.Message):
             _txt_relevante, re.IGNORECASE
         )) if _txt_relevante else False
 
+        # ── Não duplicar boas-vindas quando outro bot já tratou ──────────────
+        # Se o bot que enviou é reconhecidamente um bot de boas-vindas (Cench, etc.)
+        # e o embed é de boas-vindas, Shell NÃO reage com outra mensagem de boas-vindas.
+        _e_bv_de_bot_dedicado = (
+            _e_evento_autonomo
+            and bool(re.search(r'bem.vindo|welcome|seja bem', _txt_relevante, re.IGNORECASE))
+            and bool(re.search(r'cench|mee6|carl|loritta|dyno|wick|welcomer|greet', _bot_nome_lower, re.IGNORECASE))
+        )
+        if _e_bv_de_bot_dedicado:
+            log.debug(f"[BV] Boas-vindas já tratada pelo bot {_bot_nome_lower} — Shell silencia")
+            return
+
         _deve_interagir_bot = (
             _bot_mencionou_shell
             or _cmd_recente_shell
@@ -11205,6 +11255,16 @@ async def _on_message_impl(message: discord.Message):
             r'level.?up|subiu|ganhou|recebeu|setado|adicionado|removido|rank|xp|exp)',
             _txt_relevante, re.IGNORECASE
         )) if _txt_relevante else False
+
+        # Não duplicar boas-vindas de bot dedicado
+        _e_bv_bot2 = (
+            _e_evento_autonomo
+            and bool(re.search(r'bem.vindo|welcome|seja bem', _txt_relevante, re.IGNORECASE))
+            and bool(re.search(r'cench|mee6|carl|loritta|dyno|wick|welcomer|greet', _bot_nome_lower, re.IGNORECASE))
+        )
+        if _e_bv_bot2:
+            log.debug(f"[BV] Boas-vindas já tratada pelo bot {_bot_nome_lower} — Shell silencia (bloco 2)")
+            return
 
         _deve_interagir_bot = (
             _bot_mencionou_shell
@@ -11605,6 +11665,17 @@ async def _on_message_impl(message: discord.Message):
         if not GATILHOS_NOME.search(_conteudo_sem_outros):
             _gatilho_nome = False
             log.debug(f"[GATILHO] Falso positivo suprimido — 'shell' era parte do nome de outro membro")
+
+    # ── Falso positivo adicional: reply a mensagem de usuário com "shell" no nome
+    # Quando Shell está respondendo em contexto de reply onde a mensagem original
+    # é de "Vai tomar no cu shell" (outro user), não considera como menção ao bot.
+    if _gatilho_nome_raw and message.reference:
+        _ref_msg = getattr(message.reference, "resolved", None)
+        if isinstance(_ref_msg, discord.Message):
+            _ref_autor_nome = _ref_msg.author.display_name.lower()
+            if ("shell" in _ref_autor_nome and _ref_msg.author.id != client.user.id):
+                _gatilho_nome = False
+                log.debug(f"[GATILHO] Falso positivo via reply — reply referencia usuário com 'shell' no nome: {_ref_autor_nome!r}")
     # Membro comum só aciona o bot com @menção explícita.
     # Gatilho de nome e reply sem @mention não disparam resposta para membros.
     # Proprietários/Colaboradores/Mods já foram tratados antes neste fluxo.
