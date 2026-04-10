@@ -7947,6 +7947,14 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
         _bot_nome = params.get("bot", "").strip()
         _bot_cmd  = params.get("comando", "").strip()
         _bot_args = params.get("args", "").strip() if params.get("args") else ""
+        # Fallback: se o parser não extraiu o comando, tenta regex na mensagem original
+        if not _bot_cmd:
+            _raw = message.content if message else ""
+            # Captura qualquer token com prefixo de bot ($cmd, 7!cmd, +cmd, !cmd, /cmd)
+            _m_cmd = re.search(r'(?<!\w)([+!?/$][a-zA-Z]\w*(?:\s+\S+){0,2}|[0-9a-zA-Z]{1,3}![a-zA-Z]\w*)', _raw)
+            if _m_cmd:
+                _bot_cmd = _m_cmd.group(1).strip()
+                log.info(f"[BOT_CMD] comando extraído por fallback regex: {_bot_cmd!r}")
         if not _bot_cmd:
             await canal.send("Qual comando exato devo usar?")
             return True
@@ -8440,12 +8448,15 @@ async def _iniciar_typing_antes(channel: discord.TextChannel) -> tuple[asyncio.E
     return parar, task
 
 
-async def _parar_typing(parar: asyncio.Event, task: asyncio.Task) -> None:
+async def _parar_typing(parar, task) -> None:
     """
     Para o indicador 'digitando...'.
     Garante que o indicador ficou visivel por pelo menos _TYPING_MIN_VISIBLE segundos
     antes de parar — evita que respostas rapidas da IA fiquem invisiveis.
+    Aceita None para parar/task — nesse caso não faz nada (typing nunca foi iniciado).
     """
+    if parar is None or task is None:
+        return
     _TYPING_MIN_VISIBLE = 1.2  # segundos minimos de exibicao do indicador
     ts = getattr(parar, "_ts_typing_inicio", None)
     if ts is not None:
@@ -12143,18 +12154,18 @@ async def _on_message_impl(message: discord.Message):
         tratado = await processar_ordem(message)
         log.info(f"[PROP] processar_ordem retornou {tratado}")
         if not tratado and mencionado and not _e_trivial:
-            _tp, _tt = await _iniciar_typing_antes(message.channel)
+            _tp, _tt = None, None
             try:
                 # Só interpreta como instrução quando há intenção clara de ação
                 if _tem_intencao_de_acao(conteudo):
                     intencao_ia = await _ia_parsear_instrucao(conteudo, message.guild)
                     if intencao_ia:
                         log.info(f"[PROP] IA interpretou: {intencao_ia.get('acao')}")
-                        await _parar_typing(_tp, _tt)
                         tratado_ia = await _ia_executar(intencao_ia, message, message.guild)
                         if tratado_ia:
                             return
-                        _tp, _tt = await _iniciar_typing_antes(message.channel)
+                # Ação não tratada ou resposta conversacional necessária — inicia typing agora
+                _tp, _tt = await _iniciar_typing_antes(message.channel)
                 # Queries factuais do servidor: usa dados reais antes de cair no Groq
                 if message.guild:
                     resp_direta = await query_servidor_direto(message.guild, conteudo, message.author.id)
@@ -12190,18 +12201,18 @@ async def _on_message_impl(message: discord.Message):
             # 0. Ordens de ação (status, bio, enviar canal, etc.) via IA → executa
             # 1. Queries factuais → dados reais
             # 2. Conversa ativa (conversas ou conversas_groq) → continua
-            # 3. Qualquer mensagem não-trivial → resposta proativa
-            _tp, _tt = await _iniciar_typing_antes(message.channel)
+            _tp, _tt = None, None
             try:
                 if _tem_intencao_de_acao(conteudo):
+                    # Typing só inicia após confirmar que é ação — evita indicador prematuro
                     intencao_ia = await _ia_parsear_instrucao(conteudo, message.guild)
                     if intencao_ia:
                         log.info(f"[PROP] IA interpretou (sem menção): {intencao_ia.get('acao')}")
-                        await _parar_typing(_tp, _tt)
                         tratado_ia = await _ia_executar(intencao_ia, message, message.guild)
                         if tratado_ia:
                             return
-                        _tp, _tt = await _iniciar_typing_antes(message.channel)
+                    # Parse retornou conversa ou falhou — inicia typing para resposta conversacional
+                    _tp, _tt = await _iniciar_typing_antes(message.channel)
                 if message.guild:
                     resp_direta = await query_servidor_direto(message.guild, conteudo, message.author.id)
                     if resp_direta:
