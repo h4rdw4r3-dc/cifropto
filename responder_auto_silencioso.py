@@ -1432,12 +1432,13 @@ PALAVRAS_VULGARES = [
     "porra", "caralho", "merda", "foda", "fodase", "fodasse",
     "bosta", "bunda", "cu", "cuzao", "culhao", "arrombado",
     "safado", "safada", "vagabundo", "vagabunda", "vadia",
-    "sacana", "babaca", "idiota", "imbecil", "otario", "otaria",
+    "sacana", "babaca", "imbecil", "otario", "otaria",
     "palhaco", "bronha", "punheta", "punhetao",
     "fdp", "vsf", "vtc", "fds", "krl", "pqp",
     "vai se foder", "vai tomar no", "tomar no cu",
     "vai a merda", "vai pro inferno",
     "rato no cu", "ratomanocu", "vai tomar no cu",
+    # "idiota" removido — termo casual comum; apenas punir se combinado com alvo discriminatório
 ]
 
 # Substrings vulgares em palavras compostas (sem verificação de limite de palavra)
@@ -1485,6 +1486,19 @@ LGBTFOBIA = [
     "cura gay", "doenca mental gay",
     "abominacao", "abominação",
 ]
+
+# Termos LGBTfóbicos usados como gíria casual entre membros (sem alvo discriminatório)
+# Se a mensagem contiver APENAS esses termos como gíria sem atacar ninguém, é suprimida
+_LGBTFOBIA_GIRIA = {"viado", "viadinho", "viadao", "viada", "bicha", "bichinha"}
+
+# Contexto que indica uso como slur real (atacar/discriminar alguém)
+_LGBTFOBIA_ALVO = re.compile(
+    r'\b(seu|sua|esse|essa|aquele|aquela|vc|voce|você|ele|ela|o|a)\s+'
+    r'(viado|viadinho|viadao|bicha|bichinha|boiola|traveco|sapatao)\b'
+    r'|\b(viado|viadinho|viadao|bicha|boiola|traveco|sapatao)\s+'
+    r'(feio|nojento|doente|lixo|inutil|vagabund|merece|vai|morre)\b',
+    re.IGNORECASE
+)
 
 # ── Capacitismo ───────────────────────────────────────────────────────────────
 CAPACITISMO = [
@@ -1701,6 +1715,13 @@ def detectar_violacoes(mensagem: str) -> list[tuple[str, str]]:
     # Discriminação: tolerância estrita + customizadas
     for termo in DISCRIMINACAO + palavras_custom["discriminacao"]:
         if contem_fuzzy_estrito(msg_norm, termo):
+            # Termos LGBTfóbicos que são usados como gíria casual entre membros
+            # Só pune se há alvo explícito ou intenção discriminatória clara
+            termo_norm = normalizar(termo)
+            if termo_norm in {normalizar(g) for g in _LGBTFOBIA_GIRIA}:
+                # Verifica se é uso como slur (atacando alguém) ou gíria casual
+                if not _LGBTFOBIA_ALVO.search(texto_limpo):
+                    continue  # gíria casual entre membros — ignora
             violacoes.append((f"discriminação ou bullying, regra número 4 dos canais em {CANAL_REGRAS()}", termo))
             break
 
@@ -4646,10 +4667,12 @@ INTENCOES = {
 ID_PATTERN = re.compile(r'\b(\d{17,20})\b')
 
 
-async def resolver_alvos(message: discord.Message) -> list[discord.Member]:
+async def resolver_alvos(message: discord.Message, acao: str = "") -> list[discord.Member]:
     """
     Resolve alvos a partir de @menções, IDs brutos e nomes em texto livre.
     Ex: 'bane o Fulano por spam' resolve 'Fulano' como membro do servidor.
+    ATENÇÃO: Para ações destrutivas (silenciar/banir/expulsar), exige menção explícita ou ID.
+    Resolução por nome em texto livre só é feita para ações leves (aviso, info).
     """
     alvos = [m for m in message.mentions if m != client.user]
     ids_ja = {m.id for m in alvos}
@@ -4665,7 +4688,12 @@ async def resolver_alvos(message: discord.Message) -> list[discord.Member]:
         except Exception:
             pass  # ID não pertence ao servidor
 
-    # Se ainda sem alvos, tenta resolver por nome em texto livre
+    # Ações destrutivas: não infere alvo por nome — exige menção explícita ou ID
+    _acoes_destrutivas = {"silenciar", "mute", "mutar", "calar", "banir", "ban", "expulsar", "kick"}
+    if not alvos and acao and any(a in acao.lower() for a in _acoes_destrutivas):
+        return []  # não arrisca punir alguém errado por inferência
+
+    # Se ainda sem alvos e ação não destrutiva, tenta resolver por nome em texto livre
     if not alvos and message.guild:
         texto_limpo = re.sub(r'<@!?\d+>', '', message.content)
         texto_limpo = re.sub(
@@ -5201,9 +5229,10 @@ async def processar_ordem(message: discord.Message) -> bool:
     guild = message.guild
     autor = message.author.display_name
     mod = mencao_mod(guild)
-    alvos = await resolver_alvos(message)
-    ids_brutos = await resolver_ids_brutos(message)
+    # Extrai comando ANTES de resolver alvos para evitar inferência errada em ações destrutivas
     cmd, resto = extrair_comando(conteudo)
+    alvos = await resolver_alvos(message, acao=cmd)
+    ids_brutos = await resolver_ids_brutos(message)
 
     # Guard para comandos de padrão amplo: só disparam quando o bot é endereçado
     _addr = (
@@ -8194,19 +8223,50 @@ _CATALOGO_BOTS: dict[str, dict] = {
     "statbot":    {"prefixo": "!",  "slash": True, "comandos": ["stats", "graph", "info", "top"]},
     "streamcord": {"prefixo": "!",  "slash": True, "comandos": ["notify", "edit", "remove", "list"]},
     "burra":      {"prefixo": "+",  "slash": False, "comandos": ["ban", "kick", "mute", "clear", "warn", "userinfo"]},
+    # Bots de economia/RPG genéricos (prefixo ! por padrão)
+    "economy":    {"prefixo": "!",  "slash": False, "comandos": ["balance", "daily", "work", "shop", "buy", "inventory", "pay", "leaderboard", "rank"]},
+    "rpg":        {"prefixo": "!",  "slash": False, "comandos": ["profile", "daily", "hunt", "fish", "craft", "inventory", "duel"]},
+    "mantis":     {"prefixo": "!",  "slash": True,  "comandos": ["balance", "daily", "work", "shop", "rank", "leaderboard"]},
+    "atlas":      {"prefixo": "!",  "slash": True,  "comandos": ["balance", "daily", "rank", "shop", "inventory"]},
+    "sete":       {"prefixo": "7!", "slash": False, "comandos": ["balance", "daily", "rank", "shop", "work", "inventory", "pay", "leaderboard"]},
 }
+
+# Prefixos comuns em bots personalizados para auto-descoberta
+_PREFIXOS_COMUNS = ["!", "7!", "+", ".", "$", "?", "-", "p!", "w!", "h!", "j!", "t!", "pls"]
+
+# Cache de prefixos descobertos dinamicamente por nome de bot
+_prefixos_descobertos: dict[str, str] = {}
 
 def _resolver_prefixo_bot(nome_bot: str, guild: "discord.Guild | None" = None) -> str:
     """
     Resolve o prefixo de um bot pelo nome.
-    Prioridade: catálogo estático → padrão "!".
+    Prioridade: catálogo estático → cache dinâmico → padrão "!".
     """
     nome_l = nome_bot.lower().strip()
     # Busca direta no catálogo
     for chave, dados in _CATALOGO_BOTS.items():
         if chave in nome_l or nome_l in chave:
             return dados["prefixo"]
+    # Cache dinâmico (aprendido ao observar comandos no canal)
+    if nome_l in _prefixos_descobertos:
+        return _prefixos_descobertos[nome_l]
     return "!"
+
+
+def _aprender_prefixo_bot(nome_bot: str, mensagem: str) -> None:
+    """
+    Tenta inferir o prefixo de um bot observando mensagens de comando no canal.
+    Se alguém digita '7!rank' e o bot responde, aprende que o prefixo é '7!'.
+    """
+    nome_l = nome_bot.lower().strip()
+    if nome_l in _prefixos_descobertos:
+        return
+    # Detecta padrão de prefixo na mensagem (ex: "7!rank → prefixo 7!")
+    for pref in sorted(_PREFIXOS_COMUNS, key=len, reverse=True):
+        if mensagem.strip().startswith(pref) and len(mensagem.strip()) > len(pref):
+            _prefixos_descobertos[nome_l] = pref
+            log.info(f"[BOT_AUTO] Prefixo '{pref}' descoberto para bot '{nome_bot}'")
+            return
 
 def _descobrir_bots_guild(guild: "discord.Guild | None") -> list[dict]:
     """
@@ -10487,70 +10547,178 @@ async def _on_message_impl(message: discord.Message):
     # para que o bot entenda que sua ação anterior falhou e não repita.
     if message.author.bot and message.author != client.user:
         _txt_bot = (message.content or "").strip()
-        if _txt_bot and len(_txt_bot) < 400:
+        # Embeds sem conteúdo de texto ainda podem ter informação relevante
+        _txt_embed = ""
+        if message.embeds:
+            _e = message.embeds[0]
+            partes_embed = []
+            if _e.title:
+                partes_embed.append(_e.title)
+            if _e.description:
+                partes_embed.append(_e.description[:200])
+            if _e.fields:
+                for f in _e.fields[:3]:
+                    partes_embed.append(f"{f.name}: {f.value[:80]}")
+            _txt_embed = " | ".join(partes_embed)[:300]
+        _txt_relevante = _txt_bot or _txt_embed
+
+        if _txt_relevante and len(_txt_relevante) < 500:
             # Detecta se é uma resposta de erro/rejeição (indicadores comuns)
             _e_erro_bot = bool(re.search(
                 r'(não tem permiss|sem permiss|não podes|você não pode|invalid|erro|error'
                 r'|❌|⛔|🚫|não autorizado|permissão necessária|permission)',
-                _txt_bot, re.IGNORECASE
+                _txt_relevante, re.IGNORECASE
             ))
             # Armazena erros E respostas curtas relevantes (confirmações, resultados)
-            _e_curta_relevante = len(_txt_bot) < 200 and not re.search(
-                r'(https?://|\*\*|embed|\u200b)', _txt_bot
+            _e_curta_relevante = len(_txt_relevante) < 300 and not re.search(
+                r'(\u200b)', _txt_relevante
             )
             if _e_erro_bot:
                 canal_memoria[message.channel.id].append({
                     "autor": f"[BOT:{message.author.display_name}]",
-                    "conteudo": f"ERRO/REJEIÇÃO: {_txt_bot[:200]}",
+                    "conteudo": f"ERRO/REJEIÇÃO: {_txt_relevante[:250]}",
+                    "ts": message.created_at.replace(tzinfo=timezone.utc).isoformat(),
                 })
-                log.debug(f"[BOT] erro de {message.author.display_name}: {_txt_bot[:60]}")
+                log.debug(f"[BOT] erro de {message.author.display_name}: {_txt_relevante[:60]}")
             elif _e_curta_relevante:
                 canal_memoria[message.channel.id].append({
                     "autor": f"[BOT:{message.author.display_name}]",
-                    "conteudo": f"RESPOSTA: {_txt_bot[:200]}",
+                    "conteudo": f"RESPOSTA: {_txt_relevante[:250]}",
+                    "ts": message.created_at.replace(tzinfo=timezone.utc).isoformat(),
                 })
-                log.debug(f"[BOT] resposta de {message.author.display_name}: {_txt_bot[:60]}")
+                log.debug(f"[BOT] resposta de {message.author.display_name}: {_txt_relevante[:60]}")
 
         # ── Interação ativa com bots ──────────────────────────────────────────
-        # Shell pode responder a bots quando mencionada ou quando há conversa
-        # ativa no canal (ex: jogar com Mudae, reagir a resultados de bots).
+        # Regras de acionamento (em ordem de prioridade):
+        # 1. Bot mencionou a Shell diretamente → sempre responde
+        # 2. Shell enviou comando para esse bot recentemente → processa resposta
+        # 3. Conversa de proprietário/colaborador ativa no canal → pode usar comandos
+        # 4. Mensagem de bot bem conhecido com conteúdo relevante → reage autonomamente
         _bot_mencionou_shell = client.user in message.mentions
-        _conversa_ativa_bot = (
-            message.channel.id in canal_memoria
-            and len(canal_memoria[message.channel.id]) > 0
-        )
-        _deve_interagir_bot = _bot_mencionou_shell or (
-            _conversa_ativa_bot and _txt_bot and len(_txt_bot) < 300
-            and not re.search(r'(https?://|\u200b)', _txt_bot)
-        )
-        if not _deve_interagir_bot:
-            return  # bots sem menção e sem conversa ativa não passam
+        _bot_nome_lower = message.author.display_name.lower()
 
-        # Passa para o fluxo principal como se fosse uma mensagem normal,
-        # mas sem aplicar moderação ou wizard de denúncia.
-        conteudo_raw = _txt_bot
-        conteudo = _txt_bot
-        autor = message.author.display_name
-        user_id = message.author.id
-        mencionado = _bot_mencionou_shell
-
-        if mencionado or conversas_groq.get(user_id):
-            _tp, _tt = await _iniciar_typing_antes(message.channel)
+        # Verifica se Shell enviou algum comando recente para esse bot (últimos 30s)
+        _agora_ts = agora_utc()
+        _cmd_recente_shell = False
+        _mem_canal = list(canal_memoria.get(message.channel.id, []))
+        for _entrada in reversed(_mem_canal[-15:]):
+            _ts_entrada = _entrada.get("ts", "")
             try:
-                resposta = await resposta_inicial(
-                    conteudo, autor, user_id, message.guild, message.author, message.channel.id
-                ) if mencionado else await responder_com_groq(
-                    conteudo, autor, user_id, message.guild, message.channel.id
+                _dt_entrada = datetime.fromisoformat(_ts_entrada)
+                if (_agora_ts - _dt_entrada).total_seconds() > 45:
+                    break
+            except Exception:
+                pass
+            _aut = _entrada.get("autor", "")
+            _cnt = _entrada.get("conteudo", "")
+            # Shell enviou um comando para esse bot
+            if _aut == (client.user.display_name if client.user else "Shell"):
+                _cmd_recente_shell = True
+                break
+
+        # Bot reconhecido no catálogo?
+        _bot_no_catalogo = any(
+            chave in _bot_nome_lower or _bot_nome_lower.startswith(chave[:4])
+            for chave in _CATALOGO_BOTS
+        )
+
+        # Verifica se há conversa ativa de proprietário/colaborador no canal
+        _conversa_autorizada_ativa = False
+        for _uid_conv in list(conversas_groq.keys()) + list(conversas.keys()):
+            _estado = conversas_groq.get(_uid_conv) or conversas.get(_uid_uid if (_uid_uid := _uid_conv) else 0)
+            if isinstance(_estado, dict) and _estado.get("canal") == message.channel.id:
+                # Verifica se é proprietário ou colaborador
+                _membro_conv = message.guild.get_member(_uid_conv) if message.guild else None
+                if _membro_conv and (_membro_conv.id in DONOS_IDS or eh_superior(_membro_conv)):
+                    _conversa_autorizada_ativa = True
+                    break
+
+        _deve_interagir_bot = (
+            _bot_mencionou_shell
+            or _cmd_recente_shell
+            or (_bot_no_catalogo and _conversa_autorizada_ativa and _txt_relevante)
+        )
+
+        if not _deve_interagir_bot:
+            return  # bots sem contexto relevante não passam
+
+        # ── Processamento autônomo da resposta do bot ─────────────────────────
+        # A Shell analisa o que o bot respondeu e decide a próxima ação
+        # sem precisar de instrução manual do usuário.
+        _conteudo_para_ia = _txt_relevante or "[mensagem sem texto — possível embed]"
+        _nome_bot_display = message.author.display_name
+
+        # Monta contexto do catálogo para a IA saber os comandos disponíveis
+        _info_catalogo = ""
+        for _chave_cat, _dados_cat in _CATALOGO_BOTS.items():
+            if _chave_cat in _bot_nome_lower or _bot_nome_lower.startswith(_chave_cat[:4]):
+                _prefixo_cat = _dados_cat["prefixo"]
+                _cmds_cat = ", ".join(_dados_cat.get("comandos", [])[:12])
+                _slash_cat = "suporta slash commands" if _dados_cat.get("slash") else "só prefixo"
+                _info_catalogo = (
+                    f"Bot: {_nome_bot_display} | Prefixo: {_prefixo_cat} | "
+                    f"{_slash_cat} | Comandos conhecidos: {_cmds_cat}"
                 )
-            finally:
-                await _parar_typing(_tp, _tt)
-            if resposta:
-                await _reagir_ou_responder(message, resposta)
+                break
+
+        # Memória recente do canal para contexto
+        _mem_recente = "\n".join(
+            f"{e.get('autor','?')}: {e.get('conteudo','')}"
+            for e in _mem_canal[-8:]
+        )
+
+        # Resolve prefixo do bot (catálogo + cache dinâmico)
+        _prefixo_resolvido = _resolver_prefixo_bot(_nome_bot_display, message.guild)
+
+        _prompt_bot = (
+            f"Você é Shell, assistente do servidor Discord. "
+            f"O bot '{_nome_bot_display}' acabou de responder: \"{_conteudo_para_ia}\"\n"
+            f"{('Informações do bot: ' + _info_catalogo) if _info_catalogo else f'Prefixo provável: {_prefixo_resolvido}'}\n"
+            f"Contexto recente do canal:\n{_mem_recente}\n\n"
+            f"Com base na resposta do bot e no contexto, decida a próxima ação:\n"
+            f"- Se o bot está aguardando um input/argumento que você sabe → envie o próximo comando EXATO (ex: '{_prefixo_resolvido}rank', '{_prefixo_resolvido}balance', etc.)\n"
+            f"- Se o bot confirmou uma ação com sucesso → reaja de forma natural e brevíssima (máx 5 palavras)\n"
+            f"- Se o bot deu erro de permissão ou sintaxe → tente corrigir o comando ou informe em 1 frase\n"
+            f"- Se o bot mostrou resultado (rank, saldo, inventário) → comente com 1 frase no estilo Shell carioca\n"
+            f"- Em qualquer outro caso → responda APENAS com: IGNORAR\n\n"
+            f"REGRAS ABSOLUTAS:\n"
+            f"1. Se for enviar comando, escreva APENAS o comando sem mais nada (ex: '{_prefixo_resolvido}daily')\n"
+            f"2. Não invente comandos — só use os do catálogo ou contexto\n"
+            f"3. Na dúvida: IGNORAR"
+        )
+
+        _tp, _tt = await _iniciar_typing_antes(message.channel)
+        try:
+            _resposta_bot = await _ia_curta(_prompt_bot, max_tokens=60)
+        finally:
+            await _parar_typing(_tp, _tt)
+
+        if _resposta_bot and _resposta_bot.strip().upper() != "IGNORAR" and len(_resposta_bot.strip()) > 1:
+            log.info(f"[BOT_AUTO] {_nome_bot_display} → Shell age: {_resposta_bot[:80]!r}")
+            await _reagir_ou_responder(message, _resposta_bot)
+
         return  # bots não passam pelo restante do fluxo (moderação etc.)
+
+    # ── Aprendizado de prefixo de bot por observação de comandos humanos ──────
+    # Quando alguém digita um comando de bot (ex: 7!rank), Shell aprende o prefixo
+    conteudo_raw = message.content
+    _match_cmd_humano = re.match(r'^\s*([0-9a-zA-Z]{0,3}[!+.$?-])([a-zA-Z]\w*)', conteudo_raw)
+    if _match_cmd_humano and not message.author.bot and message.guild:
+        _pref_aprendido = _match_cmd_humano.group(1)
+        _cmd_aprendido = _match_cmd_humano.group(2).lower()
+        # Identifica qual bot no canal usa esse prefixo
+        for _mb in message.guild.members:
+            if _mb.bot and _mb != client.user:
+                _nm_l = _mb.display_name.lower()
+                if _nm_l not in _prefixos_descobertos:
+                    # Verifica se o bot está no catálogo com prefixo diferente ou desconhecido
+                    _no_cat = any(chave in _nm_l for chave in _CATALOGO_BOTS)
+                    if not _no_cat:
+                        _prefixos_descobertos[_nm_l] = _pref_aprendido
+                        log.debug(f"[BOT_LEARN] Bot '{_mb.display_name}' → prefixo '{_pref_aprendido}' aprendido por observação")
 
     # Ignorar mensagens de outros bots com prefixo (ex: 7!afk, !cmd, /cmd)
     # Só ignora se começar com prefixo e não mencionar este bot
-    conteudo_raw = message.content
     if re.match(r'^\s*\S+[!/]\S', conteudo_raw) and client.user not in message.mentions:
         return
 
