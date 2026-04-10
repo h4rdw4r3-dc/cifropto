@@ -7024,6 +7024,11 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
         "Use quando o Proprietário pedir mudanças diretas no código/comportamento. "
         "Exemplos: 'adiciona isso no meu código', 'muda como você faz X', 'corrige o bug de Y' → editar_codigo(pedido='<pedido literal>'). "
         "usar_bot(bot,comando,args=null) — aciona um bot do servidor enviando o comando como mensagem isolada. "
+        "IMPORTANTE: o campo 'comando' deve ser o comando LITERAL a enviar (ex: '$rank', '$help', '7!daily'), nunca o verbo da instrução. "
+        "Exemplos: 'usa o Mudae e digita $rank' → usar_bot(bot='mudae', comando='$rank'). "
+        "'digita $help no Mudae' → usar_bot(bot='mudae', comando='$help'). "
+        "'roda o 7!daily na valentina' → usar_bot(bot='valentina', comando='7!daily'). "
+        "'manda +rank' → usar_bot(bot='', comando='+rank'). "
         "Use quando fizer sentido acionar outro bot naturalmente (limpar canal, música, etc.). "
         "NUNCA retorne acao banir, silenciar ou qualquer punição — punições requerem comando explícito. "
         "Se for pergunta, conversa, menção a raid/invasão/punição, retorne {\"acao\":\"conversa\"}. "
@@ -11437,9 +11442,16 @@ async def _on_message_impl(message: discord.Message):
                     break
 
         # Padrões de eventos autônomos: economia, boas-vindas, conquistas
-        _e_evento_autonomo = bool(re.search(
+        # Evento autônomo: apenas eventos reais (moedas ganhas, level up, boas-vindas)
+        # NÃO dispara para respostas de help, listas de comandos ou informações gerais
+        _e_resposta_help = bool(re.search(
+            r'\b(?:command|comando|list of|lista de|prefixo|prefix|usage|use|syntax|'
+            r'procurando um comando|experimenta?|\$search|help|ajuda|como usar|disponíveis)',
+            _txt_relevante, re.IGNORECASE
+        )) if _txt_relevante else False
+        _e_evento_autonomo = (not _e_resposta_help) and bool(re.search(
             r'(tropa|moeda|coin|saldo|balance|bem.vindo|welcome|reward|recompensa|'
-            r'level.?up|subiu|ganhou|recebeu|setado|adicionado|removido|rank|xp|exp)',
+            r'level.?up|subiu|ganhou|recebeu|setado|adicionado|removido|xp|exp)',
             _txt_relevante, re.IGNORECASE
         )) if _txt_relevante else False
 
@@ -11551,9 +11563,15 @@ async def _on_message_impl(message: discord.Message):
                     break
 
         # Padrões de eventos autônomos (segunda verificação — bloco de execução)
-        _e_evento_autonomo = bool(re.search(
+        # Exclui respostas de help/lista de comandos
+        _e_resposta_help_2 = bool(re.search(
+            r'\b(?:command|comando|list of|lista de|prefixo|prefix|usage|use|syntax|'
+            r'procurando um comando|experimenta?|\$search|help|ajuda|como usar|disponíveis)',
+            _txt_relevante, re.IGNORECASE
+        )) if _txt_relevante else False
+        _e_evento_autonomo = (not _e_resposta_help_2) and bool(re.search(
             r'(tropa|moeda|coin|saldo|balance|bem.vindo|welcome|reward|recompensa|'
-            r'level.?up|subiu|ganhou|recebeu|setado|adicionado|removido|rank|xp|exp)',
+            r'level.?up|subiu|ganhou|recebeu|setado|adicionado|removido|xp|exp)',
             _txt_relevante, re.IGNORECASE
         )) if _txt_relevante else False
 
