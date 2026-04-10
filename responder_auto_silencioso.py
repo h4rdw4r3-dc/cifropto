@@ -2326,12 +2326,23 @@ def _detectar_intencao(conteudo: str, guild=None) -> dict:
                 return {"intent": "cargo_por_nome", "nome": role.name, "detalhado": detalhado}
 
         # Último recurso: nome de cargo aparece diretamente no texto
-        for role in sorted(guild.roles, key=lambda r: -r.position):
-            if role.name == "@everyone":
-                continue
-            nome_norm = normalizar(role.name.lower())
-            if len(nome_norm) >= 3 and re.search(r'\b' + re.escape(nome_norm) + r'\b', msg):
-                return {"intent": "cargo_por_nome", "nome": role.name, "detalhado": detalhado}
+        # Só dispara se há contexto explícito de consulta (quem tem, membros do, etc.)
+        # Nunca dispara quando a mensagem claramente é uma ação/instrução
+        _e_consulta_cargo = bool(re.search(
+            r'\b(?:quem\s+tem|membros?\s+(?:d[ao]|com|no|na)|cargo\s+\w|quantos?\s+(?:tem|no|na)|lista\s+d[ao])\b',
+            msg
+        ))
+        _e_acao_clara = bool(re.search(
+            r'\b(?:usa[r]?|digita[r]?|manda[r]?|envia[r]?|executa[r]?|roda[r]?|faze[r]?|cria[r]?)\b',
+            msg
+        ))
+        if _e_consulta_cargo and not _e_acao_clara:
+            for role in sorted(guild.roles, key=lambda r: -r.position):
+                if role.name == "@everyone":
+                    continue
+                nome_norm = normalizar(role.name.lower())
+                if len(nome_norm) >= 3 and re.search(r'\b' + re.escape(nome_norm) + r'\b', msg):
+                    return {"intent": "cargo_por_nome", "nome": role.name, "detalhado": detalhado}
 
     # Contexto/resumo do canal — gatilho refinado para evitar falsos positivos.
     # "contexto" e "resumo" soltos NÃO disparam mais; precisam ser o comando principal
@@ -6894,7 +6905,8 @@ def _tem_intencao_de_acao(conteudo: str) -> bool:
         r'|posta[r]?|escreve[r]?|coloca[r]?|configura[r]?'
         r'|ativa[r]?|desativa[r]?|abre[r]?|fecha[r]?|lista[r]?|mostra[r]?'
         r'|encaminha[r]?|reencaminha[r]?|repassa[r]?|forward'
-        r'|compartilha[r]?)\b',
+        r'|compartilha[r]?|usa[r]?|digita[r]?|executa[r]?|roda[r]?|dispara[r]?'
+        r'|aciona[r]?|chama[r]?)\b',
         msg,
     ):
         return True
