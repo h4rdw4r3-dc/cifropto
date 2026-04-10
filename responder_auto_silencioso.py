@@ -3459,7 +3459,9 @@ async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80) -> 
                              "vou checar", "deixa eu ver", "vou dar uma olhada",
                              "não posso continuar essa conversa", "posso ajudar com outra coisa",
                              "basta chamar", "fico à disposição", "estou aqui para ajudar",
-                             "se precisar de mais", "tem mais alguma coisa")
+                             "se precisar de mais", "tem mais alguma coisa",
+                             "não posso ajudar com isso", "nao posso ajudar com isso",
+                             "não posso ajudar nisso", "não consigo ajudar com isso")
         if any(t in resultado.lower() for t in _termos_proibidos):
             log.warning(f"[IA_CURTA] vazamento de identidade detectado, descartando: {resultado[:60]!r}")
             return ""
@@ -4354,6 +4356,10 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
             "se precisar de mais alguma", "basta chamar",
             "obrigado por perguntar", "foi um prazer",
             "até a próxima", "boa sorte",
+            # Recusas genéricas de assistente
+            "não posso ajudar com isso", "nao posso ajudar com isso",
+            "não posso ajudar nisso", "nao posso ajudar nisso",
+            "não sou capaz de ajudar com isso", "não consigo ajudar com isso",
         )
         if any(t in texto.lower() for t in _leak):
             log.warning(f"[GROQ] vazamento de identidade, descartando: {texto[:80]!r}")
@@ -7105,6 +7111,12 @@ _ACOES_DESTRUTIVAS = frozenset({
     "aviso", "remover_cargo", "deletar_canal",
 })
 
+# Ações que qualquer membro pode acionar visualmente mas que só proprietários/colaboradores
+# devem executar de fato — sem destruir nada, mas exigem autorização.
+_ACOES_PRIVILEGIADAS = frozenset({
+    "usar_bot",
+})
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # AUTO-EDIÇÃO DE CÓDIGO — permite ao bot reescrever seu próprio .py em disco
 # e reiniciar o processo para aplicar as mudanças em tempo real.
@@ -7454,6 +7466,10 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
     )
     if acao in _ACOES_DESTRUTIVAS and not _autor_privilegiado and client.user not in message.mentions:
         log.info(f"[IA] acao destrutiva '{acao}' bloqueada: sem @mencao direta (autor={autor})")
+        return False
+
+    if acao in _ACOES_PRIVILEGIADAS and not _autor_privilegiado:
+        log.info(f"[IA] acao privilegiada '{acao}' bloqueada: autor sem permissão (autor={autor})")
         return False
 
     def _resolver_membro(nome: str) -> discord.Member | None:
@@ -8003,7 +8019,16 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
                 _bot_cmd = _m_cmd.group(1).strip()
                 log.info(f"[BOT_CMD] comando extraído por fallback regex: {_bot_cmd!r}")
         if not _bot_cmd:
-            await canal.send("Qual comando exato devo usar?")
+            # Só solicita esclarecimento se o autor tem permissão para dar ordens ao bot.
+            # Membros comuns que disparam esta ação por acidente são silenciados.
+            if not _autor_privilegiado:
+                log.debug(f"[BOT_CMD] usar_bot sem comando e autor não privilegiado — ignorando")
+                return True
+            _perg = await _ia_curta(
+                "Perguntar de forma bem curta e carioca qual comando exato deve ser digitado. 1 frase, sem enrolação.",
+                max_tokens=20,
+            )
+            await message.reply(_perg or "Qual comando exato?")
             return True
 
         # Resolve perfil completo do bot (catálogo + aprendizado)
