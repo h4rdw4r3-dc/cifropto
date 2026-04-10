@@ -55,10 +55,22 @@ except ImportError:
     WEBHOOK_DISPONIVEL = False
     log.warning("[WEBHOOK] github_webhook.py não encontrado  -  webhook do GitHub desativado.")
 
+try:
+    from aprendizado_comandos import (
+        AprendizadoComandos,
+        inicializar_aprendizado,
+        get_aprend,
+    )
+    APREND_DISPONIVEL = True
+except ImportError:
+    APREND_DISPONIVEL = False
+    log.warning("[APREND] aprendizado_comandos.py não encontrado  -  aprendizado persistente desativado.")
+
 # ── Instâncias globais dos módulos opcionais ──────────────────────────────────
 _mem: "MemoriaVetorial | None" = None
 MEMORIA_OK: bool = False
 _webhook_server = None
+APREND_OK: bool = False
 
 # Rotinas de saudacao agendadas {canal_id: {manha, tarde, noite}}
 _rotinas_saudacao: dict[int, dict[str, str]] = {}
@@ -4118,6 +4130,27 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         )
         if _ctx_vetorial:
             _system_base += f"\n{_ctx_vetorial}\n"
+        # Injetar conhecimento de bots do servidor quando relevante
+        # Detecta se a pergunta envolve bots, comandos ou prefixos
+        if APREND_DISPONIVEL and re.search(
+            r'\b(bot|comando|prefixo|mudae|valentina|loritta|cench|rank|daily|im\b|\$|7!)',
+            pergunta, re.IGNORECASE
+        ):
+            _aprend_ctx = get_aprend()
+            if _aprend_ctx and _aprend_ctx._pool:
+                try:
+                    import asyncpg as _apg
+                    async with _aprend_ctx._pool.acquire() as _conn_ctx:
+                        _rows_ctx = await _conn_ctx.fetch(
+                            "SELECT nome, prefixo, usos_total FROM bots_conhecidos ORDER BY usos_total DESC LIMIT 6"
+                        )
+                    if _rows_ctx:
+                        _bots_ctx_str = " | ".join(
+                            f"{r['nome']}({r['prefixo']})" for r in _rows_ctx
+                        )
+                        _system_base += f"\n=== BOTS DO SERVIDOR (observados) ===\n{_bots_ctx_str}\n"
+                except Exception:
+                    pass
 
         mensagens = [
             {"role": "system", "content": _system_base + ctx_canal},
@@ -4187,6 +4220,13 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
             log.info(f"[GROQ] contexto {ctx_chars} chars > limite 8b — escalando para {_modelo_escalado}")
             modelo = _modelo_escalado
             _LIMITE_CHARS = _LIMITE_CHARS_SCOUT if modelo == _MODELO_SCOUT else _LIMITE_CHARS_GERAL
+        else:
+            # CORREÇÃO: todos os modelos grandes bloqueados — força compressão máxima para 8b
+            # Em vez de escalar e gerar RateLimitError em cascata, permanece no 8b com contexto mínimo
+            log.warning("[GROQ] todos os modelos grandes bloqueados — forçando compressão ultra para 8b")
+            mensagens = [mensagens[0]] + mensagens[-2:] if len(mensagens) > 2 else mensagens
+            ctx_chars = sum(len(m.get("content", "")) for m in mensagens)
+            _LIMITE_CHARS = _LIMITE_CHARS_8B
     if ctx_chars > _LIMITE_CHARS:
         # Passo 1: remove contexto vetorial e comprime contexto do servidor
         # _system_base pode não existir se _eh_continuacao_trivial (contexto mínimo já foi usado)
@@ -5288,6 +5328,33 @@ async def processar_ordem(message: discord.Message) -> bool:
     alvos = await resolver_alvos(message, acao=cmd)
     ids_brutos = await resolver_ids_brutos(message)
 
+    # ── Aprender: registrar intenção de comando detectada no banco ────────────
+    if cmd and cmd != "nenhum" and APREND_DISPONIVEL:
+        aprend = get_aprend()
+        if aprend:
+            # Determina nível hierárquico do autor
+            _nivel_hier = "membro"
+            if message.author.id in DONOS_IDS:
+                _nivel_hier = "dono"
+            elif eh_superior(message.author):
+                _nivel_hier = "colaborador"
+            elif guild and any(
+                r.id in CARGOS_MOD for r in getattr(message.author, "roles", [])
+            ):
+                _nivel_hier = "moderador"
+            _alvo_nome = alvos[0].display_name if alvos else None
+            asyncio.ensure_future(aprend.registrar_execucao_interna(
+                canal_id=message.channel.id,
+                canal_nome=getattr(message.channel, "name", "dm"),
+                autor_id=message.author.id,
+                autor_nome=autor,
+                nivel_hierarq=_nivel_hier,
+                comando_raw=conteudo[:500],
+                comando_parsed=cmd,
+                alvo_nome=_alvo_nome,
+                resultado="iniciado",
+            ))
+
     # Guard para comandos de padrão amplo: só disparam quando o bot é endereçado
     _addr = (
         client.user in message.mentions
@@ -5298,6 +5365,97 @@ async def processar_ordem(message: discord.Message) -> bool:
 
     # Palavra-chave unificada para detecção de canais de voz
     _VOZ_KW = r'(?:call|chamada|canal\s+de\s+voz|voz)'
+
+    # ── ensinar comando explicitamente (dono ensina Shell sobre um bot) ─────
+    # Uso: "Shell, aprenda que o comando rank do Mudae é $rank"
+    # Uso: "Shell, o prefixo da valentina é 7!"
+    if _addr and re.search(
+        r'␈(aprend[ae]r?\s+que|o\s+prefixo\s+d[ao]\s+|comando\s+\w+\s+d[ao]\s+\w+\s+[eé])',
+        conteudo.lower()
+    ):
+        _m_ensinar_cmd = re.search(
+            r'comando\s+(\w[\w-]*)\s+d[ao]\s+(\w[\w-]*)\s+[eé]\s+([^\s]+)',
+            conteudo, re.IGNORECASE
+        )
+        _m_ensinar_pref = re.search(
+            r'prefixo\s+d[ao]\s+(\w[\w-]*)\s+[eé]\s+([^\s]+)',
+            conteudo, re.IGNORECASE
+        )
+        if _m_ensinar_cmd and APREND_DISPONIVEL:
+            _cmd_ensinado = _m_ensinar_cmd.group(1).lower()
+            _bot_ensinado = _m_ensinar_cmd.group(2).lower()
+            _valor_ensinado = _m_ensinar_cmd.group(3)
+            _eh_slash_ens = _valor_ensinado.startswith("/")
+            _pref_ens = None if _eh_slash_ens else (
+                _valor_ensinado[0] if not _valor_ensinado[0].isalpha() else "!"
+            )
+            aprend = get_aprend()
+            if aprend:
+                await aprend.registrar_cmd_bot(
+                    _bot_ensinado, _pref_ens, _cmd_ensinado,
+                    eh_slash=_eh_slash_ens, funcionou=True,
+                )
+                _registrar_cmd_bot(_bot_ensinado, _pref_ens, _cmd_ensinado, eh_slash=_eh_slash_ens)
+                _ack_ens = await _ia_curta(
+                    f"Confirme que aprendeu: o comando {_cmd_ensinado} do bot {_bot_ensinado} é {_valor_ensinado}. Casual, 1 frase.",
+                    max_tokens=25
+                )
+                await message.channel.send(_ack_ens or f"Anotado — {_bot_ensinado}: {_valor_ensinado}")
+                return True
+        elif _m_ensinar_pref and APREND_DISPONIVEL:
+            _bot_ens_p = _m_ensinar_pref.group(1).lower()
+            _pref_ens_p = _m_ensinar_pref.group(2)
+            aprend = get_aprend()
+            if aprend:
+                await aprend.registrar_cmd_bot(_bot_ens_p, _pref_ens_p, "", funcionou=True)
+                if _bot_ens_p in _bots_aprendidos:
+                    _bots_aprendidos[_bot_ens_p]["prefixo"] = _pref_ens_p
+                _ack_pref = await _ia_curta(
+                    f"Confirme que anotou o prefixo '{_pref_ens_p}' para o bot {_bot_ens_p}. Casual, 1 frase.",
+                    max_tokens=20
+                )
+                await message.channel.send(_ack_pref or f"Prefixo {_pref_ens_p} anotado para {_bot_ens_p}.")
+                return True
+
+    # ── relatório de aprendizado de comandos (dono consulta banco) ───────────
+    # Uso: "Shell, relatório de aprendizado" ou "Shell, o que você aprendeu?"
+    if _addr and re.search(
+        r'␈(relat[oó]rio\s+(?:de\s+)?aprendizado|o\s+que\s+(vc|você)\s+aprendeu|comandos\s+aprendidos|estat[ií]stica[s]?\s+(?:de\s+)?comando)␈',
+        conteudo.lower()
+    ):
+        if APREND_DISPONIVEL:
+            aprend = get_aprend()
+            if aprend:
+                relat = await aprend.relatorio_uso(limite=8)
+                await message.channel.send(relat)
+            else:
+                await message.channel.send("Banco de aprendizado ainda não está ativo.")
+        else:
+            await message.channel.send("Módulo de aprendizado não instalado.")
+        return True
+
+    # ── perfil de bot específico (dono consulta o que Shell sabe de um bot) ──
+    # Uso: "Shell, o que você sabe do Mudae?" / "Shell, perfil do bot valentina"
+    elif _addr and re.search(
+        r'␈(o\s+que\s+(vc|você)\s+sabe\s+(?:do|sobre|de)\s+|perfil\s+(?:do\s+)?bot\s+)(\w+)',
+        conteudo.lower()
+    ):
+        _m_bot_query = re.search(
+            r'␈(?:o\s+que\s+(?:vc|você)\s+sabe\s+(?:do|sobre|de)\s+|perfil\s+(?:do\s+)?bot\s+)(\w+)',
+            conteudo.lower()
+        )
+        if _m_bot_query and APREND_DISPONIVEL:
+            _bot_alvo = _m_bot_query.group(1).strip()
+            aprend = get_aprend()
+            if aprend:
+                resumo = await aprend.resumo_para_ia(_bot_alvo)
+                if resumo:
+                    await message.channel.send(resumo)
+                else:
+                    await message.channel.send(f"Ainda não aprendi nada específico sobre {_bot_alvo}, mano.")
+            else:
+                await message.channel.send("Banco offline.")
+        return True
 
     # ── silenciar @user [minutos] ──────────────────────────────────────────────
     if cmd in ("silenciar", "mute", "mutar", "calar"):
@@ -5905,17 +6063,60 @@ async def processar_ordem(message: discord.Message) -> bool:
             await asyncio.sleep(0.4)
             await message.channel.send(_cmd_ext)
             log.info(f"[CMD_EXT] Acionado por ordem de {autor}: {_cmd_ext}")
+            # Aprender: associar o comando enviado ao bot que responder depois
+            if APREND_DISPONIVEL:
+                aprend = get_aprend()
+                if aprend and _cmd_ext:
+                    _pref_ext = _cmd_ext[0] if _cmd_ext and not _cmd_ext[0].isalpha() else None
+                    _cmd_ext_nome = _cmd_ext.lstrip("!/+.$?-").split()[0] if _cmd_ext else ""
+                    asyncio.ensure_future(aprend.registrar_execucao_interna(
+                        canal_id=message.channel.id,
+                        canal_nome=getattr(message.channel, "name", "dm"),
+                        autor_id=message.author.id,
+                        autor_nome=autor,
+                        nivel_hierarq="dono",
+                        comando_raw=conteudo[:300],
+                        comando_parsed=f"cmd_ext:{_cmd_ext_nome}",
+                        resultado="enviado",
+                        detalhe=_cmd_ext,
+                    ))
         else:
-            # Sem prefixo explícito: pede à IA para determinar o comando exato
-            # Ex: "use o clear da loritta" → IA sabe que loritta usa "!clear"
-            _cmd_ia = await _ia_curta(
-                f"O usuário pediu: '{conteudo}'. "
-                "Responda APENAS com o comando completo que deve ser enviado no Discord "
-                "(ex: !clear, /ban @user, +clear 100). "
-                "Se não souber o prefixo exato do bot mencionado, use '!'. "
-                "Sem explicação, sem texto extra — só o comando.",
-                max_tokens=20,
-            )
+            # Sem prefixo explícito: primeiro consulta banco de aprendizado, depois IA
+            # Ex: "use o clear da loritta" → banco sabe que loritta usa "!clear" (aprendido antes)
+            _cmd_ia = None
+            if APREND_DISPONIVEL:
+                _aprend_inst = get_aprend()
+                if _aprend_inst:
+                    # Extrai nome do bot da mensagem para buscar no banco
+                    _m_bot_nome = re.search(
+                        r'␈(?:d[ao]|para\s+o?)\s+([a-zA-Z][a-zA-Z0-9_-]{1,20})␈',
+                        conteudo, re.IGNORECASE
+                    )
+                    if _m_bot_nome:
+                        _bot_busca = _m_bot_nome.group(1).lower()
+                        _info_banco = await _aprend_inst.consultar_bot(_bot_busca)
+                        if _info_banco and _info_banco.get("comandos"):
+                            # Tem dados no banco: tenta resolver via IA com contexto do banco
+                            _resumo_banco = await _aprend_inst.resumo_para_ia(_bot_busca)
+                            _cmd_ia = await _ia_curta(
+                                f"O usuário pediu: '{conteudo}'. "
+                                f"Dados do bot no servidor (aprendidos): {_resumo_banco}. "
+                                "Responda APENAS com o comando completo (ex: $im, !clear, /ban @user). "
+                                "Use os dados acima — são mais precisos que suposições. "
+                                "Sem explicação, só o comando.",
+                                max_tokens=20,
+                            )
+                            log.info(f"[APREND] Banco consultado para '{_bot_busca}': {_resumo_banco[:60]}")
+            if not _cmd_ia:
+                # Fallback para IA pura (sem dados do banco)
+                _cmd_ia = await _ia_curta(
+                    f"O usuário pediu: '{conteudo}'. "
+                    "Responda APENAS com o comando completo que deve ser enviado no Discord "
+                    "(ex: !clear, /ban @user, +clear 100). "
+                    "Se não souber o prefixo exato do bot mencionado, use '!'. "
+                    "Sem explicação, sem texto extra — só o comando.",
+                    max_tokens=20,
+                )
             if _cmd_ia and re.match(r'[!\/+\.]\w', _cmd_ia.strip()):
                 _cmd_limpo = _cmd_ia.strip()
                 _c_conf2 = await _ia_curta(f"Confirmar brevemente que vou usar {_cmd_limpo}.", max_tokens=12)
@@ -8341,9 +8542,43 @@ _CATALOGO_BOTS: dict[str, dict] = {
 _PREFIXOS_COMUNS = ["7!", "pls", "p!", "w!", "h!", "j!", "t!", "+", "!", "?", ".", "$", "-"]
 
 # ── Sistema de aprendizado de bots ────────────────────────────────────────────
-# Aprende qualquer bot do servidor por observação passiva de mensagens humanas.
+# Cache em memória (rápido); persistido no PostgreSQL via aprendizado_comandos.py entre reinícios.
 # Estrutura: {nome_bot_lower: {"prefixo": str, "slash": bool, "comandos": set, "slash_cmds": set, "usos": int}}
 _bots_aprendidos: dict[str, dict] = {}
+
+async def _sincronizar_cache_aprendizado() -> None:
+    """Popula _bots_aprendidos com dados do banco no startup para continuidade entre reinícios."""
+    aprend = get_aprend() if APREND_DISPONIVEL else None
+    if not aprend or not aprend._pool:
+        return
+    try:
+        async with aprend._pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT bot_nome, prefixo, eh_slash, array_agg(comando) as cmds
+                FROM comandos_bots
+                GROUP BY bot_nome, prefixo, eh_slash
+                ORDER BY SUM(usos) DESC
+            """)
+        for r in rows:
+            nome = r["bot_nome"]
+            if nome not in _bots_aprendidos:
+                _bots_aprendidos[nome] = {
+                    "prefixo": r["prefixo"] or "!",
+                    "slash": r["eh_slash"],
+                    "comandos": set(),
+                    "slash_cmds": set(),
+                    "usos": 0,
+                }
+            ent = _bots_aprendidos[nome]
+            for cmd in (r["cmds"] or []):
+                if cmd:
+                    if r["eh_slash"]:
+                        ent["slash_cmds"].add(cmd)
+                    else:
+                        ent["comandos"].add(cmd)
+        log.info(f"[APREND] Cache sincronizado: {len(_bots_aprendidos)} bots carregados do banco.")
+    except Exception as e:
+        log.debug(f"[APREND] Falha ao sincronizar cache: {e}")
 
 # Regex para detectar uso de comando de prefixo por humano: "7!rank", "!daily", "+ban @x"
 _RE_CMD_PREFIXO_HUMANO = re.compile(
@@ -8356,8 +8591,8 @@ _RE_SLASH_HUMANO = re.compile(
     re.IGNORECASE
 )
 
-def _registrar_cmd_bot(nome_bot: str, prefixo: str | None, cmd: str, eh_slash: bool = False) -> None:
-    """Registra um comando observado para um bot. Atualiza memória de aprendizado."""
+def _registrar_cmd_bot(nome_bot: str, prefixo: str | None, cmd: str, eh_slash: bool = False, funcionou: bool | None = None) -> None:
+    """Registra um comando observado para um bot. Atualiza memória em cache e persiste no banco PostgreSQL."""
     chave = nome_bot.lower().strip()
     if chave not in _bots_aprendidos:
         _bots_aprendidos[chave] = {
@@ -8377,6 +8612,13 @@ def _registrar_cmd_bot(nome_bot: str, prefixo: str | None, cmd: str, eh_slash: b
         else:
             entrada["comandos"].add(cmd.lower())
     entrada["usos"] = entrada.get("usos", 0) + 1
+    # Persistir no banco PostgreSQL (fire-and-forget — não bloqueia o bot)
+    if APREND_DISPONIVEL:
+        aprend = get_aprend()
+        if aprend:
+            asyncio.ensure_future(
+                aprend.registrar_cmd_bot(nome_bot, prefixo, cmd, eh_slash=eh_slash, funcionou=funcionou)
+            )
 
 def _info_bot_aprendido(nome_bot: str) -> dict:
     """
@@ -8407,7 +8649,8 @@ def _info_bot_aprendido(nome_bot: str) -> dict:
     return base
 
 def _bot_info_resumo(nome_bot: str) -> str:
-    """Resumo legível do perfil do bot para injetar no prompt da IA."""
+    """Resumo legível do perfil do bot para injetar no prompt da IA.
+    Cruza dados do catálogo, cache em memória e banco PostgreSQL."""
     info = _info_bot_aprendido(nome_bot)
     prefixo = info.get("prefixo", "!")
     slash = info.get("slash", False)
@@ -8422,6 +8665,17 @@ def _bot_info_resumo(nome_bot: str) -> str:
     elif not slash_cmds:
         partes.append(f"Prefixo provável: '{prefixo}' (ainda aprendendo comandos)")
     return " | ".join(partes)
+
+async def _bot_info_resumo_completo(nome_bot: str) -> str:
+    """Versão async que cruza catálogo + cache + banco. Usar quando precisar do resumo mais rico."""
+    base = _bot_info_resumo(nome_bot)
+    if APREND_DISPONIVEL:
+        aprend = get_aprend()
+        if aprend:
+            resumo_banco = await aprend.resumo_para_ia(nome_bot)
+            if resumo_banco and resumo_banco != base:
+                return resumo_banco  # banco tem dados mais frescos e frequentes
+    return base
 
 def _resolver_prefixo_bot(nome_bot: str, guild: "discord.Guild | None" = None) -> str:
     """Resolve o prefixo de um bot usando catálogo + aprendizado dinâmico."""
@@ -8444,8 +8698,9 @@ def _aprender_prefixo_bot(nome_bot: str, mensagem: str) -> None:
 
 def _descobrir_bots_guild(guild: "discord.Guild | None") -> list[dict]:
     """
-    Descobre bots presentes no servidor e cruza com catálogo + aprendizado.
+    Descobre bots presentes no servidor e cruza com catálogo + cache + banco PostgreSQL.
     Retorna lista de {nome, id, prefixo, slash, comandos, slash_cmds}.
+    O banco tem prioridade pois reflete o uso real observado no servidor.
     """
     if not guild:
         return []
@@ -10204,6 +10459,20 @@ async def on_ready():
         else:
             log.warning("[WEBHOOK] GITHUB_WEBHOOK_SECRET não definida  -  webhook desativado.")
 
+    # ── Aprendizado de comandos (PostgreSQL) ────────────────────────────────────
+    if APREND_DISPONIVEL:
+        db_url_aprend = os.environ.get("DATABASE_URL", "")
+        if db_url_aprend:
+            try:
+                ok_aprend = await inicializar_aprendizado(db_url_aprend)
+                if ok_aprend:
+                    # Sincroniza cache em memória com dados do banco (continuidade entre reinícios)
+                    await _sincronizar_cache_aprendizado()
+            except Exception as e_aprend:
+                log.warning(f"[APREND] Falha na inicialização: {e_aprend}")
+        else:
+            log.warning("[APREND] DATABASE_URL não definida — aprendizado desativado.")
+
     # Task de sumarização diária da memória
     if MEMORIA_OK:
         asyncio.ensure_future(_task_sumarizacao_diaria())
@@ -11278,10 +11547,11 @@ async def _on_message_impl(message: discord.Message):
         if not _deve_interagir_bot:
             return  # bot sem contexto relevante — ignora
 
-        # ── Monta perfil completo do bot para a IA ────────────────────────────
+        # ── Monta perfil completo do bot para a IA (cruza catálogo + cache + banco) ────
         _is_webhook = getattr(message, 'webhook_id', None) is not None
         _nome_bot_display = message.author.display_name
-        _perfil_bot = _bot_info_resumo(_nome_bot_display)
+        # Usa versão com banco quando disponível — dados mais ricos e frequências reais
+        _perfil_bot = await _bot_info_resumo_completo(_nome_bot_display)
         _info_bot_completa = _perfil_bot
 
         # Contexto recente do canal
@@ -11354,6 +11624,32 @@ async def _on_message_impl(message: discord.Message):
         if _resposta_bot and _resposta_bot.strip().upper() != "IGNORAR" and len(_resposta_bot.strip()) > 1:
             log.info(f"[BOT_AUTO] {_nome_bot_display} → Shell age: {_resposta_bot[:80]!r}")
             await _reagir_ou_responder(message, _resposta_bot)
+            # O bot respondeu → o último comando registrado para ele funcionou
+            # Marca funcionou=True retroativamente no banco para reforçar o aprendizado
+            if APREND_DISPONIVEL and _txt_relevante:
+                _aprend_conf = get_aprend()
+                if _aprend_conf:
+                    # Extrai o último comando observado para este bot (contexto do canal)
+                    for _ent_rev in reversed(_mem_canal_list[-15:]):
+                        _cnt_rev = _ent_rev.get("conteudo", "")
+                        if _cnt_rev.startswith("COMANDO_HUMANO_PREFIXO:"):
+                            _parts_rev = _cnt_rev.split("|")
+                            _pref_rev = _parts_rev[0].replace("COMANDO_HUMANO_PREFIXO:", "").strip()
+                            _cmd_rev = _parts_rev[1].replace("CMD:", "").strip() if len(_parts_rev) > 1 else ""
+                            if _cmd_rev:
+                                asyncio.ensure_future(_aprend_conf.registrar_cmd_bot(
+                                    _nome_bot_display, _pref_rev, _cmd_rev,
+                                    eh_slash=False, funcionou=True,
+                                ))
+                            break
+                        elif _cnt_rev.startswith("COMANDO_HUMANO_SLASH:/"):
+                            _cmd_rev_s = _cnt_rev.replace("COMANDO_HUMANO_SLASH:/", "").strip()
+                            if _cmd_rev_s:
+                                asyncio.ensure_future(_aprend_conf.registrar_cmd_bot(
+                                    _nome_bot_display, None, _cmd_rev_s,
+                                    eh_slash=True, funcionou=True,
+                                ))
+                            break
 
         return  # bots não passam pelo restante do fluxo (moderação etc.)
 
@@ -11384,6 +11680,17 @@ async def _on_message_impl(message: discord.Message):
                 if len(_bots_presentes) == 1:
                     _registrar_cmd_bot(_bots_presentes[0].display_name, _pref_obs, _cmd_obs, eh_slash=False)
                     log.debug(f"[BOT_LEARN] '{_bots_presentes[0].display_name}' → prefixo '{_pref_obs}' cmd '{_cmd_obs}'")
+                    # Aprender padrão: guarda que este prefixo+cmd pertence a este bot
+                    if APREND_DISPONIVEL:
+                        aprend = get_aprend()
+                        if aprend:
+                            asyncio.ensure_future(aprend.registrar_padrao(
+                                gatilho=f"{_pref_obs}{_cmd_obs}",
+                                comando=_cmd_obs,
+                                bot_nome=_bots_presentes[0].display_name,
+                                prefixo=_pref_obs,
+                                confianca=0.85,
+                            ))
             elif _m_slash:
                 _cmd_slash_obs = _m_slash.group(1).lower()
                 canal_memoria[message.channel.id].append({
@@ -11394,6 +11701,16 @@ async def _on_message_impl(message: discord.Message):
                 if len(_bots_presentes) == 1:
                     _registrar_cmd_bot(_bots_presentes[0].display_name, None, _cmd_slash_obs, eh_slash=True)
                     log.debug(f"[BOT_LEARN] '{_bots_presentes[0].display_name}' → slash '/{_cmd_slash_obs}'")
+                    if APREND_DISPONIVEL:
+                        aprend = get_aprend()
+                        if aprend:
+                            asyncio.ensure_future(aprend.registrar_padrao(
+                                gatilho=f"/{_cmd_slash_obs}",
+                                comando=_cmd_slash_obs,
+                                bot_nome=_bots_presentes[0].display_name,
+                                prefixo=None,
+                                confianca=0.85,
+                            ))
 
     # Ignorar mensagens de outros bots com prefixo (ex: 7!afk, !cmd, /cmd)
     # Só ignora se começar com prefixo e não mencionar este bot
