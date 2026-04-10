@@ -6695,9 +6695,20 @@ async def _ia_parsear_instrucao(conteudo: str, guild: discord.Guild) -> dict | N
             m.display_name for m in guild.members if not m.bot
         )[:400]
         _bots_guild = _descobrir_bots_guild(guild)
-        bots_txt = ", ".join(
-            f"{b['nome']}(prefixo:{b['prefixo']})" for b in _bots_guild
-        )[:300] if _bots_guild else "nenhum bot detectado"
+        # Monta perfil rico de cada bot: prefixo + slash + comandos aprendidos
+        _partes_bots = []
+        for b in _bots_guild:
+            _p = b["prefixo"]
+            _cmds = b.get("comandos", [])[:8]
+            _slcmds = b.get("slash_cmds", [])[:8]
+            _desc = f"{b['nome']}[prefixo:{_p}"
+            if _slcmds:
+                _desc += f"|slash:/{',/'.join(_slcmds)}"
+            if _cmds:
+                _desc += f"|cmds:{_p}{(', '+_p).join(_cmds)}"
+            _desc += "]"
+            _partes_bots.append(_desc)
+        bots_txt = ", ".join(_partes_bots)[:500] if _partes_bots else "nenhum bot detectado"
 
     system = (
         "Você é um parser de intenção para bot Discord. "
@@ -7660,16 +7671,34 @@ async def _ia_executar(intencao: dict, message: discord.Message, guild: discord.
         if not _bot_cmd:
             await canal.send("Qual comando exato devo usar?")
             return True
-        # Resolve prefixo: catálogo → guild → padrão "!"
-        _prefixo = _resolver_prefixo_bot(_bot_nome, guild)
-        # Se já veio com prefixo no campo comando, usa como está
-        if re.match(r'[+!?.$/-]', _bot_cmd) or re.match(r'[a-z]{1,2}!', _bot_cmd):
+
+        # Resolve perfil completo do bot (catálogo + aprendizado)
+        _perfil = _info_bot_aprendido(_bot_nome)
+        _prefixo = _perfil.get("prefixo", "!")
+        _slash_disponivel = _perfil.get("slash", False)
+        _slash_cmds = _perfil.get("slash_cmds", [])
+
+        # Detecta se o comando já vem com prefixo/slash explícito
+        _ja_tem_slash = _bot_cmd.startswith("/")
+        _ja_tem_prefixo = bool(re.match(r'^[+!?.$-]|^[a-z]{1,3}!|^pls\s', _bot_cmd, re.IGNORECASE))
+
+        if _ja_tem_slash or _ja_tem_prefixo:
+            # Usa exatamente como veio
             _cmd_final = f"{_bot_cmd} {_bot_args}".strip()
+        elif _slash_disponivel and _bot_cmd in _slash_cmds:
+            # Prefere slash se o comando está confirmado como slash
+            _cmd_final = f"/{_bot_cmd} {_bot_args}".strip()
         else:
+            # Usa prefixo aprendido/catalogado
             _cmd_final = f"{_prefixo}{_bot_cmd} {_bot_args}".strip()
+
         try:
             await canal.send(_cmd_final)
-            log.info(f"[BOT_CMD] Enviado '{_cmd_final}' (bot={_bot_nome!r})  -  ordem de {autor}")
+            log.info(f"[BOT_CMD] Enviado '{_cmd_final}' (bot={_bot_nome!r}) — por {autor}")
+            # Registra o uso para reforçar o aprendizado
+            _eh_slash_cmd = _cmd_final.startswith("/")
+            _cmd_base = re.sub(r'^[^a-zA-Z]*', '', _cmd_final.split()[0]) if _cmd_final else ""
+            _registrar_cmd_bot(_bot_nome, None if _eh_slash_cmd else _prefixo, _cmd_base, eh_slash=_eh_slash_cmd)
         except Exception as e:
             log.warning(f"[BOT_CMD] Falha ao enviar comando: {e}")
         return True
@@ -8199,74 +8228,164 @@ async def _enviar_em_sequencia(
 # ── Catálogo de bots conhecidos: nome → prefixo, slash e comandos comuns ─────
 # Usado para: resolver prefixo automaticamente, injetar contexto na IA,
 # e sugerir comandos sem que o usuário precise especificar.
+# ── Catálogo base de bots conhecidos ─────────────────────────────────────────
+# Estes são os defaults; o sistema de aprendizado sobrescreve/complementa em runtime.
 _CATALOGO_BOTS: dict[str, dict] = {
-    # Bots de moderação/utilidade
-    "loritta":    {"prefixo": "+",  "slash": True,  "comandos": ["ban", "kick", "mute", "clear", "warn", "avatar", "userinfo", "serverinfo", "play", "skip", "stop"]},
-    "carl-bot":   {"prefixo": "!",  "slash": True,  "comandos": ["ban", "kick", "mute", "purge", "warn", "role", "tag", "embed", "reaction", "automod"]},
-    "mee6":       {"prefixo": "!",  "slash": True,  "comandos": ["ban", "kick", "mute", "clear", "warn", "rank", "leaderboard", "play", "skip", "stop", "queue"]},
-    "dyno":       {"prefixo": "?",  "slash": False, "comandos": ["ban", "kick", "mute", "clean", "warn", "note", "announce", "role"]},
-    "wick":       {"prefixo": "w!",  "slash": True,  "comandos": ["ban", "kick", "mute", "warn", "lockdown", "nuke"]},
-    "hydra":      {"prefixo": "h!",  "slash": True,  "comandos": ["play", "skip", "stop", "queue", "volume", "pause", "resume", "loop", "shuffle", "nowplaying"]},
-    "groovy":     {"prefixo": "-",  "slash": False, "comandos": ["play", "skip", "stop", "queue", "volume", "pause", "resume"]},
-    "rythm":      {"prefixo": "!",  "slash": False, "comandos": ["play", "skip", "stop", "queue", "pause", "resume", "loop"]},
-    "jockiemusic":{"prefixo": "j!",  "slash": True, "comandos": ["play", "skip", "stop", "queue", "volume", "loop", "pause", "resume", "shuffle"]},
-    "vexera":     {"prefixo": ".",  "slash": False, "comandos": ["ban", "kick", "mute", "clean", "warn", "rank"]},
-    "mudae":      {"prefixo": "$",  "slash": False, "comandos": ["w", "wa", "wg", "mm", "dk", "daily", "rolls", "rolls2", "rt"]},
-    "dank memer": {"prefixo": "pls", "slash": True, "comandos": ["beg", "fish", "hunt", "dig", "search", "crime", "rob", "bet", "gamble", "work", "balance", "inventory"]},
-    "nadeko":     {"prefixo": ".",  "slash": False, "comandos": ["ban", "kick", "mute", "clear", "warn", "play", "queue"]},
-    "pokecord":   {"prefixo": "p!", "slash": False, "comandos": ["catch", "pokemon", "trade", "duel", "release", "select", "hint"]},
-    "poketwo":    {"prefixo": "p!", "slash": False, "comandos": ["catch", "pokemon", "trade", "duel", "release", "select", "hint"]},
-    "tatsu":      {"prefixo": "t!",  "slash": True, "comandos": ["rank", "profile", "daily", "gift", "top"]},
-    "unbelievaboat": {"prefixo": "!", "slash": True, "comandos": ["balance", "daily", "work", "crime", "rob", "leaderboard", "pay"]},
-    "ticket tool":{"prefixo": "!",  "slash": True, "comandos": ["new", "close", "add", "remove", "transcript"]},
-    "serverstats":{"prefixo": "!",  "slash": True, "comandos": ["stats", "graph", "info"]},
-    "statbot":    {"prefixo": "!",  "slash": True, "comandos": ["stats", "graph", "info", "top"]},
-    "streamcord": {"prefixo": "!",  "slash": True, "comandos": ["notify", "edit", "remove", "list"]},
-    "burra":      {"prefixo": "+",  "slash": False, "comandos": ["ban", "kick", "mute", "clear", "warn", "userinfo"]},
-    # Bots de economia/RPG genéricos (prefixo ! por padrão)
-    "economy":    {"prefixo": "!",  "slash": False, "comandos": ["balance", "daily", "work", "shop", "buy", "inventory", "pay", "leaderboard", "rank"]},
-    "rpg":        {"prefixo": "!",  "slash": False, "comandos": ["profile", "daily", "hunt", "fish", "craft", "inventory", "duel"]},
-    "mantis":     {"prefixo": "!",  "slash": True,  "comandos": ["balance", "daily", "work", "shop", "rank", "leaderboard"]},
-    "atlas":      {"prefixo": "!",  "slash": True,  "comandos": ["balance", "daily", "rank", "shop", "inventory"]},
-    "sete":       {"prefixo": "7!", "slash": False, "comandos": ["balance", "daily", "rank", "shop", "work", "inventory", "pay", "leaderboard"]},
+    "loritta":       {"prefixo": "+",   "slash": True,  "comandos": ["ban","kick","mute","clear","warn","avatar","userinfo","serverinfo","play","skip","stop"]},
+    "carl-bot":      {"prefixo": "!",   "slash": True,  "comandos": ["ban","kick","mute","purge","warn","role","tag","embed","reaction","automod"]},
+    "mee6":          {"prefixo": "!",   "slash": True,  "comandos": ["ban","kick","mute","clear","warn","rank","leaderboard","play","skip","stop","queue"]},
+    "dyno":          {"prefixo": "?",   "slash": False, "comandos": ["ban","kick","mute","clean","warn","note","announce","role"]},
+    "wick":          {"prefixo": "w!",  "slash": True,  "comandos": ["ban","kick","mute","warn","lockdown","nuke"]},
+    "hydra":         {"prefixo": "h!",  "slash": True,  "comandos": ["play","skip","stop","queue","volume","pause","resume","loop","shuffle","nowplaying"]},
+    "groovy":        {"prefixo": "-",   "slash": False, "comandos": ["play","skip","stop","queue","volume","pause","resume"]},
+    "rythm":         {"prefixo": "!",   "slash": False, "comandos": ["play","skip","stop","queue","pause","resume","loop"]},
+    "jockiemusic":   {"prefixo": "j!",  "slash": True,  "comandos": ["play","skip","stop","queue","volume","loop","pause","resume","shuffle"]},
+    "vexera":        {"prefixo": ".",   "slash": False, "comandos": ["ban","kick","mute","clean","warn","rank"]},
+    "mudae":         {"prefixo": "$",   "slash": False, "comandos": ["w","wa","wg","mm","dk","daily","rolls","rolls2","rt"]},
+    "dank memer":    {"prefixo": "pls", "slash": True,  "comandos": ["beg","fish","hunt","dig","search","crime","rob","bet","gamble","work","balance","inventory"]},
+    "nadeko":        {"prefixo": ".",   "slash": False, "comandos": ["ban","kick","mute","clear","warn","play","queue"]},
+    "pokecord":      {"prefixo": "p!",  "slash": False, "comandos": ["catch","pokemon","trade","duel","release","select","hint"]},
+    "poketwo":       {"prefixo": "p!",  "slash": False, "comandos": ["catch","pokemon","trade","duel","release","select","hint"]},
+    "tatsu":         {"prefixo": "t!",  "slash": True,  "comandos": ["rank","profile","daily","gift","top"]},
+    "unbelievaboat": {"prefixo": "!",   "slash": True,  "comandos": ["balance","daily","work","crime","rob","leaderboard","pay"]},
+    "ticket tool":   {"prefixo": "!",   "slash": True,  "comandos": ["new","close","add","remove","transcript"]},
+    "serverstats":   {"prefixo": "!",   "slash": True,  "comandos": ["stats","graph","info"]},
+    "statbot":       {"prefixo": "!",   "slash": True,  "comandos": ["stats","graph","info","top"]},
+    "streamcord":    {"prefixo": "!",   "slash": True,  "comandos": ["notify","edit","remove","list"]},
+    "burra":         {"prefixo": "+",   "slash": False, "comandos": ["ban","kick","mute","clear","warn","userinfo"]},
+    "economy":       {"prefixo": "!",   "slash": False, "comandos": ["balance","daily","work","shop","buy","inventory","pay","leaderboard","rank"]},
+    "rpg":           {"prefixo": "!",   "slash": False, "comandos": ["profile","daily","hunt","fish","craft","inventory","duel"]},
+    "mantis":        {"prefixo": "!",   "slash": True,  "comandos": ["balance","daily","work","shop","rank","leaderboard"]},
+    "atlas":         {"prefixo": "!",   "slash": True,  "comandos": ["balance","daily","rank","shop","inventory"]},
+    "sete":          {"prefixo": "7!",  "slash": False, "comandos": ["balance","daily","rank","shop","work","inventory","pay","leaderboard"]},
 }
 
-# Prefixos comuns em bots personalizados para auto-descoberta
-_PREFIXOS_COMUNS = ["!", "7!", "+", ".", "$", "?", "-", "p!", "w!", "h!", "j!", "t!", "pls"]
+# Prefixos comuns para detecção automática (ordem: mais específicos primeiro)
+_PREFIXOS_COMUNS = ["7!", "pls", "p!", "w!", "h!", "j!", "t!", "+", "!", "?", ".", "$", "-"]
 
-# Cache de prefixos descobertos dinamicamente por nome de bot
-_prefixos_descobertos: dict[str, str] = {}
+# ── Sistema de aprendizado de bots ────────────────────────────────────────────
+# Aprende qualquer bot do servidor por observação passiva de mensagens humanas.
+# Estrutura: {nome_bot_lower: {"prefixo": str, "slash": bool, "comandos": set, "slash_cmds": set, "usos": int}}
+_bots_aprendidos: dict[str, dict] = {}
 
-def _resolver_prefixo_bot(nome_bot: str, guild: "discord.Guild | None" = None) -> str:
+# Regex para detectar uso de comando de prefixo por humano: "7!rank", "!daily", "+ban @x"
+_RE_CMD_PREFIXO_HUMANO = re.compile(
+    r'^\s*([0-9a-zA-Z]{0,3}[!+.$?-]|pls\s)([a-zA-Z][a-zA-Z0-9_-]{0,30})(?:\s|$)',
+    re.IGNORECASE
+)
+# Regex para detectar uso de slash command por humano: "/rank", "/daily usuario"
+_RE_SLASH_HUMANO = re.compile(
+    r'^/([a-zA-Z][a-zA-Z0-9_-]{1,30})(?:\s|$)',
+    re.IGNORECASE
+)
+
+def _registrar_cmd_bot(nome_bot: str, prefixo: str | None, cmd: str, eh_slash: bool = False) -> None:
+    """Registra um comando observado para um bot. Atualiza memória de aprendizado."""
+    chave = nome_bot.lower().strip()
+    if chave not in _bots_aprendidos:
+        _bots_aprendidos[chave] = {
+            "prefixo": prefixo or "!",
+            "slash": eh_slash,
+            "comandos": set(),
+            "slash_cmds": set(),
+            "usos": 0,
+        }
+    entrada = _bots_aprendidos[chave]
+    if prefixo and not eh_slash:
+        entrada["prefixo"] = prefixo  # atualiza com o mais recente observado
+    if cmd:
+        if eh_slash:
+            entrada["slash_cmds"].add(cmd.lower())
+            entrada["slash"] = True
+        else:
+            entrada["comandos"].add(cmd.lower())
+    entrada["usos"] = entrada.get("usos", 0) + 1
+
+def _info_bot_aprendido(nome_bot: str) -> dict:
     """
-    Resolve o prefixo de um bot pelo nome.
-    Prioridade: catálogo estático → cache dinâmico → padrão "!".
+    Retorna o perfil completo de um bot mesclando catálogo + aprendizado dinâmico.
+    Aprendizado tem prioridade sobre catálogo para prefixo e comandos.
     """
     nome_l = nome_bot.lower().strip()
-    # Busca direta no catálogo
+    # Base do catálogo
+    base: dict = {"prefixo": "!", "slash": False, "comandos": [], "slash_cmds": []}
     for chave, dados in _CATALOGO_BOTS.items():
-        if chave in nome_l or nome_l in chave:
-            return dados["prefixo"]
-    # Cache dinâmico (aprendido ao observar comandos no canal)
-    if nome_l in _prefixos_descobertos:
-        return _prefixos_descobertos[nome_l]
-    return "!"
+        if chave in nome_l or nome_l.startswith(chave[:5]):
+            base = dict(dados)
+            base.setdefault("slash_cmds", [])
+            break
+    # Merge com aprendizado dinâmico
+    aprendido = _bots_aprendidos.get(nome_l, {})
+    if aprendido:
+        if aprendido.get("prefixo"):
+            base["prefixo"] = aprendido["prefixo"]
+        if aprendido.get("slash"):
+            base["slash"] = True
+        cmds_base = set(base.get("comandos", []))
+        cmds_base.update(aprendido.get("comandos", set()))
+        base["comandos"] = sorted(cmds_base)
+        slash_base = set(base.get("slash_cmds", []))
+        slash_base.update(aprendido.get("slash_cmds", set()))
+        base["slash_cmds"] = sorted(slash_base)
+    return base
+
+def _bot_info_resumo(nome_bot: str) -> str:
+    """Resumo legível do perfil do bot para injetar no prompt da IA."""
+    info = _info_bot_aprendido(nome_bot)
+    prefixo = info.get("prefixo", "!")
+    slash = info.get("slash", False)
+    cmds = info.get("comandos", [])[:15]
+    slash_cmds = info.get("slash_cmds", [])[:15]
+
+    partes = [f"Bot: {nome_bot}"]
+    if slash and slash_cmds:
+        partes.append(f"Slash: /{', /'.join(slash_cmds)}")
+    if cmds:
+        partes.append(f"Prefixo '{prefixo}': {prefixo}{(', '+prefixo).join(cmds)}")
+    elif not slash_cmds:
+        partes.append(f"Prefixo provável: '{prefixo}' (ainda aprendendo comandos)")
+    return " | ".join(partes)
+
+def _resolver_prefixo_bot(nome_bot: str, guild: "discord.Guild | None" = None) -> str:
+    """Resolve o prefixo de um bot usando catálogo + aprendizado dinâmico."""
+    return _info_bot_aprendido(nome_bot).get("prefixo", "!")
 
 
 def _aprender_prefixo_bot(nome_bot: str, mensagem: str) -> None:
     """
     Tenta inferir o prefixo de um bot observando mensagens de comando no canal.
-    Se alguém digita '7!rank' e o bot responde, aprende que o prefixo é '7!'.
+    Chamado quando humano envia comando; associa prefixo ao bot que respondeu.
     """
     nome_l = nome_bot.lower().strip()
-    if nome_l in _prefixos_descobertos:
-        return
-    # Detecta padrão de prefixo na mensagem (ex: "7!rank → prefixo 7!")
     for pref in sorted(_PREFIXOS_COMUNS, key=len, reverse=True):
         if mensagem.strip().startswith(pref) and len(mensagem.strip()) > len(pref):
-            _prefixos_descobertos[nome_l] = pref
-            log.info(f"[BOT_AUTO] Prefixo '{pref}' descoberto para bot '{nome_bot}'")
+            cmd_part = mensagem.strip()[len(pref):].split()[0] if mensagem.strip()[len(pref):].split() else ""
+            _registrar_cmd_bot(nome_bot, pref, cmd_part, eh_slash=False)
+            log.debug(f"[BOT_LEARN] '{nome_bot}' → prefixo '{pref}', cmd '{cmd_part}' aprendido")
             return
+
+
+def _descobrir_bots_guild(guild: "discord.Guild | None") -> list[dict]:
+    """
+    Descobre bots presentes no servidor e cruza com catálogo + aprendizado.
+    Retorna lista de {nome, id, prefixo, slash, comandos, slash_cmds}.
+    """
+    if not guild:
+        return []
+    resultado = []
+    for membro in guild.members:
+        if not membro.bot or membro == client.user:
+            continue
+        info = _info_bot_aprendido(membro.display_name)
+        resultado.append({
+            "nome": membro.display_name,
+            "id": membro.id,
+            "prefixo": info.get("prefixo", "!"),
+            "slash": info.get("slash", False),
+            "comandos": info.get("comandos", []),
+            "slash_cmds": info.get("slash_cmds", []),
+        })
+    return resultado
 
 def _descobrir_bots_guild(guild: "discord.Guild | None") -> list[dict]:
     """
@@ -8295,29 +8414,13 @@ def _descobrir_bots_guild(guild: "discord.Guild | None") -> list[dict]:
     return resultado
 
 
-# ── Regex para detectar comandos de outros bots embutidos na resposta da IA ──
-# Detecta todos os prefixos comuns: +cmd, !cmd, /cmd, ?cmd, .cmd, -cmd, $cmd, p!cmd
-# Não confunde com URLs (http://) nem markdown (*negrito*, _itálico_).
-_CMD_EXTERNO_RE = re.compile(
-    r'(?<![\w/])([+!?.$-][a-z][a-z0-9_-]*(?:\s+[\w@#<>.,!?-]{0,40})?)(?=[\s\n,.]|$)',
-    re.IGNORECASE
-)
-# Padrões com prefixo de duas letras: p!, w!, h!, j!, t!
-_CMD_EXTERNO_RE2 = re.compile(
-    r'(?<![\w/])([a-z]{1,2}![a-z][a-z0-9_-]*(?:\s+[\w@#<>.,!?-]{0,40})?)(?=[\s\n,.]|$)',
-    re.IGNORECASE
-)
-
 def _separar_comandos_externos(texto: str) -> tuple[str, list[str]]:
     """
     Separa comandos de bots externos do texto conversacional.
-    Detecta todos os prefixos comuns: +, !, ?, ., $, -, /  e prefixos duplos (p!, w!, h!).
-
-    Exemplo de entrada : "Vou tentar novamente. +clear 300."
-    Exemplo de saída   : ("Vou tentar novamente.", ["+clear 300"])
-
-    Comandos de bots externos precisam ser enviados como mensagem ISOLADA —
-    dentro de uma frase o Discord não os reconhece como comando.
+    Reconhece:
+      - Prefixos comuns: +, !, ?, ., $, -, e compostos (p!, w!, h!, 7!, pls)
+      - Slash commands: /comando args
+    Comandos precisam ser enviados como mensagem ISOLADA para o Discord reconhecer.
     """
     comandos: list[str] = []
     _vistos: set[str] = set()
@@ -8329,9 +8432,26 @@ def _separar_comandos_externos(texto: str) -> tuple[str, list[str]]:
             comandos.append(cmd)
         return ''
 
-    texto_limpo = _CMD_EXTERNO_RE.sub(_capturar, texto)
-    texto_limpo = _CMD_EXTERNO_RE2.sub(_capturar, texto_limpo)
-    # Remove espaços duplos e pontuação solta apenas se algum comando foi extraído
+    # Prefixos compostos primeiro (ex: pls, 7!, p!)
+    _CMD_PREFIXO_COMPOSTO = re.compile(
+        r'(?<!\w)((?:pls\s|[0-9a-z]{1,3}!)[a-z][a-z0-9_-]*(?:\s+[\w@#<>.,!?-]{0,60})?)(?=[\s\n,.]|$)',
+        re.IGNORECASE
+    )
+    # Prefixos simples: !, +, ?, ., $, -
+    _CMD_PREFIXO_SIMPLES = re.compile(
+        r'(?<![\w/])([+!?.$-][a-z][a-z0-9_-]*(?:\s+[\w@#<>.,!?-]{0,60})?)(?=[\s\n,.]|$)',
+        re.IGNORECASE
+    )
+    # Slash commands: /comando [args]
+    _CMD_SLASH = re.compile(
+        r'(?<!\w)(/[a-z][a-z0-9_-]*(?:\s+[\w@#<>.,!?-]{0,60})?)(?=[\s\n,.]|$)',
+        re.IGNORECASE
+    )
+
+    texto_limpo = _CMD_PREFIXO_COMPOSTO.sub(_capturar, texto)
+    texto_limpo = _CMD_PREFIXO_SIMPLES.sub(_capturar, texto_limpo)
+    texto_limpo = _CMD_SLASH.sub(_capturar, texto_limpo)
+
     texto_limpo = re.sub(r'\s{2,}', ' ', texto_limpo).strip()
     if comandos:
         texto_limpo = texto_limpo.strip('.,; ')
@@ -10667,23 +10787,110 @@ async def _on_message_impl(message: discord.Message):
             for e in _mem_canal[-8:]
         )
 
-        # Resolve prefixo do bot (catálogo + cache dinâmico)
+        # ── Aprende comandos a partir da resposta do bot ─────────────────────
+        # Retroativamente: busca o último CMD_OBS no canal e associa a este bot
+        _mem_canal_list = list(canal_memoria.get(message.channel.id, []))
+        _agora_ts = agora_utc()
+        for _ent_obs in reversed(_mem_canal_list[-20:]):
+            _ts_ent = _ent_obs.get("ts", "")
+            try:
+                _dt_ent = datetime.fromisoformat(_ts_ent)
+                if (_agora_ts - _dt_ent).total_seconds() > 30:
+                    break
+            except Exception:
+                pass
+            _cnt_ent = _ent_obs.get("conteudo", "")
+            if _cnt_ent.startswith("COMANDO_HUMANO_PREFIXO:"):
+                # Ex: "COMANDO_HUMANO_PREFIXO:7!|CMD:rank"
+                _partes = _cnt_ent.split("|")
+                _pref_ent = _partes[0].replace("COMANDO_HUMANO_PREFIXO:", "").strip()
+                _cmd_ent  = _partes[1].replace("CMD:", "").strip() if len(_partes) > 1 else ""
+                _registrar_cmd_bot(message.author.display_name, _pref_ent, _cmd_ent, eh_slash=False)
+                log.debug(f"[BOT_LEARN] '{message.author.display_name}' ← prefixo '{_pref_ent}' cmd '{_cmd_ent}' associado pela resposta")
+                break
+            elif _cnt_ent.startswith("COMANDO_HUMANO_SLASH:"):
+                _cmd_slash_ent = _cnt_ent.replace("COMANDO_HUMANO_SLASH:/", "").strip()
+                _registrar_cmd_bot(message.author.display_name, None, _cmd_slash_ent, eh_slash=True)
+                log.debug(f"[BOT_LEARN] '{message.author.display_name}' ← slash '/{_cmd_slash_ent}' associado pela resposta")
+                break
+
+        # Verifica se Shell enviou algum comando recente para esse bot (últimos 45s)
+        _cmd_recente_shell = False
+        for _entrada in reversed(_mem_canal_list[-15:]):
+            _ts_entrada = _entrada.get("ts", "")
+            try:
+                _dt_entrada = datetime.fromisoformat(_ts_entrada)
+                if (_agora_ts - _dt_entrada).total_seconds() > 45:
+                    break
+            except Exception:
+                pass
+            _aut = _entrada.get("autor", "")
+            if _aut == (client.user.display_name if client.user else "Shell"):
+                _cmd_recente_shell = True
+                break
+
+        # Bot reconhecido no catálogo ou já aprendido?
+        _bot_nome_lower = message.author.display_name.lower()
+        _bot_no_catalogo = (
+            any(chave in _bot_nome_lower or _bot_nome_lower.startswith(chave[:4]) for chave in _CATALOGO_BOTS)
+            or _bot_nome_lower in _bots_aprendidos
+        )
+
+        # Verifica se há conversa ativa de proprietário/colaborador no canal
+        _conversa_autorizada_ativa = False
+        for _uid_conv in list(conversas_groq.keys()) + list(conversas.keys()):
+            _estado_c = conversas_groq.get(_uid_conv) or conversas.get(_uid_conv)
+            if isinstance(_estado_c, dict) and _estado_c.get("canal") == message.channel.id:
+                _membro_conv = message.guild.get_member(_uid_conv) if message.guild else None
+                if _membro_conv and (_membro_conv.id in DONOS_IDS or eh_superior(_membro_conv)):
+                    _conversa_autorizada_ativa = True
+                    break
+
+        _deve_interagir_bot = (
+            _bot_mencionou_shell
+            or _cmd_recente_shell
+            or (_bot_no_catalogo and _conversa_autorizada_ativa and bool(_txt_relevante))
+        )
+
+        if not _deve_interagir_bot:
+            return  # bot sem contexto relevante — ignora
+
+        # ── Monta perfil completo do bot para a IA ────────────────────────────
+        _nome_bot_display = message.author.display_name
+        _perfil_bot = _bot_info_resumo(_nome_bot_display)
+        _info_bot_completa = _perfil_bot
+
+        # Contexto recente do canal
+        _mem_recente = "\n".join(
+            f"{e.get('autor','?')}: {e.get('conteudo','')}"
+            for e in _mem_canal_list[-10:]
+            if not e.get("conteudo","").startswith(("COMANDO_HUMANO_", "[CMD_OBS"))
+        )
+
+        _conteudo_para_ia = _txt_relevante or "[embed sem texto visível]"
+
+        # Resolve prefixo atualizado
         _prefixo_resolvido = _resolver_prefixo_bot(_nome_bot_display, message.guild)
+        _slash_ok = _info_bot_aprendido(_nome_bot_display).get("slash", False)
+        _slash_cmds_aprendidos = _info_bot_aprendido(_nome_bot_display).get("slash_cmds", [])
 
         _prompt_bot = (
             f"Você é Shell, assistente do servidor Discord. "
-            f"O bot '{_nome_bot_display}' acabou de responder: \"{_conteudo_para_ia}\"\n"
-            f"{('Informações do bot: ' + _info_catalogo) if _info_catalogo else f'Prefixo provável: {_prefixo_resolvido}'}\n"
+            f"O bot '{_nome_bot_display}' acabou de responder:\n\"{_conteudo_para_ia}\"\n\n"
+            f"Perfil do bot (atualizado por observação): {_info_bot_completa}\n"
             f"Contexto recente do canal:\n{_mem_recente}\n\n"
-            f"Com base na resposta do bot e no contexto, decida a próxima ação:\n"
-            f"- Se o bot está aguardando um input/argumento que você sabe → envie o próximo comando EXATO (ex: '{_prefixo_resolvido}rank', '{_prefixo_resolvido}balance', etc.)\n"
-            f"- Se o bot confirmou uma ação com sucesso → reaja de forma natural e brevíssima (máx 5 palavras)\n"
-            f"- Se o bot deu erro de permissão ou sintaxe → tente corrigir o comando ou informe em 1 frase\n"
-            f"- Se o bot mostrou resultado (rank, saldo, inventário) → comente com 1 frase no estilo Shell carioca\n"
-            f"- Em qualquer outro caso → responda APENAS com: IGNORAR\n\n"
-            f"REGRAS ABSOLUTAS:\n"
-            f"1. Se for enviar comando, escreva APENAS o comando sem mais nada (ex: '{_prefixo_resolvido}daily')\n"
-            f"2. Não invente comandos — só use os do catálogo ou contexto\n"
+            f"Decida a próxima ação com base na resposta do bot e no contexto:\n"
+            f"• Se o bot aguarda um argumento/input → envie o comando CORRETO e COMPLETO\n"
+            f"• Se o bot confirmou sucesso → reaja brevíssimo (≤5 palavras), estilo Shell carioca\n"
+            f"• Se o bot deu erro de sintaxe → corrija e reenvie o comando certo\n"
+            f"• Se o bot mostrou resultado (rank, saldo, inventário) → comente em 1 frase leve\n"
+            f"• Qualquer outro caso → responda SOMENTE: IGNORAR\n\n"
+            f"FORMATO DE COMANDO:\n"
+            f"  - Prefixo: '{_prefixo_resolvido}<comando> [args]' (ex: '{_prefixo_resolvido}daily')\n"
+            + (f"  - Slash: '/<comando> [args]' (ex: '/{_slash_cmds_aprendidos[0]}') — use se o prefixo falhar\n" if _slash_ok and _slash_cmds_aprendidos else "")
+            + f"\nREGRAS:\n"
+            f"1. Se for comando, escreva APENAS o comando sem mais texto\n"
+            f"2. Não invente comandos que não estão no perfil do bot\n"
             f"3. Na dúvida: IGNORAR"
         )
 
@@ -10699,23 +10906,43 @@ async def _on_message_impl(message: discord.Message):
 
         return  # bots não passam pelo restante do fluxo (moderação etc.)
 
-    # ── Aprendizado de prefixo de bot por observação de comandos humanos ──────
-    # Quando alguém digita um comando de bot (ex: 7!rank), Shell aprende o prefixo
+    # ── Aprendizado passivo de bots: observa comandos de humanos ─────────────
+    # Quando um humano usa um comando de bot (7!rank, /balance, pls hunt),
+    # Shell aprende o padrão e associa ao bot que responder a seguir.
     conteudo_raw = message.content
-    _match_cmd_humano = re.match(r'^\s*([0-9a-zA-Z]{0,3}[!+.$?-])([a-zA-Z]\w*)', conteudo_raw)
-    if _match_cmd_humano and not message.author.bot and message.guild:
-        _pref_aprendido = _match_cmd_humano.group(1)
-        _cmd_aprendido = _match_cmd_humano.group(2).lower()
-        # Identifica qual bot no canal usa esse prefixo
-        for _mb in message.guild.members:
-            if _mb.bot and _mb != client.user:
-                _nm_l = _mb.display_name.lower()
-                if _nm_l not in _prefixos_descobertos:
-                    # Verifica se o bot está no catálogo com prefixo diferente ou desconhecido
-                    _no_cat = any(chave in _nm_l for chave in _CATALOGO_BOTS)
-                    if not _no_cat:
-                        _prefixos_descobertos[_nm_l] = _pref_aprendido
-                        log.debug(f"[BOT_LEARN] Bot '{_mb.display_name}' → prefixo '{_pref_aprendido}' aprendido por observação")
+    if not message.author.bot and message.guild:
+        _txt_raw_stripped = conteudo_raw.strip()
+        _m_pref = _RE_CMD_PREFIXO_HUMANO.match(_txt_raw_stripped)
+        _m_slash = _RE_SLASH_HUMANO.match(_txt_raw_stripped)
+        if _m_pref or _m_slash:
+            # Identifica bots presentes no servidor para associar depois
+            _bots_presentes = [
+                m for m in message.guild.members
+                if m.bot and m != client.user
+            ]
+            if _m_pref:
+                _pref_obs = _m_pref.group(1).rstrip()
+                _cmd_obs  = _m_pref.group(2).lower()
+                # Armazena no contexto do canal: próxima resposta de bot → aprende
+                canal_memoria[message.channel.id].append({
+                    "autor": f"[CMD_OBS:{message.author.display_name}]",
+                    "conteudo": f"COMANDO_HUMANO_PREFIXO:{_pref_obs}|CMD:{_cmd_obs}",
+                    "ts": message.created_at.replace(tzinfo=timezone.utc).isoformat(),
+                })
+                # Se só há um bot no canal, associa diretamente
+                if len(_bots_presentes) == 1:
+                    _registrar_cmd_bot(_bots_presentes[0].display_name, _pref_obs, _cmd_obs, eh_slash=False)
+                    log.debug(f"[BOT_LEARN] '{_bots_presentes[0].display_name}' → prefixo '{_pref_obs}' cmd '{_cmd_obs}'")
+            elif _m_slash:
+                _cmd_slash_obs = _m_slash.group(1).lower()
+                canal_memoria[message.channel.id].append({
+                    "autor": f"[CMD_OBS:{message.author.display_name}]",
+                    "conteudo": f"COMANDO_HUMANO_SLASH:/{_cmd_slash_obs}",
+                    "ts": message.created_at.replace(tzinfo=timezone.utc).isoformat(),
+                })
+                if len(_bots_presentes) == 1:
+                    _registrar_cmd_bot(_bots_presentes[0].display_name, None, _cmd_slash_obs, eh_slash=True)
+                    log.debug(f"[BOT_LEARN] '{_bots_presentes[0].display_name}' → slash '/{_cmd_slash_obs}'")
 
     # Ignorar mensagens de outros bots com prefixo (ex: 7!afk, !cmd, /cmd)
     # Só ignora se começar com prefixo e não mencionar este bot
