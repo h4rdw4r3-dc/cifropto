@@ -5021,6 +5021,23 @@ async def resposta_inicial(conteudo: str, autor: str, user_id: int, guild=None, 
         iniciar_conversa(user_id, "saudacao", canal_id=canal_id)
         return await _ia_curta("Responder saudação casual de forma breve e natural.", contexto=f"quem saudou: {autor}", max_tokens=15)
 
+    # Guard: membro tentando fazer Shell executar comando de bot externo
+    # Membros comuns não têm autoridade para ordenar execução de comandos
+    _RE_MEMBRO_ORDEM_BOT = re.compile(
+        r'\b(?:use?\s+o\s+comando|usa\s+o\s+comando|digita\s+o\s+comando|manda\s+o\s+comando'
+        r'|executa\s+o\s+comando|roda\s+o\s+comando|envia\s+o\s+comando'
+        r'|faça\s+o\s+comando|faz\s+o\s+comando|use?\s+o\s+/[a-z]'
+        r'|digita\s+/[a-z]|manda\s+/[a-z]|tropa\s+da|use?\s+a?\s+tropa)\b',
+        re.IGNORECASE,
+    )
+    if _RE_MEMBRO_ORDEM_BOT.search(conteudo):
+        log.info(f"[MEMBRO] {autor} tentou ordenar execução de bot — bloqueado: {conteudo[:80]!r}")
+        return await _ia_curta(
+            "Membro comum tentou mandar Shell executar um comando de bot. "
+            "Responder com UMA frase seca que isso não é com ele — Shell só obedece o proprietário e colaboradores.",
+            max_tokens=25,
+        )
+
     return await responder_com_groq(conteudo, autor, user_id, guild, canal_id)
 
 
@@ -8627,6 +8644,12 @@ def _resolver_mencoes(texto: str, guild: "discord.Guild | None") -> str:
 
 def _limpar_markdown(texto: str) -> str:
     """Remove formatação markdown do texto para envio como usuário comum."""
+    # ── Remove tokens internos do modelo que vazam na saída ───────────────────
+    # /no_think, /think e similares podem aparecer como primeira linha da resposta
+    texto = re.sub(r'^/no_think\s*\n?', '', texto.strip(), flags=re.IGNORECASE)
+    texto = re.sub(r'^/think\s*\n?', '', texto.strip(), flags=re.IGNORECASE)
+    # [INST], <<SYS>>, <|im_start|> — tokens de template que vazam em alguns modelos
+    texto = re.sub(r'^\s*(?:\[INST\]|<<SYS>>|<\|im_start\|>[^\n]*)\s*\n?', '', texto, flags=re.IGNORECASE | re.MULTILINE)
     # ── Remove bloco de raciocínio <think>...</think> (Qwen3, DeepSeek R1, etc.) ──
     # Caso completo: <think>...</think> — pode haver múltiplos blocos
     texto = re.sub(r"<think>[\s\S]*?</think>", "", texto, flags=re.IGNORECASE)
@@ -13103,6 +13126,18 @@ async def _on_message_impl(message: discord.Message):
             ts_inicio = estado_groq.get("ts_inicio", estado_groq["ultima"])
             duracao_total = agora_utc() - ts_inicio
             if tempo_ocioso <= TIMEOUT_CONVERSA_GROQ and duracao_total <= timedelta(minutes=15):
+                # Guard: ignora mensagens soltas ≤2 palavras que não são perguntas nem menções
+                # (ex: "hum", "ok", "certo") — evita que Shell responda conversa casual passiva
+                _palavras_cont = conteudo.strip().split()
+                _e_solta_trivial = (
+                    len(_palavras_cont) <= 2
+                    and not conteudo.strip().endswith("?")
+                    and client.user not in message.mentions
+                    and not GATILHOS_NOME.search(conteudo)
+                )
+                if _e_solta_trivial:
+                    log.debug(f"[GROQ_CONT] mensagem solta ignorada: {conteudo!r}")
+                    return
                 # Queries factuais respondem direto sem IA
                 if message.guild:
                     resp_direta = await query_servidor_direto(message.guild, message.content, message.author.id)
