@@ -3613,19 +3613,6 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         "Nunca repita a mesma pergunta que já foi respondida. Progrida para o próximo passo.\n"
         "Se o usuário respondeu 'sim' a algo: avance. Se respondeu 'não': encerre esse caminho.\n\n"
 
-        "SUAS PALAVRAS TÊM CONSEQUÊNCIAS — REGRA INVIOLÁVEL:\n"
-        "O contexto do canal mostra o que VOCÊ (Shell) disse nas linhas marcadas 'Shell: ...'.\n"
-        "Se você disse algo antes, é sua responsabilidade: não negue, não finja que não disse.\n"
-        "Se alguém cobrar 'você disse que ia fazer X': verifique o histórico. Se você disse, assuma.\n"
-        "  - Se você prometeu algo e fez: confirme brevemente.\n"
-        "  - Se você prometeu algo e não fez ainda: explique em UMA frase o que aconteceu.\n"
-        "  - Se você disse algo incorreto: corrija sem rodeios.\n"
-        "  - Se você NÃO disse o que estão alegando: discorde com firmeza, sem agressividade.\n"
-        "NUNCA diga 'não me lembro', 'não tenho certeza se disse' quando a fala está no histórico.\n"
-        "NUNCA negue autoria de uma fala que está registrada no contexto.\n"
-        "Quando alguém perguntar 'o que você disse antes?': cite o trecho relevante com precisão.\n"
-        "Você é responsável por cada palavra que saiu de você — isso é parte de quem você é.\n\n"
-
         "APRENDIZADO POR FEEDBACK — REGRAS CRÍTICAS:\n"
         "1. SEU NOME É SHELL — quando alguém usa 'Shell' numa mensagem estão falando COM VOCÊ.\n"
         "   Nunca responda com 'Entendi, Shell.' ou 'Sim, Shell.' — você é o Shell, não o destinatário.\n"
@@ -4367,12 +4354,7 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     mem = list(canal_memoria.get(canal_id or 0, []))
     ctx_canal = ""
     if mem:
-        linhas_ctx = []
-        for m in mem[-5:]:
-            if m["autor"] == "Shell":
-                linhas_ctx.append(f"[VOCÊ disse]: {m['conteudo'][:80]}")
-            else:
-                linhas_ctx.append(f"{m['autor']}: {m['conteudo'][:80]}")
+        linhas_ctx = [f"{m['autor']}: {m['conteudo'][:80]}" for m in mem[-5:]]
         ctx_canal = "\n=== CONVERSA RECENTE DO CANAL ===\n" + "\n".join(linhas_ctx) + "\n"
         # Injeta gírias aprendidas do servidor (max 20) para o modelo absorver o vocabulário
         if _girias_servidor:
@@ -8751,13 +8733,6 @@ async def _safe_send(
                     await reply_msg.reply(chunk)
                 else:
                     await channel.send(chunk)
-                # ── Registra fala do Shell na memória do canal ─────────────────
-                # Permite rastrear o que o bot disse e cobrar consequências
-                canal_memoria[channel.id].append({
-                    "autor": "Shell",
-                    "conteudo": chunk[:300],
-                    "ts": agora_utc().isoformat(),
-                })
                 break
             except discord.HTTPException as e:
                 if e.status == 429:
@@ -9063,34 +9038,66 @@ async def _enviar_em_sequencia(
     reply_msg: discord.Message | None = None,
 ) -> None:
     """
-    Divide respostas longas em 2-3 mensagens curtas com pausa entre elas,
+    Divide respostas longas em partes menores com pausa entre elas,
     simulando o jeito humano de escrever no chat.
-    Respostas curtas (≤1 frase) são enviadas direto.
+
+    Regras de divisão:
+    - ≤ 120 chars ou ≤ 1 frase → envia direto
+    - 121–400 chars → 2 partes, corte no meio das frases
+    - 401–800 chars → 3 partes, cortes em parágrafos/frases
+    - > 800 chars → 4–5 partes, cortes a cada ~200 chars em fronteira de frase
+    Cada parte é enviada com typing + pausa, como humano real.
     """
-    # Não divide respostas curtas
-    if len(texto) <= 120 or texto.count(".") <= 1:
+    texto = texto.strip()
+
+    # Curtas: envia direto
+    if len(texto) <= 120 or texto.count(".") + texto.count("!") + texto.count("?") <= 1:
         await _digitar_e_enviar(channel, texto, reply_msg)
         return
 
-    # Tenta quebrar em frases
-    import re as _re
-    frases = [f.strip() for f in _re.split(r'(?<=[.!?])\s+', texto) if f.strip()]
-    if len(frases) <= 1:
+    # Quebra em frases preservando pontuação
+    _frases = [f.strip() for f in re.split(r'(?<=[.!?])\s+', texto) if f.strip()]
+    if len(_frases) <= 1:
         await _digitar_e_enviar(channel, texto, reply_msg)
         return
 
-    # Agrupa em no máximo 2 blocos, garantindo ≤ _DISCORD_MSG_MAX cada
-    meio = len(frases) // 2
-    blocos = [" ".join(frases[:meio]), " ".join(frases[meio:])]
-    blocos = [b[:_DISCORD_MSG_MAX] for b in blocos if b]
+    # Define quantidade de blocos alvo pelo tamanho total
+    _total = len(texto)
+    if _total <= 400:
+        _n_blocos = 2
+    elif _total <= 800:
+        _n_blocos = 3
+    elif _total <= 1400:
+        _n_blocos = 4
+    else:
+        _n_blocos = 5
 
-    primeiro = True
-    for bloco in blocos:
-        await _digitar_e_enviar(channel, bloco, reply_msg if primeiro else None)
-        primeiro = False
-        if len(blocos) > 1:
-            # Pausa entre mensagens consecutivas — humanos esperam 2-4s antes de continuar
-            await asyncio.sleep(random.uniform(2.0, 4.5))
+    # Agrupa frases em blocos equilibrados
+    _alvo_chars = max(80, _total // _n_blocos)
+    _blocos: list[str] = []
+    _buf: list[str] = []
+    _buf_len = 0
+    for _frase in _frases:
+        _buf.append(_frase)
+        _buf_len += len(_frase)
+        # Fecha bloco quando atingiu o alvo E ainda há frases restantes
+        if _buf_len >= _alvo_chars and len(_blocos) < _n_blocos - 1:
+            _blocos.append(" ".join(_buf))
+            _buf, _buf_len = [], 0
+    if _buf:
+        _blocos.append(" ".join(_buf))
+
+    # Garante que cada bloco respeita o limite do Discord
+    _blocos = [b[:_DISCORD_MSG_MAX] for b in _blocos if b.strip()]
+
+    # Envia cada bloco com typing simulado e pausa entre eles
+    for _i, _bloco in enumerate(_blocos):
+        await _digitar_e_enviar(channel, _bloco, reply_msg if _i == 0 else None)
+        if _i < len(_blocos) - 1:
+            # Pausa cresce levemente a cada parte (como humano que pensa enquanto digita)
+            _pausa = random.uniform(1.8, 3.5) + (_i * 0.4)
+            await asyncio.sleep(_pausa)
+
 
 
 # ── Catálogo de bots conhecidos: nome → prefixo, slash e comandos comuns ─────
@@ -12781,39 +12788,6 @@ async def _on_message_impl(message: discord.Message):
     # Gatilho de nome e reply são aceitos apenas de usuários autorizados
     if _eh_dono or _eh_superior_ or _eh_mod_:
         mencionado = mencionado or _gatilho_nome or eh_resposta_ao_bot
-
-    # ── Auto-referência: alguém cobra Shell sobre algo que ele disse antes ────
-    # Detecta "você disse", "você prometeu", "o que você falou", etc.
-    # Ativado para qualquer usuário — cobrar consequências do que o bot disse é legítimo.
-    _REFERENCIA_SHELL_RE = re.compile(
-        r'\b(?:'
-        r'voc[eê]\s+(?:disse|falou|prometeu|garantiu|afirmou|ia\s+fazer|disse\s+que|falou\s+que)|'
-        r'o\s+que\s+voc[eê]\s+(?:disse|falou)|'
-        r'o\s+que\s+(?:voc[eê]\s+)?prometeu|'
-        r'lembra\s+(?:que\s+)?voc[eê]|'
-        r'n[aã]o\s+(?:foi|era)\s+isso\s+que\s+voc[eê]|'
-        r'mas\s+voc[eê]\s+(?:disse|falou|prometeu)|'
-        r'voc[eê]\s+(?:tinha|tava|estava)\s+(?:falando|dizendo)|'
-        r'eu\s+achei\s+que\s+voc[eê]|'
-        r'voc[eê]\s+mesmo\s+(?:disse|falou)'
-        r')\b',
-        re.IGNORECASE,
-    )
-    if (
-        not mencionado
-        and not _e_trivial
-        and not message.author.bot
-        and _REFERENCIA_SHELL_RE.search(conteudo)
-    ):
-        # Verifica se Shell tem falas recentes neste canal para justificar a cobrança
-        _falas_shell = [
-            m for m in canal_memoria.get(message.channel.id, [])
-            if m.get("autor") == "Shell"
-        ]
-        if _falas_shell:
-            mencionado = True
-            log.info(f"[AUTO-REF] {autor} referenciou fala anterior do Shell: {conteudo[:60]!r}")
-
 
     # ── Visão: processar anexos quando o bot é acionado ──────────────────────
     # Verifica anexos na mensagem atual E na mensagem referenciada (reply)
