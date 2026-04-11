@@ -737,6 +737,8 @@ def salvar_dados():
 historico_mensagens = defaultdict(list)
 historico_conteudo: dict[int, list] = defaultdict(list)
 infracoes: dict[int, int] = defaultdict(int)
+ultima_infracao: dict[int, float] = {}  # timestamp da última infração por user_id
+_DECAIMENTO_INFRACOES_DIAS = 7  # infrações resetam após N dias sem nova ocorrência
 silenciamentos: dict[int, int] = defaultdict(int)
 ultimo_motivo: dict[int, str] = {}
 conversas: dict[int, dict] = {}
@@ -845,6 +847,10 @@ def registrar_relacao(uid1: int, uid2: int, tipo: str, observacao: str = ""):
     chave = _chave_relacao(uid1, uid2)
     agora_iso = agora_utc().isoformat()
     if chave not in relacoes_membros:
+        # Limite máximo: 500 relações — remove a mais antiga se necessário
+        if len(relacoes_membros) >= 500:
+            _mais_antiga = min(relacoes_membros, key=lambda k: relacoes_membros[k].get("ultima", ""))
+            del relacoes_membros[_mais_antiga]
         relacoes_membros[chave] = {"tipo": tipo, "forca": 1, "ultima": agora_iso, "observacoes": []}
     rel = relacoes_membros[chave]
     rel["tipo"] = tipo
@@ -1869,11 +1875,13 @@ async def verificar_url_virustotal(url: str) -> dict | None:
         return None
 
 
-async def processar_links(message: discord.Message):
-    """Verifica links na mensagem com o VirusTotal e alerta se malicioso."""
+async def processar_links(message: discord.Message) -> bool:
+    """Verifica links na mensagem com o VirusTotal e alerta se malicioso.
+    Retorna True se a mensagem foi removida (para interromper fluxo principal).
+    """
     urls = URL_PATTERN.findall(message.content)
     if not urls:
-        return
+        return False
 
     for url in urls:
         # Ignorar convites do Discord (já tratados pela regra de invite)
@@ -1900,7 +1908,9 @@ async def processar_links(message: discord.Message):
             aviso_vt = await _aviso_infrator(message.author.mention, contexto_vt)
             await _safe_send(message.channel, aviso_vt)
             log.warning(f"Link bloqueado de {message.author.display_name}: {url} | malic={maliciosos} susp={suspeitos}")
-            return  # Uma notificação por vez é suficiente
+            return True  # mensagem já tratada — interrompe fluxo principal
+
+    return False
 
 
 # ── Auditoria de ofensas ──────────────────────────────────────────────────────
@@ -5445,7 +5455,7 @@ async def processar_ordem(message: discord.Message) -> bool:
     # Uso: "Shell, aprenda que o comando rank do Mudae é $rank"
     # Uso: "Shell, o prefixo da valentina é 7!"
     if _addr and re.search(
-        r'␈(aprend[ae]r?\s+que|o\s+prefixo\s+d[ao]\s+|comando\s+\w+\s+d[ao]\s+\w+\s+[eé])',
+        r'\b(aprend[ae]r?\s+que|o\s+prefixo\s+d[ao]\s+|comando\s+\w+\s+d[ao]\s+\w+\s+[eé])',
         conteudo.lower()
     ):
         _m_ensinar_cmd = re.search(
@@ -5495,7 +5505,7 @@ async def processar_ordem(message: discord.Message) -> bool:
     # ── relatório de aprendizado de comandos (dono consulta banco) ───────────
     # Uso: "Shell, relatório de aprendizado" ou "Shell, o que você aprendeu?"
     if _addr and re.search(
-        r'␈(relat[oó]rio\s+(?:de\s+)?aprendizado|o\s+que\s+(vc|você)\s+aprendeu|comandos\s+aprendidos|estat[ií]stica[s]?\s+(?:de\s+)?comando)␈',
+        r'\b(relat[oó]rio\s+(?:de\s+)?aprendizado|o\s+que\s+(vc|você)\s+aprendeu|comandos\s+aprendidos|estat[ií]stica[s]?\s+(?:de\s+)?comando)\b',
         conteudo.lower()
     ):
         if APREND_DISPONIVEL:
@@ -5512,11 +5522,11 @@ async def processar_ordem(message: discord.Message) -> bool:
     # ── perfil de bot específico (dono consulta o que Shell sabe de um bot) ──
     # Uso: "Shell, o que você sabe do Mudae?" / "Shell, perfil do bot valentina"
     elif _addr and re.search(
-        r'␈(o\s+que\s+(vc|você)\s+sabe\s+(?:do|sobre|de)\s+|perfil\s+(?:do\s+)?bot\s+)(\w+)',
+        r'\b(o\s+que\s+(vc|você)\s+sabe\s+(?:do|sobre|de)\s+|perfil\s+(?:do\s+)?bot\s+)(\w+)',
         conteudo.lower()
     ):
         _m_bot_query = re.search(
-            r'␈(?:o\s+que\s+(?:vc|você)\s+sabe\s+(?:do|sobre|de)\s+|perfil\s+(?:do\s+)?bot\s+)(\w+)',
+            r'\b(?:o\s+que\s+(?:vc|você)\s+sabe\s+(?:do|sobre|de)\s+|perfil\s+(?:do\s+)?bot\s+)(\w+)',
             conteudo.lower()
         )
         if _m_bot_query and APREND_DISPONIVEL:
@@ -6211,7 +6221,7 @@ async def processar_ordem(message: discord.Message) -> bool:
                 if _aprend_inst:
                     # Extrai nome do bot da mensagem para buscar no banco
                     _m_bot_nome = re.search(
-                        r'␈(?:d[ao]|para\s+o?)\s+([a-zA-Z][a-zA-Z0-9_-]{1,20})␈',
+                        r'\b(?:d[ao]|para\s+o?)\s+([a-zA-Z][a-zA-Z0-9_-]{1,20})\b',
                         conteudo, re.IGNORECASE
                     )
                     if _m_bot_nome:
@@ -9046,6 +9056,15 @@ async def _atualizar_perfil_usuario(user_id: int, autor: str, mensagem: str, res
     Também extrai episódios memoráveis (eventos específicos) para memória de longo prazo.
     Rastreia dados comportamentais: horário ativo, canal frequente, contagem.
     """
+    # Limite máximo de perfis: remove o mais antigo se ultrapassar 200
+    if user_id not in perfis_usuarios and len(perfis_usuarios) >= 200:
+        _uid_antigo = min(
+            perfis_usuarios,
+            key=lambda u: perfis_usuarios[u].get("ultima_vez_visto", "")
+        )
+        del perfis_usuarios[_uid_antigo]
+        log.debug(f"[PERFIS] Limite 200 atingido — removido perfil mais antigo: uid={_uid_antigo}")
+
     perfil = perfis_usuarios.setdefault(user_id, {
         "resumo": "", "n": 0, "atualizado": "", "episodios": [],
         "preferencias": [], "ultima_vez_visto": "", "horarios": [], "canais": {},
@@ -9520,8 +9539,15 @@ ESCALA_SILENCIO = [
 ]
 
 async def silenciar(membro: discord.Member, canal, motivo: str):
-    # Verifica se há restrição do proprietário sobre este membro
-    _regras_ativas = _regras_membro.get(membro.display_name.lower(), [])
+    # Fix: valida canal antes de qualquer operação que dependa dele
+    if canal is None:
+        log.warning(f"[SILENCIAR] canal=None ao tentar silenciar {membro.display_name} ({membro.id}) — abortando.")
+        return
+
+    # Fix: usa user_id (fixo) para lookup de regras, com fallback para display_name (legado)
+    _chave_regra_id = str(membro.id)
+    _chave_regra_nome = membro.display_name.lower()
+    _regras_ativas = _regras_membro.get(_chave_regra_id) or _regras_membro.get(_chave_regra_nome, [])
     if _regras_ativas:
         _tem_restricao = any(
             "autoriza" in r or "hipótese alguma" in r or "hipotese alguma" in r or "proibido" in r
@@ -10510,12 +10536,40 @@ async def _task_rotina_saudacao():
         except Exception as e:
             log.warning(f"[SAUDACAO] task erro: {e}")
 
+async def _tarefa_limpeza_periodica():
+    """Remove entradas antigas de historico_mensagens e historico_conteudo a cada hora."""
+    await asyncio.sleep(60)  # aguarda inicialização
+    while True:
+        try:
+            import time as _time
+            _limite = _time.time() - 3600  # mantém apenas última hora
+            for uid in list(historico_mensagens.keys()):
+                historico_mensagens[uid] = [t for t in historico_mensagens[uid] if t > _limite]
+                if not historico_mensagens[uid]:
+                    del historico_mensagens[uid]
+            for uid in list(historico_conteudo.keys()):
+                historico_conteudo[uid] = [(t, c) for t, c in historico_conteudo[uid] if t > _limite]
+                if not historico_conteudo[uid]:
+                    del historico_conteudo[uid]
+            log.debug(f"[LIMPEZA] historico: {len(historico_mensagens)} users flood, {len(historico_conteudo)} users conteudo")
+        except Exception as _e:
+            log.warning(f"[LIMPEZA] Erro na limpeza periódica: {_e}")
+        await asyncio.sleep(3600)  # executa a cada hora
+
+
 @client.event
 async def on_ready():
     global _humor_sessao, _mem, MEMORIA_OK, _webhook_server
     carregar_config()
     carregar_dados()
     print(f"Conectado como {client.user}")
+
+    # Fix: limpa historico_groq a cada reinício para evitar contexto incoerente de sessões antigas
+    historico_groq.clear()
+    log.info("[on_ready] historico_groq limpo — sessão nova iniciada sem contexto residual.")
+
+    # Inicia tarefa de limpeza periódica de memória de flood/conteúdo
+    asyncio.ensure_future(_tarefa_limpeza_periodica())
     guild = client.get_guild(SERVIDOR_ID)
     if guild:
         pode = tem_permissao_moderacao(guild)
@@ -11038,7 +11092,12 @@ async def on_reaction_add(reaction: discord.Reaction, user):
                 )
             except Exception:
                 pass
+            import time as _time
+            _ts_now = _time.time()
+            if _ts_now - ultima_infracao.get(membro.id, 0) > _DECAIMENTO_INFRACOES_DIAS * 86400:
+                infracoes[membro.id] = 0
             infracoes[membro.id] += 1
+            ultima_infracao[membro.id] = _ts_now
             salvar_dados()
             canal_audit = reaction.message.guild.get_channel(_canal_auditoria_id())
             if canal_audit:
@@ -12420,10 +12479,23 @@ async def _on_message_impl(message: discord.Message):
         txt_flood = random.choice(_AVISOS_FLOOD).format(m=message.author.mention)
         await message.channel.send(txt_flood)
         log.warning(f"Flood detectado: {autor}")
+        # Integra flood ao sistema de infrações — punições progressivas
+        import time as _time
+        _ts_flood = _time.time()
+        if _ts_flood - ultima_infracao.get(message.author.id, 0) > _DECAIMENTO_INFRACOES_DIAS * 86400:
+            infracoes[message.author.id] = 0
+        infracoes[message.author.id] += 1
+        ultima_infracao[message.author.id] = _ts_flood
+        _flood_count = infracoes[message.author.id]
+        if _flood_count >= 3 and message.guild:
+            _membro_flood = message.guild.get_member(message.author.id)
+            if _membro_flood:
+                await silenciar(_membro_flood, message.channel, "flood repetido")
         return
 
     # ── Verificar links com VirusTotal ────────────────────────────────────────
-    await processar_links(message)
+    if await processar_links(message):
+        return  # mensagem já removida por link malicioso — não processar violações duplicadas
 
     # ── Detectar violações ────────────────────────────────────────────────────
     violacoes = detectar_violacoes(conteudo)
@@ -12440,7 +12512,14 @@ async def _on_message_impl(message: discord.Message):
         if _pode_divulgar:
             violacoes = [v for v in violacoes if "divulgação" not in v[0]]
     if violacoes:
+        # Decaimento temporal: reseta contador se a última infração foi há mais de N dias
+        import time as _time
+        _agora_ts = _time.time()
+        _ultima_ts = ultima_infracao.get(message.author.id, 0)
+        if _agora_ts - _ultima_ts > _DECAIMENTO_INFRACOES_DIAS * 86400:
+            infracoes[message.author.id] = 0
         infracoes[message.author.id] += 1
+        ultima_infracao[message.author.id] = _agora_ts
         count = infracoes[message.author.id]
 
         categoria_atual = violacoes[0][0].split(",")[0].strip()
