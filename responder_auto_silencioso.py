@@ -1442,17 +1442,42 @@ SUBSTITUICOES = str.maketrans({
 })
 
 # ── Palavrões e xingamentos gerais ───────────────────────────────────────────
+# Sempre punidos: xingamentos diretos, combinações ofensivas claras
 PALAVRAS_VULGARES = [
-    "porra", "caralho", "merda", "foda", "fodase", "fodasse",
-    "bosta", "bunda", "cu", "cuzao", "culhao", "arrombado",
+    "fodase", "fodasse",
+    "cuzao", "culhao", "arrombado",
     "safado", "safada", "vagabundo", "vagabunda", "vadia",
     "sacana", "babaca", "imbecil", "otario", "otaria",
     "palhaco", "bronha", "punheta", "punhetao",
     "fdp", "vsf", "vtc", "fds", "krl", "pqp",
     "vai se foder", "vai tomar no", "tomar no cu",
     "vai a merda", "vai pro inferno",
-    "rato no cu", "ratomanocu", "vai tomar no cu",
+    "rato no cu", "ratomanocu",
     # "idiota" removido — termo casual comum; apenas punir se combinado com alvo discriminatório
+]
+
+# Palavrões CONTEXTUAIS — muito comuns em PT-BR como exclamações neutras.
+# Só punem quando claramente direcionados a uma pessoa.
+# Ex OK: "porra, que jogo bom!" / "isso é foda!" / "caralho olha isso"
+# Ex PUNIR: "você é uma merda" / "sua puta" / "vai tomar no cu"
+PALAVRAS_CONTEXTUAIS = [
+    "porra", "caralho", "merda", "foda", "bosta", "bunda", "cu",
+    "puta",  # "puta sorte" = OK | "sua puta" = punir
+]
+
+# Regex: detecta palavra contextual dirigida a alguém
+_CONTEXTUAL_ALVO = re.compile(
+    r'\b(seu|sua|esse|essa|aquele|aquela|vc|voce|você|ele|ela|filh[ao]|mãe|mae|pai|irmão|irma|filho)\s+'
+    r'(porra|caralho|merda|foda|bosta|bunda|cu|puta)\b'
+    r'|\b(porra|caralho|merda|foda|bosta|bunda|cu|puta)\s+'
+    r'(seu|sua|de\s+\w+|dessa|desse|daquele|daquela|filh[ao]|mãe|mae|nojent|fedorent|feio|feia|lixo)\b',
+    re.IGNORECASE
+)
+
+# Frases de direcionamento vulgar (sempre punem mesmo sem regex de alvo)
+_FRASES_DIRECAO_VULGAR = [
+    "vai tomar", "toma no", "enfia no", "sai fora sua", "cala a boca sua",
+    "vai se", "vai pr[ao] inferno", "você é um lixo", "voce e um lixo",
 ]
 
 # Substrings vulgares em palavras compostas (sem verificação de limite de palavra)
@@ -1476,8 +1501,17 @@ CONTEUDO_SEXUAL = [
 ]
 
 # ── Racismo e discriminação étnica ───────────────────────────────────────────
+# Termos com duplo uso — só punem quando há alvo humano explícito
+_RACISMO_CONTEXTUAL = {"macaco", "macaca"}
+_RACISMO_ALVO = re.compile(
+    r'\b(seu|sua|esse|essa|aquele|aquela|vc|voce|você|ele|ela|negro|negra|preto|preta'
+    r'|o\s+\w+|a\s+\w+)\s+(macac[oa])\b'
+    r'|\b(macac[oa])\s+(fedorent|nojent|feio|feia|lixo|sujo|suja|volta|vai)\b',
+    re.IGNORECASE
+)
 RACISMO = [
-    "macaco", "macaca", "crioulo", "criulo",
+    # "macaco", "macaca" movidos para _RACISMO_CONTEXTUAL (verificação de alvo obrigatória)
+    "crioulo", "criulo",
     "negao", "mulatao", "cabelo duro", "cabelo pixaim", "cabelo ruim",
     "preto feio", "negro feio", "preto de alma branca",
     "volta pra africa", "volta para africa", "nao sao gente",
@@ -1694,7 +1728,7 @@ def detectar_violacoes(mensagem: str) -> list[tuple[str, str]]:
 
     msg_norm = normalizar(texto_limpo)
 
-    # Palavrões: sempre punidos
+    # Palavrões sempre punidos (xingamentos diretos)
     for palavra in PALAVRAS_VULGARES + palavras_custom["vulgares"]:
         hit = (
             contem_ambigua_com_contexto(msg_norm, palavra)
@@ -1704,6 +1738,20 @@ def detectar_violacoes(mensagem: str) -> list[tuple[str, str]]:
         if hit:
             violacoes.append((f"vocabulário vulgar, regra número 5 dos canais em {CANAL_REGRAS()}", palavra))
             break
+
+    # Palavrões contextuais: só punem se direcionados a alguém
+    # (porra, caralho, merda, foda, bosta, bunda, cu, puta são exclamações comuns no PT-BR)
+    if not violacoes:
+        for palavra in PALAVRAS_CONTEXTUAIS:
+            if contem_fuzzy(msg_norm, palavra):
+                # Verifica direcionamento explícito a uma pessoa
+                if _CONTEXTUAL_ALVO.search(texto_limpo):
+                    violacoes.append((f"vocabulário vulgar, regra número 5 dos canais em {CANAL_REGRAS()}", palavra))
+                    break
+                # Frases de direcionamento vulgar (sempre punem)
+                if any(re.search(f, texto_limpo, re.IGNORECASE) for f in _FRASES_DIRECAO_VULGAR):
+                    violacoes.append((f"vocabulário vulgar, regra número 5 dos canais em {CANAL_REGRAS()}", palavra))
+                    break
 
     # Palavrões compostos + customizados compostos
     if not violacoes:
@@ -1729,20 +1777,27 @@ def detectar_violacoes(mensagem: str) -> list[tuple[str, str]]:
     # Discriminação: tolerância estrita + customizadas
     for termo in DISCRIMINACAO + palavras_custom["discriminacao"]:
         if contem_fuzzy_estrito(msg_norm, termo):
-            # Termos LGBTfóbicos que são usados como gíria casual entre membros
-            # Só pune se há alvo explícito ou intenção discriminatória clara
             termo_norm = normalizar(termo)
+            # LGBTfobia usada como gíria casual entre membros — só pune com alvo explícito
             if termo_norm in {normalizar(g) for g in _LGBTFOBIA_GIRIA}:
-                # Verifica se é uso como slur (atacando alguém) ou gíria casual
                 if not _LGBTFOBIA_ALVO.search(texto_limpo):
                     continue  # gíria casual entre membros — ignora
+            # Termos raciais com duplo uso — só pune quando há alvo humano explícito
+            if termo_norm in {normalizar(t) for t in _RACISMO_CONTEXTUAL}:
+                if not _RACISMO_ALVO.search(texto_limpo):
+                    continue  # uso neutro (animal, jogo, brincadeira) — ignora
             violacoes.append((f"discriminação ou bullying, regra número 4 dos canais em {CANAL_REGRAS()}", termo))
             break
 
     # Convites não autorizados — ignora convites do próprio servidor
     _invite_match = DISCORD_INVITE.search(mensagem)
     if _invite_match:
-        violacoes.append((f"divulgação de servidor sem permissão, regra número 3 dos canais em {CANAL_REGRAS()}", _invite_match.group(0)))
+        _invite_link = _invite_match.group(0)
+        # Verifica se é o convite do próprio servidor (configurado via variável INVITE_CODE_PROPRIO)
+        _codigo_proprio = os.environ.get("INVITE_CODE_PROPRIO", "")
+        _e_proprio = bool(_codigo_proprio and _codigo_proprio.lower() in _invite_link.lower())
+        if not _e_proprio:
+            violacoes.append((f"divulgação de servidor sem permissão, regra número 3 dos canais em {CANAL_REGRAS()}", _invite_link))
 
     return violacoes
 
@@ -11385,34 +11440,7 @@ async def on_message(message: discord.Message):
     except Exception as e:
         log.error(f"Erro não tratado em on_message: {e}", exc_info=True)
 
-async def _processar_bot_ou_embed(message: discord.Message):
-    """Analisa mensagens de bots ou embeds para manter a interação contínua."""
-    conteudo_extra = ""
-    
-    # 1. Extrair texto de Embeds (onde a maioria dos bots manda info)
-    if message.embeds:
-        for emb in message.embeds:
-            tit = emb.title if emb.title else ""
-            desc = emb.description if emb.description else ""
-            conteudo_extra += f"\n[BOT EMBED] {tit}: {desc}"
-            # Opcional: ler campos (fields) do embed
-            for field in emb.fields:
-                conteudo_extra += f"\n{field.name}: {field.value}"
-
-    if not conteudo_extra and not message.content:
-        return # Nada para processar
-
-    # 2. Enviar para a lógica da IA
-    texto_final = f"{message.content} {conteudo_extra}".strip()
-    log.info(f"[CONTÍNUO] Processando resposta de bot/embed em #{message.channel}")
-    
-    # Aqui chamamos a tua função de IA padrão
-    resposta = await responder_com_groq(
-        texto_final, 
-        canal_id=str(message.channel.id)
-    )
-    if resposta:
-        await message.reply(resposta)
+# Função _processar_bot_ou_embed removida (código morto — assinatura errada e nunca chamada)
 
 async def _on_message_impl(message: discord.Message):
     if message.author == client.user:
@@ -11521,7 +11549,7 @@ async def _on_message_impl(message: discord.Message):
         # Verifica se há conversa ativa de proprietário/colaborador no canal
         _conversa_autorizada_ativa = False
         for _uid_conv in list(conversas_groq.keys()) + list(conversas.keys()):
-            _estado = conversas_groq.get(_uid_conv) or conversas.get(_uid_uid if (_uid_uid := _uid_conv) else 0)
+            _estado = conversas_groq.get(_uid_conv) or conversas.get(_uid_conv)
             if isinstance(_estado, dict) and _estado.get("canal") == message.channel.id:
                 # Verifica se é proprietário ou colaborador
                 _membro_conv = message.guild.get_member(_uid_conv) if message.guild else None
@@ -11529,27 +11557,12 @@ async def _on_message_impl(message: discord.Message):
                     _conversa_autorizada_ativa = True
                     break
 
-        # Padrões de eventos autônomos: economia, boas-vindas, conquistas
-        # Evento autônomo: apenas eventos reais (moedas ganhas, level up, boas-vindas)
-        # NÃO dispara para respostas de help, listas de comandos ou informações gerais
-        _e_resposta_help = bool(re.search(
-            r'\b(?:command|comando|list of|lista de|prefixo|prefix|usage|use|syntax|'
-            r'procurando um comando|experimenta?|\$search|help|ajuda|como usar|disponíveis)',
-            _txt_relevante, re.IGNORECASE
-        )) if _txt_relevante else False
-        _e_evento_autonomo = (not _e_resposta_help) and bool(re.search(
-            r'(tropa|moeda|coin|saldo|balance|bem.vindo|welcome|reward|recompensa|'
-            r'level.?up|subiu|ganhou|recebeu|setado|adicionado|removido|xp|exp)',
-            _txt_relevante, re.IGNORECASE
-        )) if _txt_relevante else False
-
-        # ── Não duplicar boas-vindas quando outro bot já tratou ──────────────
-        # Se o bot que enviou é reconhecidamente um bot de boas-vindas (Cench, etc.)
-        # e o embed é de boas-vindas, Shell NÃO reage com outra mensagem de boas-vindas.
-        _e_bv_de_bot_dedicado = (
-            _e_evento_autonomo
-            and bool(re.search(r'bem.vindo|welcome|seja bem', _txt_relevante, re.IGNORECASE))
-            and bool(re.search(r'cench|mee6|carl|loritta|dyno|wick|welcomer|greet', _bot_nome_lower, re.IGNORECASE))
+        # ── Shell só interage com bots quando há contexto claro ──────────────
+        # Boas-vindas de bot dedicado: Shell silencia para não duplicar
+        _e_bv_de_bot_dedicado = bool(
+            _txt_relevante
+            and re.search(r'bem.vindo|welcome|seja bem', _txt_relevante, re.IGNORECASE)
+            and re.search(r'cench|mee6|carl|loritta|dyno|wick|welcomer|greet', _bot_nome_lower, re.IGNORECASE)
         )
         if _e_bv_de_bot_dedicado:
             log.debug(f"[BV] Boas-vindas já tratada pelo bot {_bot_nome_lower} — Shell silencia")
@@ -11558,9 +11571,8 @@ async def _on_message_impl(message: discord.Message):
         _deve_interagir_bot = (
             _bot_mencionou_shell
             or _cmd_recente_shell
-            or (_bot_no_catalogo and _conversa_autorizada_ativa and _txt_relevante)
-            or (_bot_no_catalogo and _e_evento_autonomo)  # reage a eventos conhecidos sem precisar de conversa ativa
-            or (_is_webhook and _txt_relevante)           # webhooks com conteúdo sempre processados
+            or (_bot_no_catalogo and _conversa_autorizada_ativa and bool(_txt_relevante))
+            or (_is_webhook and bool(_txt_relevante))
         )
 
         if not _deve_interagir_bot:
@@ -11656,34 +11668,10 @@ async def _on_message_impl(message: discord.Message):
                     _conversa_autorizada_ativa = True
                     break
 
-        # Padrões de eventos autônomos (segunda verificação — bloco de execução)
-        # Exclui respostas de help/lista de comandos
-        _e_resposta_help_2 = bool(re.search(
-            r'\b(?:command|comando|list of|lista de|prefixo|prefix|usage|use|syntax|'
-            r'procurando um comando|experimenta?|\$search|help|ajuda|como usar|disponíveis)',
-            _txt_relevante, re.IGNORECASE
-        )) if _txt_relevante else False
-        _e_evento_autonomo = (not _e_resposta_help_2) and bool(re.search(
-            r'(tropa|moeda|coin|saldo|balance|bem.vindo|welcome|reward|recompensa|'
-            r'level.?up|subiu|ganhou|recebeu|setado|adicionado|removido|xp|exp)',
-            _txt_relevante, re.IGNORECASE
-        )) if _txt_relevante else False
-
-        # Não duplicar boas-vindas de bot dedicado
-        _e_bv_bot2 = (
-            _e_evento_autonomo
-            and bool(re.search(r'bem.vindo|welcome|seja bem', _txt_relevante, re.IGNORECASE))
-            and bool(re.search(r'cench|mee6|carl|loritta|dyno|wick|welcomer|greet', _bot_nome_lower, re.IGNORECASE))
-        )
-        if _e_bv_bot2:
-            log.debug(f"[BV] Boas-vindas já tratada pelo bot {_bot_nome_lower} — Shell silencia (bloco 2)")
-            return
-
         _deve_interagir_bot = (
             _bot_mencionou_shell
             or _cmd_recente_shell
             or (_bot_no_catalogo and _conversa_autorizada_ativa and bool(_txt_relevante))
-            or (_bot_no_catalogo and _e_evento_autonomo)
             or (_is_webhook and bool(_txt_relevante))
         )
 
