@@ -3613,6 +3613,19 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
         "Nunca repita a mesma pergunta que já foi respondida. Progrida para o próximo passo.\n"
         "Se o usuário respondeu 'sim' a algo: avance. Se respondeu 'não': encerre esse caminho.\n\n"
 
+        "SUAS PALAVRAS TÊM CONSEQUÊNCIAS — REGRA INVIOLÁVEL:\n"
+        "O contexto do canal mostra o que VOCÊ (Shell) disse nas linhas marcadas 'Shell: ...'.\n"
+        "Se você disse algo antes, é sua responsabilidade: não negue, não finja que não disse.\n"
+        "Se alguém cobrar 'você disse que ia fazer X': verifique o histórico. Se você disse, assuma.\n"
+        "  - Se você prometeu algo e fez: confirme brevemente.\n"
+        "  - Se você prometeu algo e não fez ainda: explique em UMA frase o que aconteceu.\n"
+        "  - Se você disse algo incorreto: corrija sem rodeios.\n"
+        "  - Se você NÃO disse o que estão alegando: discorde com firmeza, sem agressividade.\n"
+        "NUNCA diga 'não me lembro', 'não tenho certeza se disse' quando a fala está no histórico.\n"
+        "NUNCA negue autoria de uma fala que está registrada no contexto.\n"
+        "Quando alguém perguntar 'o que você disse antes?': cite o trecho relevante com precisão.\n"
+        "Você é responsável por cada palavra que saiu de você — isso é parte de quem você é.\n\n"
+
         "APRENDIZADO POR FEEDBACK — REGRAS CRÍTICAS:\n"
         "1. SEU NOME É SHELL — quando alguém usa 'Shell' numa mensagem estão falando COM VOCÊ.\n"
         "   Nunca responda com 'Entendi, Shell.' ou 'Sim, Shell.' — você é o Shell, não o destinatário.\n"
@@ -4354,7 +4367,12 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     mem = list(canal_memoria.get(canal_id or 0, []))
     ctx_canal = ""
     if mem:
-        linhas_ctx = [f"{m['autor']}: {m['conteudo'][:80]}" for m in mem[-5:]]
+        linhas_ctx = []
+        for m in mem[-5:]:
+            if m["autor"] == "Shell":
+                linhas_ctx.append(f"[VOCÊ disse]: {m['conteudo'][:80]}")
+            else:
+                linhas_ctx.append(f"{m['autor']}: {m['conteudo'][:80]}")
         ctx_canal = "\n=== CONVERSA RECENTE DO CANAL ===\n" + "\n".join(linhas_ctx) + "\n"
         # Injeta gírias aprendidas do servidor (max 20) para o modelo absorver o vocabulário
         if _girias_servidor:
@@ -8733,6 +8751,13 @@ async def _safe_send(
                     await reply_msg.reply(chunk)
                 else:
                     await channel.send(chunk)
+                # ── Registra fala do Shell na memória do canal ─────────────────
+                # Permite rastrear o que o bot disse e cobrar consequências
+                canal_memoria[channel.id].append({
+                    "autor": "Shell",
+                    "conteudo": chunk[:300],
+                    "ts": agora_utc().isoformat(),
+                })
                 break
             except discord.HTTPException as e:
                 if e.status == 429:
@@ -12756,6 +12781,39 @@ async def _on_message_impl(message: discord.Message):
     # Gatilho de nome e reply são aceitos apenas de usuários autorizados
     if _eh_dono or _eh_superior_ or _eh_mod_:
         mencionado = mencionado or _gatilho_nome or eh_resposta_ao_bot
+
+    # ── Auto-referência: alguém cobra Shell sobre algo que ele disse antes ────
+    # Detecta "você disse", "você prometeu", "o que você falou", etc.
+    # Ativado para qualquer usuário — cobrar consequências do que o bot disse é legítimo.
+    _REFERENCIA_SHELL_RE = re.compile(
+        r'\b(?:'
+        r'voc[eê]\s+(?:disse|falou|prometeu|garantiu|afirmou|ia\s+fazer|disse\s+que|falou\s+que)|'
+        r'o\s+que\s+voc[eê]\s+(?:disse|falou)|'
+        r'o\s+que\s+(?:voc[eê]\s+)?prometeu|'
+        r'lembra\s+(?:que\s+)?voc[eê]|'
+        r'n[aã]o\s+(?:foi|era)\s+isso\s+que\s+voc[eê]|'
+        r'mas\s+voc[eê]\s+(?:disse|falou|prometeu)|'
+        r'voc[eê]\s+(?:tinha|tava|estava)\s+(?:falando|dizendo)|'
+        r'eu\s+achei\s+que\s+voc[eê]|'
+        r'voc[eê]\s+mesmo\s+(?:disse|falou)'
+        r')\b',
+        re.IGNORECASE,
+    )
+    if (
+        not mencionado
+        and not _e_trivial
+        and not message.author.bot
+        and _REFERENCIA_SHELL_RE.search(conteudo)
+    ):
+        # Verifica se Shell tem falas recentes neste canal para justificar a cobrança
+        _falas_shell = [
+            m for m in canal_memoria.get(message.channel.id, [])
+            if m.get("autor") == "Shell"
+        ]
+        if _falas_shell:
+            mencionado = True
+            log.info(f"[AUTO-REF] {autor} referenciou fala anterior do Shell: {conteudo[:60]!r}")
+
 
     # ── Visão: processar anexos quando o bot é acionado ──────────────────────
     # Verifica anexos na mensagem atual E na mensagem referenciada (reply)
