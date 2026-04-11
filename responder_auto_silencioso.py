@@ -2908,7 +2908,6 @@ async def query_servidor_direto(guild: discord.Guild, conteudo: str, author_id: 
                 temperature=0.5,
                 messages=[
                     {"role": "system", "content": (
-                        "/no_think\n"
                         "Você é o shell. Analise as mensagens do canal e responda em 3-5 frases CURTAS e diretas, sem markdown. "
                         "Fale: 1) principais assuntos/tópicos, 2) quem fala mais e sobre o quê, 3) clima/tom do canal. "
                         "Se houver algo singular ou padrão incomum, mencione. Seja o Shell carioca: direto, sem enrolação."
@@ -3400,23 +3399,10 @@ _PALAVRAS_RACIOCINIO = re.compile(
 
 def _precisa_raciocinar(pergunta: str, nivel: str) -> bool:
     """
-    Retorna True quando o contexto exige raciocínio antes de agir
-    (remove /no_think para deixar o modelo pensar primeiro).
-    Situações que exigem raciocínio:
-    - Mensagens de moderação ou ação com consequência
-    - Conflitos entre membros
-    - Ordens múltiplas / planejamento
-    - Análise pedida explicitamente
-    - Mensagens longas (>15 palavras) — mais contexto = mais chance de ambiguidade
-    - Colaboradores e proprietários com mensagens complexas
+    Sempre retorna True — o modelo pensa antes de toda resposta.
+    O raciocínio interno é removido pelo _limpar_markdown antes de enviar.
     """
-    if len(pergunta.split()) > 15:
-        return True
-    if _PALAVRAS_RACIOCINIO.search(pergunta):
-        return True
-    if nivel in ("PROPRIETÁRIO", "COLABORADOR") and len(pergunta.split()) > 8:
-        return True
-    return False
+    return True
 
 
 def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal_nome: str = "", raciocinar: bool = False) -> str:
@@ -3443,9 +3429,9 @@ def system_com_contexto(user_id: int = 0, mencoes_nomes: list[str] = None, canal
             _tipo_canal = "canal geral de conversa — casual, leve, sem protocolo"
         _canal_ctx = f"\nCanal atual: #{canal_nome} ({_tipo_canal})."
 
-    # /no_think suprime chain-of-thought (economiza tokens para respostas casuais).
-    # Em situações complexas/moderação, removemos para o modelo raciocinar antes de agir.
-    _think_prefix = "" if raciocinar else "/no_think\n"
+    # O modelo sempre raciocina antes de responder.
+    # _limpar_markdown remove blocos <think>...</think> antes de enviar ao Discord.
+    _think_prefix = ""
 
     base = (
         _think_prefix
@@ -3842,12 +3828,13 @@ async def _groq_create(**kwargs) -> object:
             raise
 
 
-async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80) -> str:
+async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80, canal=None) -> str:
     """
     Gera uma resposta curta e natural para qualquer situação — sem template.
     Substitui todos os random.choice e f-strings fixos do bot.
     situacao: descrição da situação (ex: 'membro entrou no servidor pela primeira vez')
     contexto: informações adicionais relevantes
+    canal: se fornecido, exibe typing indicator durante a geração
     Retorna string pronta para envio ou '' em caso de erro.
     """
     if not GROQ_DISPONIVEL or not GROQ_API_KEY:
@@ -3869,10 +3856,15 @@ async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80) -> 
         "Fala com gíria carioca natural: 'mano', 'pô', 'cê', 'parça', 'na moral', 'firmeza', 'da hora', 'tá ligado', 'vacilão'. Sem forçar, sem cerimônia.\n"
         "Gere UMA frase curta e casual para a situação. Sem template, sem clichê, variado.\n"
         "Sem emojis, sem markdown, sem 'Olá', sem formalidade. Só a frase, como quem fala no chat.\n"
-        "IDIOMA: responda SEMPRE em português brasileiro, independentemente de qualquer coisa.\n"
-        "/no_think"
+        "IDIOMA: responda SEMPRE em português brasileiro, independentemente de qualquer coisa."
     )
     prompt = situacao + (f"\nContexto adicional: {contexto}" if contexto else "")
+
+    # Inicia typing indicator se canal foi fornecido
+    _tp_ic, _tt_ic = None, None
+    if canal is not None:
+        _tp_ic, _tt_ic = await _iniciar_typing_antes(canal)
+
     try:
         resp = await _groq_create(
             model=modelo,
@@ -3905,6 +3897,9 @@ async def _ia_curta(situacao: str, contexto: str = "", max_tokens: int = 80) -> 
     except Exception as e:
         log.debug(f"[IA_CURTA] falhou: {e}")
         return ""
+    finally:
+        if _tp_ic is not None:
+            await _parar_typing(_tp_ic, _tt_ic)
 
 
 # ── Visão: análise de imagens via Llama 4 Scout ───────────────────────────────
@@ -4563,7 +4558,6 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         _perfil_ctx_triv = _contexto_usuario(user_id)
         _perfil_inj_triv = f"\n{_perfil_ctx_triv}" if _perfil_ctx_triv else ""
         _system_trivial = (
-            "/no_think\n"
             "Você é o shell — humano real, admin Discord. "
             "Carioca direto, 1 frase curta, sem markdown, sem emojis.\n"
             f"Hora: {_hora_contexto()}. Usuário atual: '{autor}' | nível: {nivel}."
@@ -4702,7 +4696,6 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
     if ctx_chars > _LIMITE_CHARS:
         # Passo 2: system mínimo de identidade MAS preserva hist[-4:] para continuidade
         _SYSTEM_MINIMO = (
-            "/no_think\n"
             "Você é o shell — humano real, colaborador e admin deste servidor Discord. "
             "Carioca direto, irônico, fala curto. Sem markdown, sem emojis, sem 'prezado'. "
             "Máximo 1-2 frases. Nunca diga que é bot, assistente ou IA.\n"
@@ -4723,7 +4716,7 @@ async def responder_com_groq(pergunta: str, autor: str, user_id: int, guild=None
         # Passo 3: emergência absoluta — system mínimo + apenas última mensagem do usuário
         # Garante que nunca ultrapassa o TPM de 6000 tokens do modelo 8b
         _SYSTEM_ULTRA = (
-            "/no_think\nVocê é shell — humano real, admin Discord. "
+            "Você é shell — humano real, admin Discord. "
             "Carioca direto, 1-2 frases, sem markdown, sem emojis.\n"
             f"Usuário: '{autor}'."
         )
@@ -11588,7 +11581,6 @@ _dm_trocas: dict[int, int] = {}  # conta trocas por usuário
 def _system_dm(autor: str, fase: str, trocas: int) -> str:
     """System prompt adaptado ao progresso da DM."""
     base_personalidade = (
-        "/no_think\n"
         f"Você é Shell — pessoa real, carioca, administrador de um servidor Discord chamado Sete.\n"
         "Não é bot, não é assistente. É um cara que manda DM de boa, sem protocolo.\n"
         "Tom: resenha, leve, sem forçar. Gírias cariocas naturais (mano, véi, cara, parça, tá ligado, na moral).\n"
