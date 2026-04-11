@@ -1913,6 +1913,359 @@ async def processar_links(message: discord.Message) -> bool:
     return False
 
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MÓDULO DE DISCERNIMENTO CONTEXTUAL
+# Camadas de inteligência que calibram a moderação com base em contexto real.
+# Em vez de punir cegamente no match de keyword, o sistema analisa intenção,
+# confiança histórica, estado emocional e dinâmica de grupo antes de agir.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Cache de confiança (TTL 5 min para não recalcular a cada mensagem) ─────────
+_cache_confianca: dict[int, tuple[float, float]] = {}  # uid → (score, timestamp)
+_CONFIANCA_TTL = 300  # segundos
+
+# ── Cache de estado emocional recente por usuário ──────────────────────────────
+_estado_emocional_cache: dict[int, dict] = {}  # uid → {estado, ts}
+
+# ── Rastreador de pares em escalada de conflito ────────────────────────────────
+# chave: (uid_menor, uid_maior) → lista de timestamps de trocas tensas no canal
+_escalada_pares: dict[tuple[int, int], list[float]] = defaultdict(list)
+_JANELA_ESCALADA = 120   # segundos de janela para considerar troca como sequência
+_LIMITE_ESCALADA = 4     # número de trocas tensas para considerar escalada real
+
+
+def _calcular_confianca_usuario(membro: discord.Member) -> float:
+    """
+    Calcula score de confiança dinâmico (0.0 – 1.0) para um membro.
+
+    Componentes:
+    - Tempo de conta Discord     → conta velha = mais confiável (até +30 pts)
+    - Tempo no servidor          → membro antigo = mais confiável (até +30 pts)
+    - Histórico de infrações     → cada infração desconta pontos (-12 pts cada)
+    - Histórico de silenciamentos → cada silenciamento desconta mais (-20 pts)
+    - Perfil ativo (interações)  → usuário que interage regularmente (+10 pts)
+
+    Retorna valor entre 0.0 (zero confiança) e 1.0 (confiança total).
+    Resultado é cacheado por _CONFIANCA_TTL segundos.
+    """
+    import time as _t
+    agora_ts = _t.time()
+
+    cached = _cache_confianca.get(membro.id)
+    if cached and agora_ts - cached[1] < _CONFIANCA_TTL:
+        return cached[0]
+
+    score = 50.0  # linha de base neutra
+
+    # Idade da conta Discord (máx +30)
+    try:
+        dias_conta = (agora_utc() - membro.created_at.replace(tzinfo=timezone.utc)).days
+        score += min(30.0, dias_conta / 30.0)  # +1 ponto por mês, cap 30
+    except Exception:
+        pass
+
+    # Tempo no servidor (máx +30)
+    try:
+        if membro.joined_at:
+            dias_servidor = (agora_utc() - membro.joined_at.replace(tzinfo=timezone.utc)).days
+            score += min(30.0, dias_servidor / 10.0)  # +1 ponto por 10 dias, cap 30
+    except Exception:
+        pass
+
+    # Infrações (-12 por infração)
+    score -= infracoes.get(membro.id, 0) * 12.0
+
+    # Silenciamentos (-20 por silenciamento)
+    score -= silenciamentos.get(membro.id, 0) * 20.0
+
+    # Perfil ativo (+10 se tem histórico rico)
+    perfil = perfis_usuarios.get(membro.id, {})
+    if perfil.get("n", 0) > 20:
+        score += 10.0
+
+    score = max(0.0, min(100.0, score))
+    resultado = score / 100.0
+
+    _cache_confianca[membro.id] = (resultado, agora_ts)
+    return resultado
+
+
+async def _analisar_intencao(
+    texto: str,
+    violacoes_detectadas: list[tuple[str, str]],
+    contexto_canal: str,
+    confianca: float,
+) -> str:
+    """
+    Usa IA para determinar se uma violação detectada é genuína ou falso positivo.
+
+    Retorna um de:
+    - "punir"      → infração real, aplicar punição normalmente
+    - "avisar"     → borderline, apenas alertar sem registrar infração
+    - "ignorar"    → contexto deixa claro que não é ofensa (exclamação, gíria, ironia)
+
+    Só é chamada quando confiança > 0.3 (usuários sem histórico grave merecem
+    análise; reincidentes com score baixo são punidos sem análise adicional).
+    """
+    if not GROQ_DISPONIVEL or not GROQ_API_KEY:
+        return "punir"
+
+    # Usuários com histórico grave não passam pelo filtro de intenção
+    if confianca < 0.3:
+        return "punir"
+
+    # Discriminação e racismo nunca passam pelo filtro — tolerância zero
+    eh_discriminacao = any(
+        "discriminação" in d or "racismo" in d or "bullying" in d
+        for d, _ in violacoes_detectadas
+    )
+    if eh_discriminacao:
+        return "punir"
+
+    palavras_flagradas = [p for _, p in violacoes_detectadas]
+    categorias = list({d.split(",")[0].strip() for d, _ in violacoes_detectadas})
+
+    prompt_sistema = (
+        "Você é um analisador de intenção em mensagens de Discord em português brasileiro. "
+        "Sua tarefa: classificar se uma mensagem realmente viola as regras ou é falso positivo.\n\n"
+        "Contexto cultural importante:\n"
+        "- 'porra', 'caralho', 'merda', 'foda' são exclamações neutras e muito comuns no BR\n"
+        "- 'isso é foda' = 'isso é incrível' (positivo)\n"
+        "- 'que merda' = expressão de frustração, não xingamento direcionado\n"
+        "- Xingamento real: tem um ALVO claro ('você é uma merda', 'sua mãe é puta')\n"
+        "- Ironia e sarcasmo são comuns — considere o contexto da conversa\n\n"
+        "Responda APENAS com uma das palavras: PUNIR | AVISAR | IGNORAR\n"
+        "PUNIR = ofensa real e dirigida | AVISAR = borderline | IGNORAR = falso positivo"
+    )
+
+    prompt_usuario = (
+        f"Mensagem: \"{texto[:400]}\"\n"
+        f"Palavras flagradas: {palavras_flagradas}\n"
+        f"Categorias: {categorias}\n"
+        f"Contexto recente do canal:\n{contexto_canal[-600:] if contexto_canal else '(sem contexto)'}\n\n"
+        f"Classificação:"
+    )
+
+    try:
+        for modelo in [_MODELO_8B, _MODELO_SCOUT]:
+            if not _modelo_disponivel(modelo):
+                continue
+            r = await _groq_create(
+                model=modelo,
+                max_tokens=5,
+                temperature=0.0,
+                messages=[
+                    {"role": "system", "content": prompt_sistema},
+                    {"role": "user",   "content": prompt_usuario},
+                ],
+            )
+            resposta = r.choices[0].message.content.strip().upper()
+            if "IGNORAR" in resposta:
+                return "ignorar"
+            if "AVISAR" in resposta:
+                return "avisar"
+            return "punir"
+    except Exception as e:
+        log.debug(f"[DISCERNIMENTO] Erro em _analisar_intencao: {e}")
+
+    return "punir"  # fallback seguro
+
+
+async def _analisar_estado_emocional(texto: str, uid: int) -> dict:
+    """
+    Detecta estado emocional do autor com base no texto.
+
+    Retorna dict com:
+    - estado:         "angustia" | "raiva_extrema" | "celebracao" | "neutro" | "pedido_ajuda"
+    - requer_empatia: bool — True quando moderação deve ser substituída por cuidado
+    - intensidade:    float 0.0-1.0
+
+    Resultado cacheado por 60s por usuário — não chama IA em toda mensagem.
+    """
+    import time as _t
+    agora_ts = _t.time()
+
+    cache = _estado_emocional_cache.get(uid, {})
+    if cache and agora_ts - cache.get("ts", 0) < 60:
+        return cache
+
+    resultado = {"estado": "neutro", "requer_empatia": False, "intensidade": 0.0, "ts": agora_ts}
+
+    # Detecção rápida por padrões (sem IA) — para sinais inequívocos
+    _PADROES_ANGUSTIA = re.compile(
+        r'\b(me mat[ao]|quero morrer|não aguent[ao] mais|não consigo mais|to mal pra caramba'
+        r'|tô mal|tô muito mal|to chorando|to sofrendo|ninguém me entende|me sinto sozinho'
+        r'|sinto falta|saudade demais|cansei de tudo|cansado de tudo)\b',
+        re.IGNORECASE
+    )
+    _PADROES_RAIVA = re.compile(
+        r'\b(to com raiva|odeio|quero matar|vou matar|me deixa em paz|some daqui'
+        r'|vai tomar|te mato|vou te|odeio tudo|odeio esse)\b',
+        re.IGNORECASE
+    )
+    _PADROES_PEDIDO_AJUDA = re.compile(
+        r'\b(me ajuda|alguém me ajuda|como faço|não sei o que fazer|preciso de ajuda'
+        r'|me ajudem|alguém sabe|socorro)\b',
+        re.IGNORECASE
+    )
+    _PADROES_CELEBRACAO = re.compile(
+        r'\b(consegui|passei|aprovei|fui aprovad|terminei|acabei|primeiro lugar'
+        r'|ganhei|venci|finalizei|completei)\b',
+        re.IGNORECASE
+    )
+
+    if _PADROES_ANGUSTIA.search(texto):
+        resultado.update({"estado": "angustia", "requer_empatia": True, "intensidade": 0.85})
+    elif _PADROES_PEDIDO_AJUDA.search(texto):
+        resultado.update({"estado": "pedido_ajuda", "requer_empatia": True, "intensidade": 0.6})
+    elif _PADROES_CELEBRACAO.search(texto):
+        resultado.update({"estado": "celebracao", "requer_empatia": False, "intensidade": 0.7})
+    elif _PADROES_RAIVA.search(texto) and len(texto.split()) > 4:
+        resultado.update({"estado": "raiva_extrema", "requer_empatia": True, "intensidade": 0.75})
+
+    _estado_emocional_cache[uid] = resultado
+    return resultado
+
+
+async def _detectar_escalada_conflito(
+    canal_id: int,
+    uid1: int,
+    uid2: int,
+    texto: str,
+) -> bool:
+    """
+    Detecta quando dois usuários estão em escalada de conflito no mesmo canal.
+
+    Rastreia trocas entre pares: se o mesmo par troca >= _LIMITE_ESCALADA mensagens
+    tensas dentro de _JANELA_ESCALADA segundos, considera conflito em escalada.
+
+    Retorna True se escalada detectada (Shell deve intervir proativamente).
+    """
+    import time as _t
+
+    # Heurística rápida: a mensagem tem tom tenso?
+    _TOM_TENSO = re.compile(
+        r'\b(para de|para com isso|me deixa|vai embora|você é|vc é|cala boca'
+        r'|não fala|não mete|mete não|se mete não|se liga|acorda|você não sabe'
+        r'|vc não sabe|você tá errado|vc tá errado|tá louco|tá doido|mentira'
+        r'|mentiroso|ta mentindo|você mente)\b',
+        re.IGNORECASE
+    )
+
+    if not _TOM_TENSO.search(texto):
+        return False
+
+    chave = (min(uid1, uid2), max(uid1, uid2))
+    agora_ts = _t.time()
+
+    # Adiciona timestamp e remove entradas fora da janela
+    _escalada_pares[chave].append(agora_ts)
+    _escalada_pares[chave] = [
+        ts for ts in _escalada_pares[chave]
+        if agora_ts - ts <= _JANELA_ESCALADA
+    ]
+
+    return len(_escalada_pares[chave]) >= _LIMITE_ESCALADA
+
+
+async def _veredicto_discernimento(
+    membro: discord.Member,
+    violacoes: list[tuple[str, str]],
+    texto: str,
+    canal_id: int,
+    contexto_canal: str = "",
+) -> str:
+    """
+    Ponto central de discernimento — combina todas as camadas de análise
+    e retorna um veredito sobre como agir.
+
+    Vereditos possíveis:
+    - "punir"        → aplicar punição normalmente (delete + infração + silêncio se necessário)
+    - "avisar_apenas"→ delete da mensagem mas sem registrar infração (borderline)
+    - "ignorar"      → não agir — falso positivo confirmado
+    - "empatia"      → substituir moderação por resposta empática (estado emocional)
+
+    Fluxo:
+    1. Estado emocional (angústia/pedido de ajuda = empatia antes de punir)
+    2. Confiança do usuário (score baixo = punição direta sem análise de intenção)
+    3. Análise de intenção por IA (para usuários com histórico limpo)
+    """
+    # Camada 1: Estado emocional — tem precedência sobre tudo
+    estado = await _analisar_estado_emocional(texto, membro.id)
+    if estado["requer_empatia"] and estado["intensidade"] >= 0.7:
+        # Se a pessoa está em angústia, cuidado vem antes da regra
+        log.info(f"[DISCERNIMENTO] {membro.display_name} — estado emocional '{estado['estado']}' detectado, priorizando empatia")
+        return "empatia"
+
+    # Camada 2: Confiança histórica do membro
+    confianca = _calcular_confianca_usuario(membro)
+    log.debug(f"[DISCERNIMENTO] {membro.display_name} confiança={confianca:.2f}")
+
+    # Reincidente confirmado: não passa pela análise de intenção
+    if confianca < 0.25:
+        log.info(f"[DISCERNIMENTO] {membro.display_name} confiança baixa ({confianca:.2f}) — punição direta")
+        return "punir"
+
+    # Camada 3: Análise de intenção por IA
+    intencao = await _analisar_intencao(texto, violacoes, contexto_canal, confianca)
+
+    if intencao == "ignorar":
+        log.info(f"[DISCERNIMENTO] {membro.display_name} — IA classificou como falso positivo, ignorando")
+        return "ignorar"
+    if intencao == "avisar":
+        log.info(f"[DISCERNIMENTO] {membro.display_name} — IA classificou como borderline, só aviso")
+        return "avisar_apenas"
+
+    return "punir"
+
+
+# ── Resposta empática (usa IA para gerar fala natural de acolhimento) ──────────
+async def _responder_com_empatia(membro: discord.Member, canal, estado: dict) -> None:
+    """
+    Quando discernimento detecta angústia ou pedido de ajuda,
+    Shell responde com acolhimento em vez de aplicar moderação.
+    """
+    contexto_estado = {
+        "angustia":      "a pessoa parece estar passando por um momento difícil ou angústia emocional",
+        "pedido_ajuda":  "a pessoa está pedindo ajuda ou orientação",
+        "raiva_extrema": "a pessoa está muito frustrada ou com raiva de algo",
+    }.get(estado["estado"], "a pessoa está com um estado emocional intenso")
+
+    fala = await _ia_curta(
+        f"responder com empatia e acolhimento — {contexto_estado}",
+        contexto=f"membro: {membro.display_name}",
+        max_tokens=60,
+    )
+    if fala and canal:
+        await _safe_send(canal, f"{membro.mention} {fala}")
+
+
+# ── Intervenção proativa em conflito detectado ─────────────────────────────────
+async def _intervir_conflito(canal, uid1: int, uid2: int, guild: discord.Guild) -> None:
+    """
+    Quando escalada de conflito é detectada entre dois usuários,
+    Shell intervém com mediação natural antes que vire infração.
+    """
+    m1 = guild.get_member(uid1)
+    m2 = guild.get_member(uid2)
+    nomes = f"{m1.display_name} e {m2.display_name}" if m1 and m2 else "galera"
+
+    fala = await _ia_curta(
+        "intervir de forma descontraída para desacelerar uma briga entre dois membros antes que escale",
+        contexto=f"membros em conflito: {nomes}",
+        max_tokens=50,
+    )
+    if fala and canal:
+        mencoes = " ".join(filter(None, [m1.mention if m1 else None, m2.mention if m2 else None]))
+        await _safe_send(canal, f"{mencoes} {fala}")
+    # Limpa o rastreador desse par para não intervir repetidamente
+    _chave = (min(uid1, uid2), max(uid1, uid2))
+    _escalada_pares.pop(_chave, None)
+
+
+# ── Fin do módulo de discernimento ─────────────────────────────────────────────
+
 # ── Auditoria de ofensas ──────────────────────────────────────────────────────
 
 async def enviar_auditoria(guild: discord.Guild, membro: discord.Member, violacoes: list[str], msg_id: int):
@@ -12497,6 +12850,21 @@ async def _on_message_impl(message: discord.Message):
     if await processar_links(message):
         return  # mensagem já removida por link malicioso — não processar violações duplicadas
 
+    # ── Detectar escalada de conflito entre usuários ──────────────────────────
+    # Verifica se esta mensagem faz parte de uma troca tensa com outro membro
+    if message.guild and message.reference:
+        _ref_resolvida = getattr(message.reference, "resolved", None)
+        if isinstance(_ref_resolvida, discord.Message) and _ref_resolvida.author.id != message.author.id:
+            _uid_alvo_esc = _ref_resolvida.author.id
+            _escalada = await _detectar_escalada_conflito(
+                message.channel.id, message.author.id, _uid_alvo_esc, conteudo
+            )
+            if _escalada:
+                log.info(f"[DISCERNIMENTO] Escalada detectada entre {message.author.id} e {_uid_alvo_esc}")
+                asyncio.ensure_future(
+                    _intervir_conflito(message.channel, message.author.id, _uid_alvo_esc, message.guild)
+                )
+
     # ── Detectar violações ────────────────────────────────────────────────────
     violacoes = detectar_violacoes(conteudo)
     # Remove violação de convite se o membro tem cargo superior/mod (podem divulgar o servidor)
@@ -12512,6 +12880,50 @@ async def _on_message_impl(message: discord.Message):
         if _pode_divulgar:
             violacoes = [v for v in violacoes if "divulgação" not in v[0]]
     if violacoes:
+        # ── Camada de discernimento contextual ────────────────────────────────
+        # Antes de punir, verifica intenção, confiança e estado emocional.
+        # Contexto recente do canal para dar à IA uma janela de conversa.
+        _ctx_canal_disc = ""
+        try:
+            _mem_disc = _mem_canal.get(str(message.channel.id), deque(maxlen=20)) if _mem_canal else []
+            _ctx_canal_disc = "\n".join(
+                f"{e.get('autor','?')}: {e.get('conteudo','')}"
+                for e in list(_mem_disc)[-10:]
+            )
+        except Exception:
+            pass
+
+        _membro_disc = message.guild.get_member(message.author.id) if message.guild else None
+        _veredito = "punir"
+
+        if _membro_disc:
+            _veredito = await _veredicto_discernimento(
+                _membro_disc, violacoes, conteudo,
+                message.channel.id, _ctx_canal_disc,
+            )
+
+        # Veredito: empatia — não punir, acolher
+        if _veredito == "empatia":
+            _estado_disc = await _analisar_estado_emocional(conteudo, message.author.id)
+            await _responder_com_empatia(_membro_disc, message.channel, _estado_disc)
+            return
+
+        # Veredito: ignorar — falso positivo confirmado pela IA
+        if _veredito == "ignorar":
+            return
+
+        # Veredito: avisar_apenas — borderline, sem registrar infração
+        if _veredito == "avisar_apenas":
+            txt_av = await _aviso_infrator(
+                message.author.mention,
+                "mensagem no limite das regras — tome cuidado com o vocabulário"
+            )
+            await _safe_send(message.channel, txt_av)
+            return
+
+        # Veredito: punir — fluxo normal de moderação abaixo
+        # ──────────────────────────────────────────────────────────────────────
+
         # Decaimento temporal: reseta contador se a última infração foi há mais de N dias
         import time as _time
         _agora_ts = _time.time()
